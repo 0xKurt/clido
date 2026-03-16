@@ -737,7 +737,13 @@ alfred/
        /// Output format: text (default), json, stream-json
        #[arg(long, default_value = "text")]
        output_format: OutputFormat,
-       /// Model override
+       /// Use a named profile from config (e.g. cheap, review, local)
+       #[arg(long)]
+       profile: Option<String>,
+       /// Provider override: anthropic | openai | openrouter | local
+       #[arg(long)]
+       provider: Option<String>,
+       /// Model override (e.g. claude-sonnet-4-5 or openrouter/anthropic/claude-haiku-3-5)
        #[arg(long)]
        model: Option<String>,
        /// Resume a previous session
@@ -862,30 +868,96 @@ alfred/
 
 #### 3.4.1 Load configuration from file
 
-1. Config file location: `~/.config/alfred/config.toml` (using `directories`).
-2. Define `FileConfig` with serde deserialization:
+**Config loading order** (each level overrides the previous):
+1. Built-in defaults
+2. Global user config: `~/.config/alfred/config.toml`
+3. Project config: `.alfred/config.toml` in the current working directory (or the nearest ancestor directory containing it — walk upward, stop at home dir or fs root)
+4. CLI flags (highest priority)
 
-   ```toml
-   [provider]
-   type = "anthropic"         # anthropic | openai | openrouter | local
-   api_key_env = "ANTHROPIC_API_KEY"
-   model = "claude-opus-4-6"
-   base_url = "https://api.anthropic.com"
+This means a repo can have its own `.alfred/config.toml` that selects a different provider, model, or profile for that project without touching the global config.
 
-   [agent]
-   max_turns = 50
-   max_budget_usd = 5.0
+**Global config location:** `~/.config/alfred/config.toml` (via `directories`).
 
-   [tools]
-   allowed = []               # empty = all allowed
-   disallowed = ["Bash"]      # example
-   ```
+**Config schema:**
 
-3. Implement `Config::load() -> Result<Config>`:
-   - Check `$ALFRED_CONFIG_FILE`, then `~/.config/alfred/config.toml`.
-   - Parse with `toml` crate.
-   - Fall back to built-in defaults if file absent.
-4. Merge: CLI flags override config file values.
+```toml
+# ---
+# Default profile active for this machine/repo.
+# Override per-invocation with: alfred --profile cheap
+default_profile = "default"
+
+# ---
+# Named profiles. Each maps a name to a provider + model selection.
+# Use --profile <name> on the CLI to activate a profile for one run.
+[profile.default]
+provider = "anthropic"
+model = "claude-sonnet-4-5"
+api_key_env = "ANTHROPIC_API_KEY"    # env var to read key from
+base_url = "https://api.anthropic.com"
+
+[profile.cheap]
+provider = "openrouter"
+model = "anthropic/claude-haiku-3-5"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+
+[profile.local]
+provider = "local"
+model = "codellama"
+base_url = "http://localhost:11434/v1"  # Ollama
+
+[profile.review]
+provider = "anthropic"
+model = "claude-opus-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# ---
+# Agent defaults (apply to all profiles unless overridden by CLI flags).
+[agent]
+max_turns = 50
+max_budget_usd = 5.0
+
+# ---
+[tools]
+allowed = []               # empty = all allowed
+disallowed = ["Bash"]      # example
+```
+
+**Project-level config** (`.alfred/config.toml` in cwd or ancestor):
+- Uses the same schema.
+- Only the fields it specifies are merged; the rest inherit from the global config.
+- Example: a project that always uses OpenRouter + Sonnet only needs:
+
+  ```toml
+  default_profile = "project-model"
+
+  [profile.project-model]
+  provider = "openrouter"
+  model = "anthropic/claude-sonnet-4-5"
+  api_key_env = "OPENROUTER_API_KEY"
+  ```
+
+**Config::load():**
+1. Check `$ALFRED_CONFIG_FILE`; if set, use that path as the global config.
+2. Otherwise: `~/.config/alfred/config.toml`.
+3. Parse global config with `toml` crate. Fall back to empty defaults if file absent.
+4. Walk from cwd upward (stop at `$HOME` or fs root) to find `.alfred/config.toml`. If found, merge it: project config values override global config values.
+5. Merge: CLI flags override merged config.
+
+**API key validation:**
+When the selected profile's `api_key_env` is set but the corresponding environment variable is empty or absent, emit a clear, actionable error at startup (not an obscure HTTP error at first API call):
+```
+Error: API key not found for profile 'default'.
+Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
+~/.config/alfred/config.toml or .alfred/config.toml.
+```
+
+**Tests:**
+- Load config with no file present → verify defaults are used.
+- Load global config + project config → verify project values override global.
+- Select a non-existent profile → verify clear error message.
+- Select a profile with missing API key env var → verify helpful error at startup.
+- CLI `--profile cheap` → verify that profile's provider/model are active.
 
 #### 3.4.2 Load project instructions (`ALFRED.md` or `CLAUDE.md`)
 
@@ -1011,11 +1083,16 @@ alfred/
 
 1. In `alfred-providers/src/lib.rs`:
    - `fn build_provider(config: &ProviderConfig) -> Result<Arc<dyn ModelProvider>>`:
-     - Match on `config.provider_type`.
-     - Read API key from `config.api_key` or env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DASHSCOPE_API_KEY`).
+     - Resolve the active profile from config (using `--profile` flag or `default_profile`).
+     - Extract `provider_type`, `model`, and `api_key_env` from the resolved profile.
+     - If `--provider` CLI flag is set, override `provider_type`. If `--model` flag is set, override `model`.
+     - Read API key from the environment variable named by `api_key_env`. If the variable is missing or empty, return a helpful `AlfredError::Config` (see validation in 3.4.1) rather than proceeding to get an opaque HTTP 401.
 2. Wire into CLI config loading.
 3. All HTTP-based providers must use the shared retry/backoff logic from Phase 5.1.0 when making API calls (so rate limits and 5xx are handled consistently).
 4. Test: provider factory returns correct type for each config variant.
+5. Test: resolve profile `cheap` → verify OpenRouter provider and haiku model are selected.
+6. Test: `--profile review --model claude-haiku-3-5` → verify model override wins over profile.
+7. Test: profile with missing API key env var → verify `AlfredError::Config` with actionable message.
 
 ---
 
@@ -2307,29 +2384,41 @@ MCP servers are external processes that register as tools. They can read files, 
 
 **Dependency:** 9.2 complete.
 
-#### 9.4.1 Public API documentation
+**Documentation standard:** All documentation in this milestone — and throughout the project — must meet the bar defined in `devdocs/guides/software-development-best-practices.md` under "Documentation Rules". The short version: everything is documented, always, for both human readers and automated agents (including Alfred itself). Documentation is not a finishing step; it is part of each change.
 
-1. Add `//!` module-level doc comments to every `lib.rs`.
-2. Add `///` doc comments to every public type and function.
+#### 9.4.1 Public API documentation (agent-facing)
+
+1. Add `//!` module-level doc comments to every `lib.rs`. Describe the crate's purpose, key types, and important invariants.
+2. Add `///` doc comments to every public type, function, and trait method. Describe what it does, what it assumes, and what it returns or mutates — not just the name restated.
 3. Run `cargo doc --workspace --no-deps`; verify no warnings.
 4. Add doc tests (`///` examples) for key public functions.
+5. Write an `ALFRED.md` at the root of every crate in the workspace. This file is written for AI coding agents (including Alfred) working on that crate. Include:
+   - The crate's single responsibility.
+   - Which files to read first.
+   - Key invariants and constraints.
+   - Common pitfalls (things that look safe but are not).
+   - What tests to run to validate a change.
+   - Any special setup required.
 
-#### 9.4.2 User documentation
+#### 9.4.2 User documentation (human-facing)
 
 1. Write `README.md`:
    - Installation (`cargo install alfred` or binary releases).
    - Quick start (5 lines to first working agent call).
-   - Configuration reference.
-   - Tool reference (same format as `devdocs/REPORT.md` tool table).
-   - Provider setup (API keys, local models).
+   - Full configuration reference: **every key in `config.toml` and `.alfred/config.toml`**, its type, default, valid values, and a one-line description. No key ships undocumented.
+   - Profile system: how to define and switch profiles; example profiles for common use cases (cheap, local, review).
+   - Provider setup: API keys, env var names, local model setup (Ollama), OpenRouter setup.
+   - All CLI flags with examples, including `--profile`, `--provider`, `--model`.
+   - Error message reference: the most common user-visible errors and how to resolve them.
    - Session management.
    - MCP configuration.
-   - Memory system usage.
+   - Memory system usage (including `alfred memory prune`).
    - Planner mode.
    - Repo indexing.
-2. Write `CONTRIBUTING.md`: how to add a new tool, how to add a new provider.
+   - Self-improvement loop commands (`alfred reflect`, `alfred improve`).
+2. Write `CONTRIBUTING.md`: how to add a new tool, how to add a new provider, how to define a new profile, documentation requirements per change.
 
-#### 9.4.3 Architecture documentation
+#### 9.4.3 Architecture documentation (human-facing)
 
 1. Write `docs/architecture.md`:
    - Module dependency graph (mermaid diagram).
@@ -2338,6 +2427,19 @@ MCP servers are external processes that register as tools. They can read files, 
    - Tool schema format spec.
    - Task graph JSON schema.
    - Memory DB schema.
+   - Config schema: full field-by-field documentation of `config.toml`, `.alfred/config.toml`, and `pricing.toml`.
+   - Profile system design: how config loading, merging, and profile resolution work end to end.
+
+#### 9.4.4 Ongoing documentation hygiene
+
+The following rules apply continuously, not only during Milestone 9.4:
+
+- **Every new CLI flag** ships with: `--help` text, a `README.md` entry, and an example.
+- **Every new config key** ships with: a comment in the default config, a `README.md` entry, and clear validation error message when the value is wrong.
+- **Every new error message** is documented: what triggered it, what the user should do.
+- **Every new tool** has: a `ToolSchema.description` that an AI agent can use to decide when and how to call it, and a section in `README.md`.
+- **Every breaking change** has: a changelog entry and migration instructions before it ships.
+- **Stale documentation is a bug.** If a doc update is skipped, the change is not done.
 
 ---
 
@@ -2505,4 +2607,4 @@ Task-level dependencies (critical path):
 ---
 
 *Generated from: `devdocs/REPORT.md`, `devdocs/ARTIFACTS.md`, `devdocs/Instructions.md`*
-*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5)*
+*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5); weakness audit (5.6 edit safety, 5.2.3 stale-file detection, 3.4.2 ALFRED.md trust, 7.1.2 sandbox deprecation, 8.3.3 MCP trust, 5.1.0 shared retry, 4.7.2 subagent budget, 4.2.1/4.2.2 token safety, 4.8.3a planner checkpoint, 5.5.6 memory pruning, 4.4.1 pricing.toml, 8.2.1 exit status, 4.2.3 pinned context); provider/model switching (3.4.1 profiles + project config, --profile/--provider CLI flags, API key validation, 4.1.5 factory)*

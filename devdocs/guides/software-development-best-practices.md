@@ -309,20 +309,72 @@ A good PR description should include:
 
 ## Documentation Rules
 
-### Document the parts people cannot infer
+**Everything must be documented. Always. This is not optional.**
 
-Write documentation for:
-- system architecture
-- important workflows
-- configuration and environment requirements
-- operational procedures
-- invariants and trade-offs
+Documentation is not a finishing step. It is part of the work. A feature, change, or decision that is not documented is incomplete, regardless of whether the code compiles.
+
+There are two distinct audiences for documentation in this project. Both are required.
+
+---
+
+### Human-Readable Documentation
+
+Written for developers, operators, and contributors who need to understand, use, or maintain the system.
+
+**What to document:**
+
+- **System architecture** — how the major components relate and why they exist.
+- **Important workflows** — how to run, configure, test, deploy, or operate the system.
+- **Configuration and environment** — every configuration key, its type, default, valid values, and effect. No config key ships undocumented.
+- **CLI flags and subcommands** — every flag, its purpose, and an example.
+- **Error messages** — for every user-visible error, document what caused it and how to fix it.
+- **Design decisions and trade-offs** — for every non-obvious choice, explain why that path was taken and what the alternatives were.
+- **Invariants** — constraints the codebase assumes that are not enforced by the type system.
+- **Migration and breaking changes** — when behavior or schema changes, document what changed, what breaks, and how to migrate.
+
+**Standards:**
+
+- Write documentation when writing the code, not after. Updating docs in the same commit as the behavior change is mandatory.
+- Short and accurate beats long and outdated. Cut dead content aggressively.
+- Every example must be correct and, where possible, runnable.
+- Use plain language. Assume the reader is competent but unfamiliar with this specific system.
+- Do not document what the code obviously does. Document why it does it, what it assumes, and what can go wrong.
+
+**Where it lives:**
+
+- User-facing docs: `devdocs/` (plans, guides) and inline `--help` text in the CLI.
+- Architecture docs: `devdocs/plans/development-plan.md` and crate-level `README.md` files.
+- Operational docs: included with release packages and available via `alfred --help` and man pages (Phase 8.5).
+
+---
+
+### Development and Agent-Facing Documentation
+
+Written for automated systems — AI coding agents (including Alfred itself), CI pipelines, and future automated reviewers — that need structured, machine-interpretable guidance to work on the codebase correctly.
+
+**What to document:**
+
+- **`ALFRED.md` in each crate or module** — written for Alfred and other coding agents working on that code. Include: purpose of the crate, key invariants, which files to read first, common pitfalls, what not to do, and which tests to run to validate changes.
+- **API contracts** — function signatures, expected inputs, outputs, and panics in Rust doc comments (`///`). Not restating what the type already says — stating what the function assumes and guarantees.
+- **Test intent** — every test must have a comment or a descriptive name that makes its purpose clear to an agent reading it. An agent should be able to read a test and know what behavior it is validating and why.
+- **Tool and schema documentation** — every tool defined in `alfred-tools/` must have a clear description field in its `ToolSchema` that an agent (or model) can read to understand when and how to use it.
+- **Session and storage formats** — JSONL schema, memory DB schema, index format: document the schema in code and in `devdocs/`.
+- **Config schema** — the `pricing.toml`, `config.toml`, and `.alfred/config.toml` formats must be fully documented with field-by-field descriptions, not just examples.
+
+**Standards:**
+
+- Rust doc comments (`///`) on every public function, struct, enum, and trait. Not boilerplate — substantive descriptions.
+- `ALFRED.md` files are first-class artifacts. They must be kept up to date as the crate evolves. Stale agent instructions are worse than no instructions because they actively mislead.
+- If a behavior is subtle enough that a human would comment it, it is subtle enough that an agent needs it documented too.
+
+---
 
 ### Keep documentation close to the code
 
 - Update docs in the same change when behavior changes.
 - Prefer short, accurate documentation over long outdated documentation.
 - Examples should be runnable or obviously correct.
+- Stale documentation is a bug. Treat it as one.
 
 ## Decision-Making Rules
 
@@ -522,7 +574,8 @@ Before merging significant work, verify:
 - logs and diagnostics are sufficient
 - security implications were considered
 - performance implications were considered
-- documentation was updated where necessary
+- **human-readable documentation was updated** — every new flag, config key, behavior, error message, and design decision is documented
+- **agent-readable documentation was updated** — `///` doc comments on public API, `ALFRED.md` updated if the crate's purpose or invariants changed, tool schema descriptions updated if tool behavior changed
 - the change can be rolled back or recovered from if needed
 
 ## Final Rule
@@ -530,3 +583,5 @@ Before merging significant work, verify:
 Write software in a way that reduces future confusion.
 
 A good developer does not only deliver features. A good developer leaves behind systems that other people can trust, operate, and improve.
+
+Documentation is not separate from that. An undocumented system is one that can only be understood by the person who built it. That is not good enough.
