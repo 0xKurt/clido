@@ -249,21 +249,22 @@ Tests that require network access or API keys are gated behind `#[cfg(feature = 
 
 ## Coverage Targets
 
-These targets come directly from the main roadmap (`development-plan.md` Phase 9.1.1):
+These targets supersede those in `development-plan.md` Phase 9.1.1. Per-release floors are defined in Phase 5.4.2 of the roadmap. The table below shows the final (V4 / production) targets:
 
-| Crate | Target |
-|-------|--------|
-| `alfred-core` | ≥ 95% |
-| `alfred-tools` | ≥ 90% |
-| `alfred-providers` | ≥ 85% |
-| `alfred-context` | ≥ 85% |
-| `alfred-storage` | ≥ 85% |
-| `alfred-memory` | ≥ 85% |
-| `alfred-agent` | ≥ 80% |
-| `alfred-planner` | ≥ 80% |
-| `alfred-index` | ≥ 75% |
+| Crate | V1 floor | V2 floor | V3 floor | V4 / final target |
+|-------|----------|----------|----------|-------------------|
+| `alfred-core` | 85% | 90% | 92% | ≥ 95% |
+| `alfred-tools` | 80% | 85% | 87% | ≥ 90% |
+| `alfred-providers` | 75% | 80% | 85% | ≥ 85% |
+| `alfred-context` | 70% | 75% | 80% | ≥ 85% |
+| `alfred-storage` | 75% | 80% | 82% | ≥ 85% |
+| `alfred-memory` *(V3+)* | — | — | 70% | ≥ 85% |
+| `alfred-agent` | 70% | 75% | 80% | ≥ 80% |
+| `alfred-planner` *(V4+)* | — | — | — | ≥ 80% |
+| `alfred-index` *(V3+)* | — | — | 70% | ≥ 75% |
+| Workspace overall | 70% | 75% | 78% | ≥ 82% |
 
-Measure with `cargo tarpaulin --workspace`. Track coverage in CI and treat regressions as blocking.
+Measure with `cargo tarpaulin --workspace --all-features`. Track coverage in CI and treat regressions below the per-release floor as blocking.
 
 ## Crate-by-Crate Test Plan
 
@@ -449,7 +450,7 @@ If text-to-tool parsing is implemented, test:
 
 ### `alfred-memory` *(V3 and later)*
 
-**Goal:** Validate both in-session and persistent memory behavior. Target: ≥ 85% coverage.
+**Goal:** Validate both in-session and persistent memory behavior. Target: ≥ 85% coverage (V3 floor: 70%).
 
 **Test categories:**
 - in-memory store: save, search by keyword, list recent
@@ -460,10 +461,35 @@ If text-to-tool parsing is implemented, test:
 - memory injection into new session context
 - relevance ranking sanity (high-score results appear first)
 
+**Hybrid retrieval (new — required for V3):**
+- FTS5 search returns correct keyword matches from a fixture DB
+- Vector search (`sqlite-vec`) returns semantically similar entries (use a controlled pair of near-identical sentences, verify cosine similarity > threshold)
+- Reciprocal Rank Fusion merges FTS5 and vector results correctly (mock both result lists, verify final ordering is correct)
+- Query with no matches in either index returns an empty result set, not an error
+- Hybrid search does not regress latency beyond 50 ms for a 5,000-entry DB (benchmark with `criterion`)
+
+**Embedding engine (`fastembed-rs`) (new — required for V3):**
+- `EmbeddingEngine::embed()` returns a 384-dimension vector for a known input
+- Offline mode: if ONNX model cache is absent and `offline = true`, `embed()` returns `Err`, not a silent zero vector
+- `spawn_blocking` wrapper: calling `embed()` from an async context does not block the Tokio runtime (integration test with a 10ms sleep probe on the runtime thread)
+
+**Per-session write cap (new — required for V3):**
+- Writing 51 entries with `max_writes_per_session = 50` → 51st write returns `is_error: true` with the cap message; 50 entries in DB
+- Write counter resets at the start of a new session (counter is session-scoped, not persisted)
+
+**Deduplication (new — required for V3):**
+- Saving an entry with cosine similarity ≥ 0.95 to an existing entry → no duplicate inserted, existing entry's `created_at` updated
+- Saving an entry with similarity < 0.95 → new entry inserted
+
+**Capacity and eviction:**
+- Insert 10,001 entries with `max_entries = 10,000` → DB contains exactly 10,000 entries; oldest entry evicted
+- `alfred memory prune --keep 100` → exactly 100 entries remain
+
 **Risk-focused tests:**
 - irrelevant or stale memory does not crowd out recent tool results in context
-- large memory stores (1000+ entries) remain performant
+- large memory stores (1,000+ entries) remain performant; search latency < 50 ms on a 5,000-entry DB
 - memory DB survives process restart and reads correctly on re-open
+- schema migration (DB version 0 → 1) applies cleanly on re-open; no data loss (see Phase 9.7.2)
 
 ### `alfred-planner` *(V4 and later)*
 
@@ -526,6 +552,21 @@ Test:
 | User-denied tool | Permission prompt returns Deny; `is_error: true` in history |
 | Plan-mode denial | Bash blocked in plan mode; model continues with read-only tools |
 | Resume after interruption | Session killed mid-turn; `--resume` reconstructs and continues |
+| Permission prompt serialized | Two concurrent parallel read tools both trigger `AskUser`; verify exactly one prompt at a time, no garbled output, no deadlock within 5s |
+| Subagent permission shared | Two parallel subagents each require `AskUser`; verify serialized prompts, no deadlock |
+| Compaction failure fallback | Summarization call returns HTTP 500; verify compaction is skipped, agent continues, `warn!` event emitted |
+| Compaction hard-limit | Context exceeds model's hard token limit and summarization fails; verify user-visible error and halted turn (no panic) |
+| Unsupported provider V1 | Profile specifies `openrouter` in V1 binary; verify `AlfredError::Config` not runtime panic |
+| Model tool-use warning | Provider factory gets a model known not to support tool use; verify startup warning emitted, agent still starts |
+| Offline mode guard | `offline = true` with non-localhost provider URL; verify startup error |
+| Offline mode fastembed | `offline = true`, ONNX cache absent; verify `embed()` returns `Err` with clear message |
+| Windows BashTool degraded | No POSIX shell found on Windows (mocked); verify `is_error: true` with platform message |
+| LRU mtime+hash | File touched (mtime changes, content unchanged); verify cache returns cached content, mtime updated, no disk re-read |
+| LRU false-positive | Two edits within same mtime granularity; verify hash catches the change |
+| Schema migration session | Load V0 session fixture with V1 reader; verify migration applied, all fields parse |
+| Schema migration DB | Open V0 memory DB with V1 binary; verify schema migrated, no data loss |
+| pricing.toml stale | Pricing file >90 days old; verify staleness warning emitted at startup |
+| pricing.toml missing model | Request a model not in pricing table; verify warn+fallback, no panic |
 
 ## CLI and UX Test Plan
 
@@ -820,34 +861,48 @@ Track over time:
 Focus on:
 - core tools
 - agent loop correctness
-- context compaction
-- permission model
-- resume and recovery
+- context compaction (including failure fallback)
+- permission model (including serialized `AskUser` gate, no deadlock)
+- resume and recovery (stale-file detection)
 - end-to-end repository workflows
+- provider error handling (unsupported provider, missing API key)
+- `alfred doctor` V1 checks
+- Windows BashTool degradation path (if CI runs on Windows)
+- session schema versioning V0 → V1 migration
+- `pricing.toml` staleness warning
+- coverage floor ≥ 70% workspace-wide (see Phase 5.4.2)
 
 ### V1.5
 
 Add focus on:
-- cost tracking
-- bounded concurrency
-- JSON output contracts
+- cost tracking (per-session, prompt caching metrics)
+- bounded concurrency (semaphore, no starvation)
+- JSON output contracts (exit status taxonomy)
 - secret detection
-- operator diagnostics
+- operator diagnostics (`alfred doctor` MCP checks)
+- pricing.toml `update-pricing` command (offline-safe)
 
 ### V2
 
 Add focus on:
-- multi-provider compatibility
+- multi-provider compatibility (OpenAI, OpenRouter, Alibaba)
+- offline mode (`offline = true` enforcement, fastembed cache absent)
+- model tool-use compatibility warning
 - sandboxing
 - audit behavior
-- packaging
+- packaging (cross-platform builds, Windows Tier 2 validation)
 - startup and throughput performance
+- prompt caching metrics and cost accuracy
 
 ### V3
 
 Add focus on:
-- memory relevance
-- subagent correctness
+- memory relevance (hybrid FTS5 + vector search, relevance ranking)
+- embedding engine (fastembed ONNX, offline path, no runtime blocking)
+- per-session write cap
+- semantic deduplication
+- memory DB schema migrations
+- subagent correctness (budget propagation, permission gate sharing)
 - MCP interoperability
 - repository indexing quality
 
@@ -855,8 +910,10 @@ Add focus on:
 
 Add focus on:
 - planner quality versus baseline loop
-- fallback behavior
+- planner checkpoint/rollback (partial execution recovery)
+- fallback behavior (planner failure → reactive loop)
 - orchestration complexity versus measurable benefit
+- self-improvement loop correctness (instruction update proposals, safety guardrails)
 
 ## Final Rule
 

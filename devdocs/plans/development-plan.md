@@ -723,6 +723,8 @@ alfred/
 
 #### 3.2.1 Replace PoC arg parsing with `clap`
 
+**Reference:** Full CLI surface (all flags, subcommands, precedence, conflicts) is defined in [cli-interface-specification.md](cli-interface-specification.md). The struct below should include every V1 flag from the spec; extend with V1.5/V2 flags as those releases are implemented.
+
 1. In `alfred-cli/src/main.rs`, define `Cli` struct with `clap::Parser`:
 
    ```rust
@@ -764,11 +766,40 @@ alfred/
        /// Allowed tools (comma-separated)
        #[arg(long)]
        allowed_tools: Option<String>,
-       /// Disallowed tools (comma-separated)
-       #[arg(long)]
-       disallowed_tools: Option<String>,
-   }
-   ```
+      /// Disallowed tools (comma-separated)
+      #[arg(long)]
+      disallowed_tools: Option<String>,
+      /// Tools allowlist: only these tools are registered (comma-separated). Distinct from allowed_tools (which controls prompting).
+      #[arg(long)]
+      tools: Option<String>,
+      /// System prompt from file (replaces system_prompt if both set)
+      #[arg(long)]
+      system_prompt_file: Option<PathBuf>,
+      /// Append to system prompt (after file or --system-prompt)
+      #[arg(long)]
+      append_system_prompt: Option<String>,
+      /// Resume newest session for current project (cannot be used with --resume)
+      #[arg(long)]
+      continue_: bool,
+      /// Disable color and Unicode-heavy output
+      #[arg(long)]
+      no_color: bool,
+      /// Verbose: full tool I/O, timestamps
+      #[arg(short = 'v', long)]
+      verbose: bool,
+      /// (V1.5+) Quiet: suppress spinner, tool lifecycle, cost footer
+      #[arg(short = 'q', long)]
+      quiet: bool,
+      /// (V2+) Input format: text | stream-json (automation-only)
+      #[arg(long, default_value = "text")]
+      input_format: InputFormat,
+      /// (V1.5+) MCP config file path
+      #[arg(long)]
+      mcp_config: Option<PathBuf>,
+  }
+  ```
+
+  Support `--version` and `alfred version` subcommand per spec (D1). Add `OutputFormat`, `PermissionMode`, and `InputFormat` as `clap::ValueEnum`. Env var equivalents (e.g. `ALFRED_MODEL`, `ALFRED_PROFILE`, `NO_COLOR`) are documented in the CLI spec; resolve from env when the flag is not set.
 
 2. Add `OutputFormat` and `PermissionMode` as `clap::ValueEnum`.
 3. Wire parsed flags into `AgentConfig`.
@@ -783,13 +814,15 @@ alfred/
 4. Exit on Ctrl-C or `exit`/`quit` input.
 5. Test: `alfred` without args enters REPL; multi-turn conversation works.
 
-#### 3.2.3 Implement `list-sessions` subcommand
+#### 3.2.3 Implement session subcommands (canonical: `sessions list` / `show` / `fork`)
+
+**Reference:** Session command UX (output format, ID display, `--json`) is defined in [cli-interface-specification.md](cli-interface-specification.md) §9.
 
 1. Add `#[command(subcommand)] command: Option<Commands>` to `Cli`.
-2. Define `Commands` enum: `ListSessions`, `ShowSession { session_id: String }`.
-3. Implement in `alfred-cli/src/commands/list_sessions.rs`:
+2. Define canonical subcommands: `Sessions(SessionsCmd)` with `SessionsCmd::List`, `Show { session_id }`, `Fork { session_id }` (fork in V1.5). Use noun-first grouping: `alfred sessions list`, `alfred sessions show <id>`, `alfred sessions fork <id>`. Legacy aliases `list-sessions` and `show-session` remain as hidden aliases with a deprecation notice to stderr (see spec §16).
+3. Implement in `alfred-cli/src/commands/sessions.rs` (or list_sessions.rs):
    - Read session directory (see 3.3).
-   - Print session_id, first message preview, timestamp, turn count.
+   - Print session_id (first 8 + `...` + last 4 chars), first message preview (50 chars), timestamp, turn count, cost. Sort newest first.
 
 ---
 
@@ -858,7 +891,7 @@ alfred/
    - Enumerate `*.jsonl` files in project session dir.
    - For each: read first user line for preview, get file modified time.
    - Return sorted by modified time descending.
-2. Wire into `alfred list-sessions` command.
+2. Wire into `alfred sessions list` (and legacy `alfred list-sessions` with deprecation notice).
 
 ---
 
@@ -1071,6 +1104,20 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
    - Fallback: if model doesn't support tool use natively, inject tool schemas into system prompt as JSON and parse tool calls from text output.
 2. Test: integration test with a running Ollama instance (behind feature flag).
 
+**Offline / air-gapped mode:**
+
+Alfred is designed to be local-first. Users running Ollama (or another local provider) should be able to operate Alfred with zero internet access. Define this explicitly:
+
+- **Config key:** `[provider] offline = true` (or equivalently, use a profile with `provider_type = "ollama"`). When `offline = true`, Alfred must **never** attempt to reach any external host. This includes:
+  - Model API calls (all go to `localhost` only).
+  - Telemetry/analytics pings — disabled completely.
+  - `alfred update-pricing` — skipped with a message (no network call attempted).
+  - `fastembed` model download (Phase 5.5.3) — if the ONNX model cache is absent in offline mode, fail with a clear message: `"Embedding model not cached. Run 'alfred fetch-models' with network access first, then switch to offline mode."` Do not silently fail or produce wrong embeddings.
+  - `alfred doctor` connectivity check — skip the API ping; mark as `[skipped — offline mode]` not `✗`.
+- **Startup check in offline mode:** If `offline = true` and the selected provider is not local (i.e. has an `api_base_url` that is not `localhost` or `127.0.0.1`), emit an error at startup: `"offline = true but provider points to '{url}'. Set provider_type to 'ollama' or configure a localhost base_url."`.
+- **CI:** Tests that use mock HTTP servers (wiremock) are fine; tests that require real network access must be guarded with `#[cfg(feature = "online-tests")]` and excluded from the default CI matrix.
+- Document the offline mode in the user README under "Offline / Air-gapped Usage."
+
 #### 4.1.4 Implement Alibaba Cloud (Qwen) provider
 
 1. In `alfred-providers/src/alibaba.rs`:
@@ -1086,13 +1133,17 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
      - Resolve the active profile from config (using `--profile` flag or `default_profile`).
      - Extract `provider_type`, `model`, and `api_key_env` from the resolved profile.
      - If `--provider` CLI flag is set, override `provider_type`. If `--model` flag is set, override `model`.
+     - **Unsupported provider guard:** If the requested `provider_type` is not implemented in the current binary, return a clear `AlfredError::Config` immediately, **not** a runtime HTTP error. Example: in V1, only `Anthropic` is available; selecting `openrouter` returns `"Provider 'openrouter' is not yet supported in this version. Available: anthropic."`. This matters because V1 ships with a full profile config schema — users may configure profiles for providers that only become available in V2.
      - Read API key from the environment variable named by `api_key_env`. If the variable is missing or empty, return a helpful `AlfredError::Config` (see validation in 3.4.1) rather than proceeding to get an opaque HTTP 401.
+     - **Model tool-use compatibility check:** After building the provider, make a cheap validation call or use a static lookup to verify the selected model supports tool use. If the model is known not to support tool use (e.g. most local Ollama models), emit a prominent warning at startup: `"Warning: model '{model}' may not support tool use. Alfred requires tool use to function. Continuing, but expect errors."` Do not abort — local models vary; emit the warning and proceed. Document which models are known-compatible in the user docs.
 2. Wire into CLI config loading.
 3. All HTTP-based providers must use the shared retry/backoff logic from Phase 5.1.0 when making API calls (so rate limits and 5xx are handled consistently).
 4. Test: provider factory returns correct type for each config variant.
 5. Test: resolve profile `cheap` → verify OpenRouter provider and haiku model are selected.
 6. Test: `--profile review --model claude-haiku-3-5` → verify model override wins over profile.
 7. Test: profile with missing API key env var → verify `AlfredError::Config` with actionable message.
+8. Test: V1 binary with profile pointing to `openrouter` → verify `AlfredError::Config("not yet supported")` not a runtime panic.
+9. Test: model known not to support tool use → verify warning is emitted at startup, agent still starts.
 
 ---
 
@@ -1137,14 +1188,22 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 
 #### 4.2.3 Implement context compaction
 
+**Output UX:** Compaction must be visible to the user (never silent). Rich TTY: transient message (e.g. "↻ Compacting context…" then "✓ Context compacted"); ASCII/non-TTY: persistent lines `[compact] …`. See [cli-interface-specification.md](cli-interface-specification.md) §5 (D10). Emit `compact_start` / `compact_end` in `--output-format stream-json`.
+
 1. **Pinned context:** Before compaction, identify messages that must never be summarized away (e.g. user constraints like "never touch files in /prod", or messages explicitly marked as critical). Options: (a) allow the user to prefix a message with a marker (e.g. `IMPORTANT:` or a configurable prefix) so the system treats it as pinned; (b) or heuristically detect constraint-like user messages (e.g. "never", "always", "do not", "must not" in the first user message). Pinned messages are not included in the "oldest N" block that gets summarized; they are prepended to the compacted summary so they remain in full in the context.
 2. When context exceeds threshold:
    - Take the oldest N **non-pinned** messages (those that won't fit).
    - Call a secondary "summarize" request to the model: `"Summarize the following conversation history in 3-5 sentences, focusing on decisions made and context established: {oldest_messages}"`.
-   - Replace those oldest messages with a single `system` message: `"[Compacted history] {summary}"`. Then prepend any pinned messages so they appear in full above the summary.
+   - **Summarization failure fallback:** The summarization call can fail (provider error, model refusal, timeout). Define explicit failure handling:
+     - On provider error (HTTP 5xx, timeout, rate limit after retries): **do not compact**. Continue with the full overflowing context. Log a `warn!` event: `"Context compaction failed; proceeding with full context (context_tokens={n}, limit={limit})."`. This is safe — the model receives slightly more context than ideal, but does not lose information.
+     - On model refusal or empty summary returned: treat as provider error (do not compact).
+     - If context is so large that not compacting would produce a request exceeding the model's hard limit (i.e. `context_tokens > hard_limit`): emit a user-visible error and halt the turn rather than silently sending a request that will be rejected. The error should read: `"Context is too large to compact and too large to send ({n} tokens > {hard_limit}). Start a new session or use --context-limit to configure a smaller limit."`.
+   - On success: replace those oldest messages with a single `system` message: `"[Compacted history] {summary}"`. Then prepend any pinned messages so they appear in full above the summary.
    - Emit a `SessionLine::System { subtype: "compact_boundary" }` to the session file.
 3. Test: create a fixture with a very long conversation; verify compaction triggers and summary is included.
 4. Test: include an early user message with "IMPORTANT: never modify src/prod/"; run until compaction; verify that constraint still appears verbatim in the context (or that pinned messages survive compaction).
+5. Test: mock summarization provider to return an error → verify compaction is skipped, agent continues, `warn!` is emitted.
+6. Test: context exceeds hard model limit and summarization fails → verify user-visible error message and halted turn (not a panic).
 
 ---
 
@@ -1220,7 +1279,15 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    - Read stdin response.
    - `y` → `Allow` this time; `a` → add to allow list for session; `d` → deny.
 2. When in `--print` mode (non-interactive): treat `AskUser` as `Deny`, log warning.
-3. Test: mock stdin with known responses; verify tool is blocked or allowed.
+3. **Serialized permission gate — required to prevent deadlock:**
+   - The `PermissionGate` must be backed by a `Mutex<()>` (or `tokio::sync::Mutex`) that serializes all `AskUser` prompts, regardless of the number of concurrent tools or subagents in flight.
+   - **Why:** In Phase 4.6, multiple read-only tools execute concurrently via `join_all`. If the batch also contains a state-changing tool that requires `AskUser`, or if a subagent (4.7) triggers a permission prompt while another is already waiting on stdin, multiple futures simultaneously attempt to read from stdin. This produces garbled output and can deadlock because a second stdin reader blocks while the first is suspended.
+   - **Implementation:** Wrap stdin interaction in a `tokio::sync::Mutex<StdinPermissionPrompt>`. All `AskUser` futures acquire the lock before printing the prompt. Queued prompts block (not spin) until the current prompt is answered.
+   - **Subagent interaction:** `SubAgentManager` must share the same `Arc<Mutex<StdinPermissionPrompt>>` as the parent agent. Subagents that need a permission prompt enqueue on the same gate. The user sees one prompt at a time, even when multiple subagents run in parallel.
+   - **Non-interactive mode:** No change — `AskUser` immediately resolves to `Deny` without acquiring the lock.
+4. Test: mock stdin with known responses; verify tool is blocked or allowed.
+5. Test: two concurrent `join_all` futures each trigger `AskUser` → verify exactly one prompt appears at a time (no interleaved output), second prompt appears only after first is answered.
+6. Test: two parallel subagents each trigger `AskUser` → verify serialized behavior, no deadlock within 5s timeout.
 
 ---
 
@@ -1234,12 +1301,16 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    - Ship a default `pricing.toml` with Alfred (e.g. in `alfred-providers/data/pricing.toml` or embedded in the binary) containing per-model input/output/cache_creation/cache_read prices for major models (Claude Opus, Sonnet, Haiku, GPT-4o, etc.).
    - At startup, load pricing: first look for `{config_dir}/alfred/pricing.toml` (user override); if absent, use the shipped default. Document in user docs how to override (e.g. copy the default file and edit). This allows users to update prices when providers change them without recompiling.
    - Define a `ModelPricing` struct and a loader `fn load_pricing(config_dir: Option<&Path>) -> ModelPricing` that merges or falls back to built-in defaults when the file is missing or a model is not listed.
-2. In `alfred-agent/src/loop.rs`, add:
+2. **Staleness warning:** At startup, if the active `pricing.toml` (whether the default or user override) was last modified more than 90 days ago, emit a startup warning: `"Warning: your pricing.toml is {N} days old. Provider prices may have changed. Run 'alfred update-pricing' or edit {path} to update."`. The `alfred doctor` command (Phase 8.4) also surfaces this as a non-fatal warning. Record the file's mtime when loading; compare to `SystemTime::now()`.
+3. **`alfred update-pricing` command (V2+):** For V1, pricing updates are manual (edit the TOML). From V2 onward, optionally add an `alfred update-pricing` subcommand that fetches a canonical pricing file from a hosted URL (e.g. `https://raw.githubusercontent.com/your-org/alfred/main/data/pricing.toml`) and writes it to `{config_dir}/alfred/pricing.toml`. This command is offline-safe: it must fail gracefully with a clear message if the network is unavailable, never corrupting the existing file. Implementation: download to a temp file, validate TOML parse, then rename atomically.
+4. **Missing model fallback:** If a model is requested that is not listed in the pricing table, log a `warn!` and fall back to a configurable `default_pricing` entry rather than erroring out. This prevents cost tracking failure from blocking the agent.
+5. In `alfred-agent/src/loop.rs`, add:
    - `cumulative_cost_usd: f64`
    - After each model call: estimate cost from usage tokens × per-token price (from the loaded `ModelPricing`).
-3. After each turn, check: `if cumulative_cost_usd > config.max_budget_usd → return error`.
-4. Print cost summary in result message: `"Total cost: $0.0123 USD"`.
-5. Store `total_cost_usd` in `SessionLine::Result`.
+6. After each turn, check: `if cumulative_cost_usd > config.max_budget_usd → return error`.
+7. Print cost summary in result message: `"Total cost: $0.0123 USD"`.
+8. Store `total_cost_usd` in `SessionLine::Result`.
+9. Test: load pricing.toml with a 91-day-old mtime (use `tempfile` + `filetime` in the test) → verify staleness warning is emitted. Test: request a model not in the pricing table → verify warning is logged and default price is used (no panic).
 
 ---
 
@@ -1247,12 +1318,15 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 **Dependency:** 4.3 complete.
 
+**Reference:** Plan mode UX, ExitPlanMode tool behavior, and session start notice are defined in [cli-interface-specification.md](cli-interface-specification.md) §5 and §7 (D6).
+
 #### 4.5.1 Implement plan mode flag
 
 1. `--permission-mode plan` → only read-only tools allowed.
 2. In `PermissionChecker`: `PlanOnly` restricts to `Read`, `Glob`, `Grep` (no Bash, no Write, no Edit).
-3. Agent still loops; model can still request state-changing tools, but they'll be denied with `tool_result { is_error: true, content: "Tool not available in plan mode." }`.
-4. Test: run in plan mode; verify Write/Edit/Bash are blocked.
+3. Agent still loops; model can still request state-changing tools, but they'll be denied with an inline message per spec (e.g. `[plan mode] Edit blocked — ExitPlanMode to allow`).
+4. **ExitPlanMode tool:** Register a tool `ExitPlanMode` (no parameters). When the model calls it, switch the session to agent mode (state-changing tools allowed). Display the inline announcement per spec (rich: "⚡ Switching to agent mode — state-changing tools now available"; ASCII: `[mode] Switching to agent mode - state-changing tools now available`). Session start in plan mode must mention: "Alfred is running in plan mode. State-changing tools are disabled. The agent can switch to agent mode using ExitPlanMode."
+5. Test: run in plan mode; verify Write/Edit/Bash are blocked; call ExitPlanMode; verify state-changing tools then succeed and announcement was shown.
 
 ---
 
@@ -1619,6 +1693,27 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    - Semaphore: 20 concurrent Read calls with semaphore=5 → verify bounded.
    - Subagent: outer agent spawns subagent → subagent reads file → outer receives result.
 
+#### 5.4.2 Minimum coverage targets (enforced in CI)
+
+Coverage is measured with `cargo-tarpaulin --all-features`. CI fails if overall coverage drops below the floor for that release. Target floors are intentionally modest for V1 to avoid blocking shipping, and raise each release as the codebase matures.
+
+| Crate | V1 floor | V2 floor | V3 floor | V4 floor |
+|---|---|---|---|---|
+| `alfred-agent` (agent loop, executor) | **70 %** | 75 % | 80 % | 85 % |
+| `alfred-providers` (all providers) | **75 %** | 80 % | 85 % | 85 % |
+| `alfred-context` (context engine, compaction) | **70 %** | 75 % | 80 % | 80 % |
+| `alfred-tools` (all built-in tools) | **80 %** | 85 % | 85 % | 85 % |
+| `alfred-session` (JSONL persistence) | **75 %** | 80 % | 80 % | 80 % |
+| `alfred-memory` *(V3+)* | — | — | **70 %** | 80 % |
+| Workspace overall | **70 %** | 75 %  | 78 % | 82 % |
+
+**V1 critical-path tests (must pass before V1 release, regardless of coverage):**
+- Agent loop: single-turn, multi-turn with tool use, max_turns halt, cost-limit halt.
+- Anthropic provider: request serialization, streaming parse, error mapping, retry on 429.
+- Permission gate: `AcceptAll`, `PlanOnly`, and `Default` with `AskUser` (serialized via `Mutex`).
+- Session: write, read-back, session resume.
+- Config: profile resolution, missing API key error, unsupported provider error.
+
 ---
 
 ### Milestone 5.5 — Memory System
@@ -1783,9 +1878,11 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 1. **Max entries and eviction:** Add a configurable `max_memory_entries` (default 10,000) to the long-term store. When inserting a new entry would exceed this limit, evict the least-recently-used entry (or the oldest by `created_at`) so the store size stays bounded. Config key e.g. `[memory] max_entries = 10000`.
 2. **Deduplication on save:** Before inserting a new memory, run a semantic similarity check: if an existing entry has cosine similarity to the new entry's embedding above a threshold (e.g. 0.95), treat the new save as a no-op (skip insert, or update the existing entry's `created_at` so it is not evicted soon). This avoids storing many near-duplicate insights across sessions.
-3. **Manual prune command:** Implement `alfred memory prune` (or `alfred memory cleanup`): optionally accept `--older-than-days N` or `--keep N`; remove entries that do not meet the keep criteria. Without arguments, prune to `max_memory_entries` by evicting oldest first. This gives users control when the automatic eviction is not enough.
-4. Test: insert 10,001 entries with max_entries=10,000 → verify size stays at 10,000. Save the same content twice (or two very similar contents) → verify dedup prevents duplicate. Run `alfred memory prune --keep 100` → verify only 100 entries remain.
-5. Document in user docs: how to inspect memory size, how to adjust `max_memory_entries`, and when to run manual prune.
+3. **Per-session write cap:** To prevent runaway `MemoryTool` usage from flooding the store (a misguided model saving every line of output), enforce a configurable `max_memory_writes_per_session` (default: 50). Config key: `[memory] max_writes_per_session = 50`. When the cap is reached mid-session, `MemoryTool` returns `is_error: true` with the message: `"Memory write limit reached for this session ({n} of {max}). Alfred will not save more memories this session. Existing memories are still readable."`. The cap resets at the start of each new session. Rationale: without a write cap, a model that repeatedly calls `MemoryTool` in a long session can fill `max_memory_entries` with low-quality entries, evicting valuable older memories. The cap forces selective saving.
+4. **Manual prune command:** Implement `alfred memory prune` (or `alfred memory cleanup`): optionally accept `--older-than-days N` or `--keep N`; remove entries that do not meet the keep criteria. Without arguments, prune to `max_memory_entries` by evicting oldest first. This gives users control when the automatic eviction is not enough.
+5. Test: insert 10,001 entries with max_entries=10,000 → verify size stays at 10,000. Save the same content twice (or two very similar contents) → verify dedup prevents duplicate. Run `alfred memory prune --keep 100` → verify only 100 entries remain.
+6. Test: call `MemoryTool` 51 times in one session (max_writes_per_session=50) → verify 51st call returns `is_error: true` with cap message; verify 50 entries were written, not 51.
+7. Document in user docs: how to inspect memory size, how to adjust `max_memory_entries` and `max_writes_per_session`, and when to run manual prune.
 
 ---
 
@@ -1894,10 +1991,15 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 #### 6.4.1 Implement in-memory LRU cache for file reads
 
 1. In `alfred-tools/src/cache.rs`:
-   - Use `lru` crate: `LruCache<PathBuf, (String, SystemTime)>` — path → (content, mtime).
+   - Use `lru` crate: `LruCache<PathBuf, CacheEntry>` — path → `CacheEntry`.
+   - `CacheEntry` stores `content: String`, `mtime: SystemTime`, and `content_hash: u64` (xxHash or Blake3 of the content, chosen for speed not security).
    - Cache capacity: configurable, default 50 entries.
-   - `get(path)` → check mtime against cached mtime; if file modified since cache: invalidate.
-   - `insert(path, content, mtime)` → store in LRU.
+   - **Invalidation strategy — mtime + content hash:**
+     - On `get(path)`: read current file mtime via `fs::metadata()`.
+       - If `current_mtime == cached_mtime`: return cached content (fast path, no disk read).
+       - If `current_mtime != cached_mtime` (file timestamp changed): read file from disk, compute `new_hash`. If `new_hash == cached_hash`, update the cached mtime but keep the cached content (file was touched but not modified — e.g. `touch`, `rsync --times`). If `new_hash != cached_hash`, evict and re-cache with new content, mtime, and hash.
+     - **Rationale for dual check:** mtime alone fails in two edge cases: (a) files modified within the same filesystem timestamp granularity (e.g. FAT32 with 2-second resolution) — two edits within 1 second appear as same mtime; (b) files restored to the same content (e.g. `git checkout`) keep a new mtime but are semantically identical — no need to evict. The hash provides a second-opinion that avoids both false positives and false negatives.
+   - `insert(path, content, mtime)` → compute and store hash, store in LRU.
 2. Wrap in `Arc<Mutex<FileCache>>` for shared use.
 
 #### 6.4.2 Wire cache into ReadTool
@@ -1992,6 +2094,8 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 **Goal:** Polished CLI, hooks system, MCP compatibility, live plan display, repo indexing, documentation.
 
+**CLI contract:** Canonical CLI behavior (commands, flags, output formats, exit codes, and UX) is defined in [cli-interface-specification.md](cli-interface-specification.md). Implementations in this phase must align with that spec.
+
 ---
 
 ### Milestone 8.1 — Hooks System
@@ -2031,6 +2135,8 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 ### Milestone 8.2 — JSON and Stream-JSON Output
 
 **Dependency:** 3.5 complete.
+
+**Reference:** Schema, `exit_status` taxonomy, and stream-json event types (including compaction events) are defined in [cli-interface-specification.md](cli-interface-specification.md) §10.
 
 #### 8.2.1 Implement `--output-format json`
 
@@ -2116,17 +2222,35 @@ MCP servers are external processes that register as tools. They can read files, 
 
 **Dependency:** 4.5 complete.
 
+**Reference:** Doctor output format, check ordering, exit codes (0=all pass, 1=mandatory fail, 2=warnings only), and `--json` output are defined in [cli-interface-specification.md](cli-interface-specification.md) §11.
+
 #### 8.4.1 Implement health check command
 
-1. `alfred doctor` checks:
-   - Rust/Cargo version (from `rustc --version`).
-   - API key presence for configured provider.
-   - Provider connectivity (simple API call).
-   - MCP servers (if configured): spawn and ping.
-   - Session storage directory permissions.
-   - Memory DB accessible.
-   - Optional: repo index present and up to date.
-2. Print `✓` / `✗` for each check.
+**Version-awareness rule:** `alfred doctor` must only check capabilities that are present in the currently running binary. Checking for a missing database or an unbuilt feature as if it were a failure confuses users and hides real issues. The check list below is grouped by the release that introduces each check; later releases extend the list.
+
+**V1 checks (always run):**
+- Rust/Cargo version (from `rustc --version`).
+- API key presence for the configured provider.
+- Provider connectivity (simple API ping — model list or lightweight probe).
+- CLI config file readable and valid TOML.
+- Session storage directory exists and is writable.
+- `pricing.toml` present (default or user-override); warn if the file is older than 90 days (see 4.4.1).
+
+**V1.5 checks (added when MCP is available):**
+- MCP servers listed in config: spawn each and attempt a `ping`; report latency and pass/fail per server.
+
+**V3 checks (added when memory is available):**
+- Memory DB (`memories.db`) accessible and schema version matches current binary (see 9.7 schema migrations).
+- `fastembed` model cache present; if absent, report download required.
+
+**V4 checks (added when repo index is available):**
+- Repo index present and up to date (index mtime < last `git commit` mtime).
+
+1. Print `✓` / `✗` for each check.
+2. On any `✗`, print a one-line remediation hint (e.g. `"Run 'export ANTHROPIC_API_KEY=...' to fix."`).
+3. Exit code: `0` if all checks pass, `1` if any mandatory check fails, `2` if only optional checks fail.
+4. Test: mock a missing API key → verify `✗` for provider key check and exit code `1`.
+5. Test: V1 binary does not attempt to open `memories.db` → no `✗` for absent memory DB.
 
 ---
 
@@ -2240,7 +2364,9 @@ MCP servers are external processes that register as tools. They can read files, 
 2. Store tantivy index at `{data_dir}/index/{sanitized_path}/tantivy/`.
 3. Test: index 100 fixture files; search for a unique token; verify correct file returned.
 
-#### 8.7.4 Add `SymbolSearchTool` and `IndexSearchTool`
+#### 8.7.4 Add `SymbolSearchTool`, `IndexSearchTool`, and (V3) `SemanticSearch` tool
+
+**Reference:** The **SemanticSearch** tool (V3) is specified in [cli-interface-specification.md](cli-interface-specification.md) §2 and D15. It uses the embedding engine (Phase 5.5.3, fastembed-rs) and repo indexing; signature `SemanticSearch(query, target_directory?, num_results?)`. Implement alongside or after the index tools when V3 memory and indexing are available.
 
 1. `SymbolSearchTool`:
    - Parameters: `query` (string, required), `kind` (string, optional: function/struct/trait), `language` (string, optional).
@@ -2454,6 +2580,26 @@ The following rules apply continuously, not only during Milestone 9.4:
 3. Build universal binary on macOS: `x86_64-apple-darwin` + `aarch64-apple-darwin`, then `lipo`.
 4. Upload release artifacts to GitHub Releases.
 
+**Windows strategy for `BashTool`:**
+
+`BashTool` spawns shell commands via `std::process::Command`. The behavior differs significantly on Windows:
+
+- Windows has no `/bin/bash` by default. Spawning `bash -c "..."` fails unless Git Bash, WSL, or MSYS2 is installed.
+- `std::process::Command` on Windows uses `cmd.exe` by default; many Unix commands (`ls`, `cat`, `grep`) do not exist.
+- The CI Windows build **must not silently pretend `BashTool` works** when it does not.
+
+**Decision: Windows is a Tier 2 platform for V1; `BashTool` is explicitly degraded.**
+
+Implementation:
+
+1. At startup on Windows, detect whether a POSIX-compatible shell is available (`bash`, `sh` via WSL, or Git Bash). Detection order: `bash.exe` on `PATH`, then `wsl bash`. Store result in a static `OnceCell<Option<PathBuf>>`.
+2. If no POSIX shell found: `BashTool::execute()` returns `is_error: true` with message: `"BashTool is not available on Windows without a POSIX-compatible shell (bash/WSL/Git Bash). Install Git Bash or WSL to enable shell commands."`. Do not panic.
+3. If a shell is found: run commands through it (e.g. `bash.exe -c "{command}"`).
+4. `alfred doctor` on Windows adds a V1 check: verify POSIX shell availability; print a clear warning (not a failure) if absent.
+5. Document this limitation in the user-facing docs and README under "Platform Support."
+6. CI Windows build: run the full test suite with `BashTool` in degraded mode (mock/skip shell-dependent tests); all other tools must pass.
+7. Long-term (V2+): consider a `PowerShell` execution mode as a first-class alternative for Windows users.
+
 #### 9.5.2 Homebrew formula
 
 1. Create `alfred.rb` formula:
@@ -2506,10 +2652,54 @@ The following rules apply continuously, not only during Milestone 9.4:
 - [ ] `cargo deny check` clean
 - [ ] No `unwrap()` or `expect()` in non-test code (replaced with `?` or explicit error handling)
 - [ ] Version bumped in all `Cargo.toml` files
-- [ ] `CHANGELOG.md` updated
+- [ ] `CHANGELOG.md` updated with all user-visible changes since the previous release (see 9.7.3)
 - [ ] GitHub Release created with binaries
 - [ ] Homebrew formula updated
 - [ ] crates.io published
+
+---
+
+### Milestone 9.7 — Schema Versioning and Migrations
+
+**Dependency:** 3.3 (session JSONL), 5.5 (memory SQLite).
+
+**Rationale:** Alfred stores data in two durable formats: JSONL session files and the SQLite memory database. Without explicit schema versions and migration logic, any structural change (new field, renamed column, dropped table) silently breaks older data. Users upgrading Alfred must not lose sessions or memories.
+
+#### 9.7.1 Session JSONL schema versioning
+
+1. Add a `schema_version: u32` field to the session metadata header (first line of every JSONL file), starting at `1`.
+2. When reading a session file:
+   - If `schema_version` is absent: treat as version `0` (legacy).
+   - If `schema_version > CURRENT_VERSION`: refuse to load the file with a clear error: `"Session file was written by a newer version of Alfred (schema {found}, binary supports up to {max}). Upgrade Alfred to read this session."`.
+   - If `schema_version < CURRENT_VERSION`: apply forward migration transforms before loading. Define a `SessionMigration` trait with a `migrate(old: Value) -> Value` method; register migrations by `(from_version, to_version)`.
+3. Migrations are cumulative and run in order. Each migration is a pure function over raw JSON values (no side effects, composable, testable).
+4. Bump `schema_version` whenever a breaking or additive field change is made to `SessionLine` or session metadata. Document each bump in `CHANGELOG.md`.
+5. Test: load a V0 session file (fixture) with the V1 reader → verify migration is applied and all fields parse correctly.
+
+#### 9.7.2 Memory SQLite schema versioning
+
+1. Add a `user_version` pragma to the SQLite database (SQLite's built-in schema version field: `PRAGMA user_version = N`). Start at `1` when the schema is first created.
+2. At startup, read `PRAGMA user_version`. If it is lower than the compiled-in `CURRENT_DB_VERSION`, run migrations in order. Each migration is a Rust closure that runs within a transaction (atomically).
+3. Migration structure:
+   ```rust
+   struct DbMigration {
+       from_version: u32,
+       description: &'static str,
+       sql: &'static str,   // DDL / DML to apply
+   }
+   const MIGRATIONS: &[DbMigration] = &[
+       DbMigration { from_version: 0, description: "initial schema", sql: include_str!("migrations/001_initial.sql") },
+       // future migrations appended here
+   ];
+   ```
+4. After running all migrations, update `PRAGMA user_version` to `CURRENT_DB_VERSION`.
+5. If `user_version > CURRENT_DB_VERSION`: refuse to open and return: `"Memory database was written by a newer version of Alfred. Upgrade Alfred or run 'alfred memory reset' to start fresh."`.
+6. Store migration SQL in `alfred-memory/src/migrations/NNN_description.sql` files. These are embedded at compile time via `include_str!`.
+7. Test: create a V0 database (no `user_version`), open with V1 reader → verify schema is migrated and version is updated. Open a V999 database → verify error and no data loss.
+
+#### 9.7.3 CHANGELOG discipline
+
+Every merged PR that changes user-facing behavior, CLI flags, config schema, session schema, or DB schema **must** include a `CHANGELOG.md` update as part of the PR. Add a CI check (e.g. a lint script or `git diff --name-only` in the action) that fails the PR if `CHANGELOG.md` was not touched in PRs labelled `feature`, `fix`, `breaking`, or `schema-change`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
@@ -2607,4 +2797,4 @@ Task-level dependencies (critical path):
 ---
 
 *Generated from: `devdocs/REPORT.md`, `devdocs/ARTIFACTS.md`, `devdocs/Instructions.md`*
-*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5); weakness audit (5.6 edit safety, 5.2.3 stale-file detection, 3.4.2 ALFRED.md trust, 7.1.2 sandbox deprecation, 8.3.3 MCP trust, 5.1.0 shared retry, 4.7.2 subagent budget, 4.2.1/4.2.2 token safety, 4.8.3a planner checkpoint, 5.5.6 memory pruning, 4.4.1 pricing.toml, 8.2.1 exit status, 4.2.3 pinned context); provider/model switching (3.4.1 profiles + project config, --profile/--provider CLI flags, API key validation, 4.1.5 factory)*
+*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5); weakness audit round 2 (5.6 edit safety, 5.2.3 stale-file detection, 3.4.2 ALFRED.md trust, 7.1.2 sandbox deprecation, 8.3.3 MCP trust, 5.1.0 shared retry, 4.7.2 subagent budget, 4.2.1/4.2.2 token safety, 4.8.3a planner checkpoint, 5.5.6 memory pruning, 4.4.1 pricing.toml, 8.2.1 exit status, 4.2.3 pinned context); provider/model switching (3.4.1 profiles + project config, --profile/--provider CLI flags, API key validation, 4.1.5 factory); weakness audit round 3 (4.1.5 unsupported-provider guard + model tool-use check, 4.3.3 serialized AskUser permission gate, 4.2.3 compaction failure fallback, 5.4.2 per-release coverage floors + V1 critical-path tests, 9.5.1 Windows BashTool strategy, 5.5.6 per-session memory write cap, 9.7 schema versioning + migrations, 9.6.4 CHANGELOG CI enforcement, 4.4.1 pricing.toml staleness + update-pricing command, 4.1.3 offline mode, 6.4.1 mtime+hash dual-check cache, 8.4.1 version-aware doctor)*
