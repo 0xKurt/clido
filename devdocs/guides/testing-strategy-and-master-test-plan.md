@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the full testing strategy for Alfred.
+This document defines the full testing strategy for Clido.
 
 It is broader than the milestone-level testing notes in `devdocs/plans/development-plan.md`. The roadmap describes what should be tested during implementation. This guide defines how the entire system should be validated over time, across unit, integration, end-to-end, security, performance, resilience, release, and operational concerns.
 
@@ -10,7 +10,7 @@ The goal is simple:
 - detect defects early
 - prevent regressions
 - make failures easy to diagnose
-- prove that Alfred is useful, safe, and reliable in real workflows
+- prove that Clido is useful, safe, and reliable in real workflows
 
 ## Testing Philosophy
 
@@ -27,7 +27,7 @@ A feature is only trustworthy when its expected behavior, edge cases, and failur
 
 No single test type is enough.
 
-Alfred needs:
+Clido needs:
 - unit tests for correctness of small logic
 - integration tests for crate boundaries and tool execution
 - end-to-end tests for realistic agent behavior
@@ -48,7 +48,7 @@ Alfred needs:
 
 Mocking is useful, but not enough.
 
-Some parts of Alfred must be validated against real conditions:
+Some parts of Clido must be validated against real conditions:
 - real filesystem behavior
 - real subprocess execution
 - real streaming behavior
@@ -57,7 +57,7 @@ Some parts of Alfred must be validated against real conditions:
 
 ## Quality Goals
 
-The test plan should prove that Alfred:
+The test plan should prove that Clido:
 - produces correct outputs for its core workflows
 - handles tool and provider failures safely
 - preserves session state and resumes correctly
@@ -85,7 +85,7 @@ Use unit tests for:
 
 ### 2. Integration tests
 
-Integration tests verify interaction between multiple components inside Alfred.
+Integration tests verify interaction between multiple components inside Clido.
 
 Use integration tests for:
 - provider + agent loop interaction with mocked responses
@@ -98,7 +98,7 @@ Use integration tests for:
 
 ### 3. End-to-end tests
 
-End-to-end tests validate Alfred as a user would experience it.
+End-to-end tests validate Clido as a user would experience it.
 
 Use end-to-end tests for:
 - CLI invocation
@@ -119,7 +119,7 @@ Every important defect should leave behind:
 
 ### 5. Security tests
 
-Security tests validate that Alfred does not overreach or leak sensitive data.
+Security tests validate that Clido does not overreach or leak sensitive data.
 
 Use security tests for:
 - secret handling
@@ -144,7 +144,7 @@ Use them for:
 
 ### 7. Resilience tests
 
-Resilience tests validate Alfred under bad conditions.
+Resilience tests validate Clido under bad conditions.
 
 Use them for:
 - provider timeouts
@@ -253,22 +253,22 @@ These targets supersede those in `development-plan.md` Phase 9.1.1. Per-release 
 
 | Crate | V1 floor | V2 floor | V3 floor | V4 / final target |
 |-------|----------|----------|----------|-------------------|
-| `alfred-core` | 85% | 90% | 92% | ≥ 95% |
-| `alfred-tools` | 80% | 85% | 87% | ≥ 90% |
-| `alfred-providers` | 75% | 80% | 85% | ≥ 85% |
-| `alfred-context` | 70% | 75% | 80% | ≥ 85% |
-| `alfred-storage` | 75% | 80% | 82% | ≥ 85% |
-| `alfred-memory` *(V3+)* | — | — | 70% | ≥ 85% |
-| `alfred-agent` | 70% | 75% | 80% | ≥ 80% |
-| `alfred-planner` *(V4+)* | — | — | — | ≥ 80% |
-| `alfred-index` *(V3+)* | — | — | 70% | ≥ 75% |
+| `clido-core` | 85% | 90% | 92% | ≥ 95% |
+| `clido-tools` | 80% | 85% | 87% | ≥ 90% |
+| `clido-providers` | 75% | 80% | 85% | ≥ 85% |
+| `clido-context` | 70% | 75% | 80% | ≥ 85% |
+| `clido-storage` | 75% | 80% | 82% | ≥ 85% |
+| `clido-memory` *(V3+)* | — | — | 70% | ≥ 85% |
+| `clido-agent` | 70% | 75% | 80% | ≥ 80% |
+| `clido-planner` *(V4+)* | — | — | — | ≥ 80% |
+| `clido-index` *(V3+)* | — | — | 70% | ≥ 75% |
 | Workspace overall | 70% | 75% | 78% | ≥ 82% |
 
 Measure with `cargo tarpaulin --workspace --all-features`. Track coverage in CI and treat regressions below the per-release floor as blocking.
 
 ## Crate-by-Crate Test Plan
 
-### `alfred-core`
+### `clido-core`
 
 **Goal:** Validate shared types and foundational invariants. Target: ≥ 95% coverage.
 
@@ -284,7 +284,7 @@ Measure with `cargo tarpaulin --workspace --all-features`. Track coverage in CI 
 - malformed JSON fails cleanly with a useful error
 - optional fields round-trip correctly and remain backward-compatible when absent
 
-### `alfred-tools`
+### `clido-tools`
 
 **Goal:** Validate each tool independently and through the registry. Target: ≥ 90% coverage.
 
@@ -368,7 +368,7 @@ Test:
 - schema validation rejects invalid input before execution
 - `is_read_only()` returns correct values for all tools
 
-### `alfred-providers`
+### `clido-providers`
 
 **Goal:** Validate request building, response parsing, retries, and provider normalization. Target: ≥ 85% coverage.
 
@@ -409,14 +409,14 @@ If text-to-tool parsing is implemented, test:
 - malformed JSON-like output falls back gracefully
 - incorrect tool name produces `is_error: true` result
 
-### `alfred-context`
+### `clido-context`
 
 **Goal:** Validate correctness and efficiency of prompt construction. Target: ≥ 85% coverage.
 
 **Test categories:**
 - token counting accuracy (within ±10% of actual model tokenizer)
 - system prompt injection as first message or API `system` field
-- `ALFRED.md` and `CLAUDE.md` project instruction loading
+- `CLIDO.md` and `CLAUDE.md` project instruction loading
 - tool guidance block generation for registered tools
 - context size threshold detection
 - compaction trigger when approaching `max_tokens * threshold`
@@ -430,7 +430,7 @@ If text-to-tool parsing is implemented, test:
 - recent tool results are never compacted away
 - duplicated reads of unchanged files do not appear twice in context
 
-### `alfred-storage`
+### `clido-storage`
 
 **Goal:** Validate persistence, replay, and session recovery. Target: ≥ 85% coverage.
 
@@ -448,7 +448,7 @@ If text-to-tool parsing is implemented, test:
 - corrupted line does not silently truncate or corrupt the rest of the session
 - session metadata (ID, timestamps, turn count) is consistent after multi-turn runs
 
-### `alfred-memory` *(V3 and later)*
+### `clido-memory` *(V3 and later)*
 
 **Goal:** Validate both in-session and persistent memory behavior. Target: ≥ 85% coverage (V3 floor: 70%).
 
@@ -483,7 +483,7 @@ If text-to-tool parsing is implemented, test:
 
 **Capacity and eviction:**
 - Insert 10,001 entries with `max_entries = 10,000` → DB contains exactly 10,000 entries; oldest entry evicted
-- `alfred memory prune --keep 100` → exactly 100 entries remain
+- `clido memory prune --keep 100` → exactly 100 entries remain
 
 **Risk-focused tests:**
 - irrelevant or stale memory does not crowd out recent tool results in context
@@ -491,7 +491,7 @@ If text-to-tool parsing is implemented, test:
 - memory DB survives process restart and reads correctly on re-open
 - schema migration (DB version 0 → 1) applies cleanly on re-open; no data loss (see Phase 9.7.2)
 
-### `alfred-planner` *(V4 and later)*
+### `clido-planner` *(V4 and later)*
 
 **Goal:** Validate task graph correctness and safe fallback behavior. Target: ≥ 80% coverage.
 
@@ -507,7 +507,7 @@ If text-to-tool parsing is implemented, test:
 
 **Key rule:** The planner must never be allowed to silently degrade baseline reliability. Test the reactive-loop fallback path as carefully as the planner itself.
 
-### `alfred-index` *(V3 and later)*
+### `clido-index` *(V3 and later)*
 
 **Goal:** Validate index build, update, and search quality. Target: ≥ 75% coverage.
 
@@ -520,7 +520,7 @@ Test:
 - stale index is detected and invalidated
 - large-repo build completes within a reasonable time bound
 
-### `alfred-agent`
+### `clido-agent`
 
 **Goal:** Validate the core agent loop, execution ordering, and recovery. Target: ≥ 80% coverage.
 
@@ -556,7 +556,7 @@ Test:
 | Subagent permission shared | Two parallel subagents each require `AskUser`; verify serialized prompts, no deadlock |
 | Compaction failure fallback | Summarization call returns HTTP 500; verify compaction is skipped, agent continues, `warn!` event emitted |
 | Compaction hard-limit | Context exceeds model's hard token limit and summarization fails; verify user-visible error and halted turn (no panic) |
-| Unsupported provider V1 | Profile specifies `openrouter` in V1 binary; verify `AlfredError::Config` not runtime panic |
+| Unsupported provider V1 | Profile specifies `openrouter` in V1 binary; verify `ClidoError::Config` not runtime panic |
 | Model tool-use warning | Provider factory gets a model known not to support tool use; verify startup warning emitted, agent still starts |
 | Offline mode guard | `offline = true` with non-localhost provider URL; verify startup error |
 | Offline mode fastembed | `offline = true`, ONNX cache absent; verify `embed()` returns `Err` with clear message |
@@ -608,7 +608,7 @@ Maintain a curated set of real workflows.
 
 ### Core workflows
 
-Alfred should be tested against tasks such as:
+Clido should be tested against tasks such as:
 - list files in a repository
 - explain how a module works
 - find all usages of a symbol
@@ -866,7 +866,7 @@ Focus on:
 - resume and recovery (stale-file detection)
 - end-to-end repository workflows
 - provider error handling (unsupported provider, missing API key)
-- `alfred doctor` V1 checks
+- `clido doctor` V1 checks
 - Windows BashTool degradation path (if CI runs on Windows)
 - session schema versioning V0 → V1 migration
 - `pricing.toml` staleness warning
@@ -879,7 +879,7 @@ Add focus on:
 - bounded concurrency (semaphore, no starvation)
 - JSON output contracts (exit status taxonomy)
 - secret detection
-- operator diagnostics (`alfred doctor` MCP checks)
+- operator diagnostics (`clido doctor` MCP checks)
 - pricing.toml `update-pricing` command (offline-safe)
 
 ### V2
@@ -917,6 +917,6 @@ Add focus on:
 
 ## Final Rule
 
-If Alfred cannot be tested confidently, it is not ready to be trusted.
+If Clido cannot be tested confidently, it is not ready to be trusted.
 
 The system should grow only as fast as its test strategy can keep it understandable, diagnosable, and safe.

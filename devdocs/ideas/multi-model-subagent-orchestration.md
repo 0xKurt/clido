@@ -6,7 +6,7 @@ Planned for **V3** (Stage 1: per-subagent model override) and **V4** (Stage 2: o
 
 ## The Problem With Single-Model Agents
 
-Alfred's current design uses one model for the entire session. Every turn — exploration, planning, editing, reviewing, testing — is handled by the same model at the same cost and the same latency.
+Clido's current design uses one model for the entire session. Every turn — exploration, planning, editing, reviewing, testing — is handled by the same model at the same cost and the same latency.
 
 This is wasteful, slow, and often wrong. Different tasks have radically different requirements:
 
@@ -29,7 +29,7 @@ Route subagents to the model that is best suited for their task class.
 
 The parent agent — the orchestrator — runs on a capable reasoning model. It breaks the task into subtasks and delegates each to a subagent configured with the appropriate model for that subtask. Each subagent completes its work autonomously and returns a result to the orchestrator.
 
-This makes Alfred simultaneously:
+This makes Clido simultaneously:
 - faster, because lightweight tasks do not wait on expensive inference
 - cheaper, because small models handle appropriate work
 - more accurate, because specialized or stronger models handle critical work
@@ -135,11 +135,11 @@ When the orchestrator identifies a subtask, it issues an `AgentTool` call (Phase
 }
 ```
 
-Alfred's SubAgentManager maps `model_class` to the configured model for that class and spins up the subagent on the appropriate provider.
+Clido's SubAgentManager maps `model_class` to the configured model for that class and spins up the subagent on the appropriate provider.
 
 ### Parallel dispatch
 
-When the orchestrator identifies multiple independent subtasks, it can issue several `AgentTool` calls in a single turn. Alfred's parallel tool execution (Phase 4.6) then runs these concurrently, each on their own model.
+When the orchestrator identifies multiple independent subtasks, it can issue several `AgentTool` calls in a single turn. Clido's parallel tool execution (Phase 4.6) then runs these concurrently, each on their own model.
 
 Example: the orchestrator asks three `fast` subagents to read different files simultaneously, then feeds all three summaries into a single `strong` subagent for synthesis.
 
@@ -197,7 +197,7 @@ pub enum ModelClass {
 
 ### Model class configuration
 
-Users configure model class mappings in `~/.config/alfred/config.toml`:
+Users configure model class mappings in `~/.config/clido/config.toml`:
 
 ```toml
 [model_classes]
@@ -274,7 +274,7 @@ The orchestrator, running a stronger model, can detect shallow or incorrect suba
 
 ### Model class misconfiguration
 
-A user who maps `fast` to a model that cannot follow tool schemas will get broken subagent behavior. The `alfred doctor` command (Phase 8.4) should validate that all configured model classes support tool use.
+A user who maps `fast` to a model that cannot follow tool schemas will get broken subagent behavior. The `clido doctor` command (Phase 8.4) should validate that all configured model classes support tool use.
 
 ### Cost explosion from many subagents
 
@@ -288,15 +288,15 @@ If the orchestrator spawns too many subagents for tasks that do not benefit from
 
 ### Skills and workflows marketplace
 
-A workflow definition (see `skills-workflows-marketplace-and-agent-payments.md`) can declare which model class is recommended for each step. When Alfred executes a purchased workflow, it uses the declared model class per step.
+A workflow definition (see `skills-workflows-marketplace-and-agent-payments.md`) can declare which model class is recommended for each step. When Clido executes a purchased workflow, it uses the declared model class per step.
 
 ### Self-improvement loops
 
-Self-evaluation tasks are a natural fit for strong-model subagents. After a session, Alfred can spawn a strong-model subagent to review its own trace and produce an improvement report. See `self-improvement-loops.md`.
+Self-evaluation tasks are a natural fit for strong-model subagents. After a session, Clido can spawn a strong-model subagent to review its own trace and produce an improvement report. See `self-improvement-loops.md`.
 
 ### Repository indexing
 
-When Alfred's index (Phase 8.7) returns candidate files, it can route the "read and summarize" step for each candidate to a fast subagent, then route the synthesis step to a strong subagent.
+When Clido's index (Phase 8.7) returns candidate files, it can route the "read and summarize" step for each candidate to a fast subagent, then route the synthesis step to a strong subagent.
 
 ## Implementation Priority
 
@@ -312,19 +312,19 @@ Update the system prompt and tool guidance to teach the orchestrator when and ho
 
 ## Open Questions
 
-- Should the orchestrator model be configurable, or should Alfred always use the `strong` class for the parent loop?
-- Should model class mappings be per-project (in `ALFRED.md`) or only global (in `config.toml`)?
+- Should the orchestrator model be configurable, or should Clido always use the `strong` class for the parent loop?
+- Should model class mappings be per-project (in `CLIDO.md`) or only global (in `config.toml`)?
 - How should the orchestrator's prompt guidance teach it to choose model classes without becoming brittle?
-- Should Alfred expose a `--model-class` CLI flag for the parent loop, or only through config?
+- Should Clido expose a `--model-class` CLI flag for the parent loop, or only through config?
 - When a fast subagent fails, should the retry automatically escalate to standard or require orchestrator awareness?
 - How do we expose per-subagent cost breakdown in session telemetry?
 
 ## Summary
 
-Multi-model subagent orchestration makes Alfred fundamentally more efficient on complex, multi-part tasks.
+Multi-model subagent orchestration makes Clido fundamentally more efficient on complex, multi-part tasks.
 
 The orchestrator uses the strongest model for judgment and coordination. The mechanical work — reading files, generating boilerplate, reformatting, summarizing — goes to fast, cheap models in parallel.
 
 The result is faster wall-clock time, lower cost on routine steps, and no quality regression on critical steps.
 
-This is one of the clearest ways Alfred can outperform single-model agents on real-world tasks at scale.
+This is one of the clearest ways Clido can outperform single-model agents on real-world tasks at scale.

@@ -1,6 +1,6 @@
-# Alfred — Rust CLI Coding Agent: Development Roadmap
+# Clido — Rust CLI Coding Agent: Development Roadmap
 
-**Project:** `alfred` — a local-first, multi-provider CLI coding agent in Rust
+**Project:** `clido` — a local-first, multi-provider CLI coding agent in Rust
 **Based on:** Reverse-engineering of Claude CLI and Cursor agent (see `devdocs/REPORT.md`, `devdocs/ARTIFACTS.md`)
 **Target:** Production-ready system that reproduces and improves on modern CLI coding agents
 
@@ -27,19 +27,19 @@
 ## Architecture Overview
 
 ```
-alfred (workspace)
+clido (workspace)
 │
 ├── crates/
-│   ├── alfred-cli/        # CLI entry point (clap, streaming output, plan display)
-│   ├── alfred-agent/      # Agent loop, turn management, session state, subagents
-│   ├── alfred-tools/      # Tool trait + all tool implementations
-│   ├── alfred-context/    # Context assembly, token budgeting, compaction
-│   ├── alfred-providers/  # Model provider abstraction + implementations
-│   ├── alfred-storage/    # Session persistence, project config
-│   ├── alfred-memory/     # Short-term + long-term memory (sqlite/sled)
-│   ├── alfred-planner/    # Task graph, planner trait, DAG executor (optional advanced)
-│   ├── alfred-index/      # Repository indexing: tree-sitter, symbol index (optional)
-│   └── alfred-core/       # Shared types, errors, config structs
+│   ├── clido-cli/        # CLI entry point (clap, streaming output, plan display)
+│   ├── clido-agent/      # Agent loop, turn management, session state, subagents
+│   ├── clido-tools/      # Tool trait + all tool implementations
+│   ├── clido-context/    # Context assembly, token budgeting, compaction
+│   ├── clido-providers/  # Model provider abstraction + implementations
+│   ├── clido-storage/    # Session persistence, project config
+│   ├── clido-memory/     # Short-term + long-term memory (sqlite/sled)
+│   ├── clido-planner/    # Task graph, planner trait, DAG executor (optional advanced)
+│   ├── clido-index/      # Repository indexing: tree-sitter, symbol index (optional)
+│   └── clido-core/       # Shared types, errors, config structs
 ```
 
 **Execution flow (from trace evidence):**
@@ -72,20 +72,20 @@ User input
 ## Rust Workspace Structure
 
 ```
-alfred/
+clido/
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock
 ├── .cargo/
 │   └── config.toml             # profile optimizations, target settings
 ├── crates/
-│   ├── alfred-core/
+│   ├── clido-core/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── error.rs        # thiserror error types
 │   │       ├── types.rs        # Message, ContentBlock, ToolUse, ToolResult, etc.
 │   │       └── config.rs       # AgentConfig, ProviderConfig
-│   ├── alfred-tools/
+│   ├── clido-tools/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -99,7 +99,7 @@ alfred/
 │   │       ├── grep.rs
 │   │       ├── bash.rs
 │   │       └── mcp.rs          # MCP client tool wrapper
-│   ├── alfred-providers/
+│   ├── clido-providers/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -109,42 +109,42 @@ alfred/
 │   │       ├── openrouter.rs
 │   │       ├── alibaba.rs
 │   │       └── local.rs
-│   ├── alfred-context/
+│   ├── clido-context/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── builder.rs      # ContextBuilder
 │   │       ├── compaction.rs   # token counting + compaction
 │   │       ├── guidance.rs     # tool usage guidance prompt injection
-│   │       └── project.rs      # ALFRED.md / CLAUDE.md loader
-│   ├── alfred-storage/
+│   │       └── project.rs      # CLIDO.md / CLAUDE.md loader
+│   ├── clido-storage/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── session.rs      # JSONL session read/write
 │   │       └── paths.rs        # XDG / platform paths
-│   ├── alfred-memory/
+│   ├── clido-memory/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── short_term.rs   # in-session working memory
 │   │       ├── long_term.rs    # cross-session persistent memory (sqlite)
 │   │       └── retrieval.rs    # memory lookup by relevance
-│   ├── alfred-planner/
+│   ├── clido-planner/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── planner.rs      # Planner trait
 │   │       ├── task_graph.rs   # Task, TaskGraph, DAG resolution
 │   │       └── executor.rs     # TaskExecutor, dependency-ordered execution
-│   ├── alfred-index/
+│   ├── clido-index/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── file_index.rs   # file path + metadata index
 │   │       ├── symbol_index.rs # tree-sitter symbol extraction
 │   │       └── search.rs       # tantivy full-text search
-│   ├── alfred-agent/
+│   ├── clido-agent/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -153,7 +153,7 @@ alfred/
 │   │       ├── subagent.rs     # SubAgent, SubAgentManager
 │   │       ├── permissions.rs  # allow/deny, plan mode
 │   │       └── events.rs       # AgentEvent stream, hooks
-│   └── alfred-cli/
+│   └── clido-cli/
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs
@@ -185,22 +185,22 @@ alfred/
 
 #### 1.1.1 Initialize the Rust workspace
 
-1. Run `cargo init --name alfred` in the repo root to get a workspace skeleton (or create manually).
+1. Run `cargo init --name clido` in the repo root to get a workspace skeleton (or create manually).
 2. Replace the root `Cargo.toml` with a workspace manifest:
 
    ```toml
    [workspace]
    members = [
-     "crates/alfred-core",
-     "crates/alfred-tools",
-     "crates/alfred-providers",
-     "crates/alfred-context",
-     "crates/alfred-storage",
-     "crates/alfred-memory",
-     "crates/alfred-planner",
-     "crates/alfred-index",
-     "crates/alfred-agent",
-     "crates/alfred-cli",
+     "crates/clido-core",
+     "crates/clido-tools",
+     "crates/clido-providers",
+     "crates/clido-context",
+     "crates/clido-storage",
+     "crates/clido-memory",
+     "crates/clido-planner",
+     "crates/clido-index",
+     "crates/clido-agent",
+     "crates/clido-cli",
    ]
    resolver = "2"
    ```
@@ -214,16 +214,16 @@ alfred/
 #### 1.1.2 Create all crate skeletons
 
 1. For each crate in `crates/`:
-   - `cargo new --lib crates/alfred-core`
-   - `cargo new --lib crates/alfred-tools`
-   - `cargo new --lib crates/alfred-providers`
-   - `cargo new --lib crates/alfred-context`
-   - `cargo new --lib crates/alfred-storage`
-   - `cargo new --lib crates/alfred-memory`
-   - `cargo new --lib crates/alfred-planner`
-   - `cargo new --lib crates/alfred-index`
-   - `cargo new --lib crates/alfred-agent`
-   - `cargo new --bin crates/alfred-cli`
+   - `cargo new --lib crates/clido-core`
+   - `cargo new --lib crates/clido-tools`
+   - `cargo new --lib crates/clido-providers`
+   - `cargo new --lib crates/clido-context`
+   - `cargo new --lib crates/clido-storage`
+   - `cargo new --lib crates/clido-memory`
+   - `cargo new --lib crates/clido-planner`
+   - `cargo new --lib crates/clido-index`
+   - `cargo new --lib crates/clido-agent`
+   - `cargo new --bin crates/clido-cli`
 2. Each `lib.rs` starts with `// placeholder` only.
 3. Verify: `cargo build --workspace` compiles without errors.
 
@@ -260,13 +260,13 @@ alfred/
 
 ---
 
-### Milestone 1.2 — Core Types (`alfred-core`)
+### Milestone 1.2 — Core Types (`clido-core`)
 
 **Dependency:** 1.1 complete.
 
 #### 1.2.1 Define the message/content type hierarchy
 
-1. Open `crates/alfred-core/src/types.rs`.
+1. Open `crates/clido-core/src/types.rs`.
 2. Define `Role` enum: `User`, `Assistant`, `System`.
 3. Define `ContentBlock` enum (mirrors Anthropic API observed in traces):
 
@@ -314,16 +314,16 @@ alfred/
 
 8. Define `StopReason` enum: `EndTurn`, `ToolUse`, `MaxTokens`, `StopSequence`.
 9. Write unit tests in `types.rs` verifying JSON round-trip for each type.
-10. Run `cargo test -p alfred-core`.
+10. Run `cargo test -p clido-core`.
 
 #### 1.2.2 Define error types
 
-1. Open `crates/alfred-core/src/error.rs`.
+1. Open `crates/clido-core/src/error.rs`.
 2. Use `thiserror`:
 
    ```rust
    #[derive(thiserror::Error, Debug)]
-   pub enum AlfredError {
+   pub enum ClidoError {
        #[error("provider error: {0}")]
        Provider(String),
        #[error("tool error: {tool_name}: {message}")]
@@ -343,15 +343,15 @@ alfred/
        #[error(transparent)]
        Other(#[from] anyhow::Error),
    }
-   pub type Result<T> = std::result::Result<T, AlfredError>;
+   pub type Result<T> = std::result::Result<T, ClidoError>;
    ```
 
-3. Add `alfred-core` to `alfred-agent`, `alfred-tools`, `alfred-providers`, `alfred-planner`, `alfred-memory`, `alfred-index` as a dependency.
+3. Add `clido-core` to `clido-agent`, `clido-tools`, `clido-providers`, `clido-planner`, `clido-memory`, `clido-index` as a dependency.
 4. Run `cargo check --workspace`.
 
 #### 1.2.3 Define agent configuration types
 
-1. In `crates/alfred-core/src/config.rs`:
+1. In `crates/clido-core/src/config.rs`:
    - Define `AgentConfig`: `max_turns: u32`, `max_budget_usd: Option<f64>`, `model: String`, `system_prompt: Option<String>`, `permission_mode: PermissionMode`, `use_planner: bool`, `use_index: bool`.
    - Define `PermissionMode` enum: `Default`, `AcceptAll`, `PlanOnly`.
    - Define `ProviderConfig`: `provider_type: ProviderType`, `api_key: Option<String>`, `base_url: Option<String>`, `model: String`.
@@ -367,7 +367,7 @@ alfred/
 
 #### 1.3.1 Initialize tracing in the CLI
 
-1. In `alfred-cli/src/main.rs`:
+1. In `clido-cli/src/main.rs`:
 
    ```rust
    tracing_subscriber::fmt()
@@ -375,9 +375,9 @@ alfred/
        .init();
    ```
 
-2. Add `RUST_LOG=alfred=debug` guidance in README.
-3. Add `tracing::info!`, `tracing::debug!` stubs in `alfred-agent` crate.
-4. Test: run `RUST_LOG=debug cargo run -p alfred-cli` and confirm tracing output.
+2. Add `RUST_LOG=clido=debug` guidance in README.
+3. Add `tracing::info!`, `tracing::debug!` stubs in `clido-agent` crate.
+4. Test: run `RUST_LOG=debug cargo run -p clido-cli` and confirm tracing output.
 
 ---
 
@@ -401,7 +401,7 @@ alfred/
 ## Phase 2 — Proof of Concept
 
 **Goal:** Single hardcoded model call with a single tool, no persistence. Demonstrates the core loop works end-to-end.
-**Exit criteria:** Running `cargo run -p alfred-cli -- -p "list files in current directory"` makes one model API call, receives a `tool_use` for `bash`, executes it, feeds result back, and prints final text response.
+**Exit criteria:** Running `cargo run -p clido-cli -- -p "list files in current directory"` makes one model API call, receives a `tool_use` for `bash`, executes it, feeds result back, and prints final text response.
 
 ---
 
@@ -411,7 +411,7 @@ alfred/
 
 #### 2.1.1 Implement `ModelProvider` trait
 
-1. In `alfred-providers/src/provider.rs`:
+1. In `clido-providers/src/provider.rs`:
 
    ```rust
    #[async_trait::async_trait]
@@ -456,7 +456,7 @@ alfred/
 
 #### 2.1.2 Implement Anthropic HTTP client
 
-1. In `alfred-providers/src/anthropic.rs`:
+1. In `clido-providers/src/anthropic.rs`:
    - Define `AnthropicProvider` struct holding `reqwest::Client`, `api_key: String`, `model: String`.
    - Implement `new(api_key: String, model: String) -> Self`.
    - Implement `complete()`:
@@ -477,18 +477,18 @@ alfred/
      - POST to `https://api.anthropic.com/v1/messages`.
      - Set headers: `x-api-key`, `anthropic-version: 2023-06-01`, `content-type: application/json`.
      - Deserialize response into `ModelResponse`.
-   - Return `AlfredError::Provider` on non-200 status with response body.
+   - Return `ClidoError::Provider` on non-200 status with response body.
 2. Write a unit test mocking the HTTP response with `wiremock` or `httpmock`.
 3. Add integration test behind `#[cfg(feature = "integration")]` that calls real API.
 
 #### 2.1.3 Wire provider into CLI (hardcoded)
 
-1. In `alfred-cli/src/main.rs` (temporary PoC wiring):
+1. In `clido-cli/src/main.rs` (temporary PoC wiring):
    - Read `ANTHROPIC_API_KEY` from environment using `std::env::var`.
    - Construct `AnthropicProvider`.
    - Construct a single `AgentConfig` with defaults.
    - Hard-code the system prompt to `"You are a helpful coding assistant."`.
-2. Run `cargo check -p alfred-cli`.
+2. Run `cargo check -p clido-cli`.
 
 ---
 
@@ -498,7 +498,7 @@ alfred/
 
 #### 2.2.1 Define `Tool` trait
 
-1. In `alfred-tools/src/lib.rs`:
+1. In `clido-tools/src/lib.rs`:
 
    ```rust
    #[async_trait::async_trait]
@@ -515,11 +515,11 @@ alfred/
    }
    ```
 
-2. Export `Tool`, `ToolOutput` from `alfred-tools/src/lib.rs`.
+2. Export `Tool`, `ToolOutput` from `clido-tools/src/lib.rs`.
 
 #### 2.2.2 Implement `BashTool`
 
-1. In `alfred-tools/src/bash.rs`:
+1. In `clido-tools/src/bash.rs`:
    - Struct `BashTool` with no fields (initially).
    - `name()` → `"Bash"`.
    - `description()` → `"Execute a shell command and return stdout/stderr."`.
@@ -538,12 +538,12 @@ alfred/
 
 #### 2.2.3 Implement `ToolRegistry`
 
-1. In `alfred-tools/src/registry.rs`:
+1. In `clido-tools/src/registry.rs`:
    - `ToolRegistry` holding `HashMap<String, Box<dyn Tool>>`.
    - `fn register(&mut self, tool: impl Tool + 'static)`.
    - `fn get(&self, name: &str) -> Option<&dyn Tool>`.
    - `fn schemas(&self) -> Vec<ToolSchema>` — iterates all tools, calls `.schema()`.
-2. In `alfred-cli` PoC: construct registry, register `BashTool`.
+2. In `clido-cli` PoC: construct registry, register `BashTool`.
 
 ---
 
@@ -553,7 +553,7 @@ alfred/
 
 #### 2.3.1 Implement single-turn agent loop (PoC version)
 
-1. In `alfred-agent/src/loop.rs` create `AgentLoop` struct:
+1. In `clido-agent/src/loop.rs` create `AgentLoop` struct:
 
    ```rust
    pub struct AgentLoop {
@@ -578,17 +578,17 @@ alfred/
        - Else: call `tool.execute(input).await`.
        - Push resulting `ToolResult` as `user` message content block.
    - After loop: return final text or error.
-4. Handle `max_turns` exceeded: return `AlfredError::Other("max_turns exceeded")`.
+4. Handle `max_turns` exceeded: return `ClidoError::Other("max_turns exceeded")`.
 
 #### 2.3.2 Wire the PoC CLI
 
-1. In `alfred-cli/src/main.rs`:
+1. In `clido-cli/src/main.rs`:
    - Parse `--print`/`-p` flag using a simple `std::env::args()` loop (not clap yet).
    - Instantiate `AnthropicProvider`, `ToolRegistry` with `BashTool`, `AgentConfig` with defaults.
    - Instantiate `AgentLoop`.
    - Call `loop.run(user_input).await`.
    - Print result to stdout.
-2. Run end-to-end PoC: `ANTHROPIC_API_KEY=... cargo run -p alfred-cli -- "list files in current directory"`.
+2. Run end-to-end PoC: `ANTHROPIC_API_KEY=... cargo run -p clido-cli -- "list files in current directory"`.
 3. Verify the loop executes at least one tool call and returns text.
 
 #### 2.3.3 PoC validation checklist
@@ -607,7 +607,7 @@ alfred/
 ## Phase 3 — Minimal Viable Agent
 
 **Goal:** Complete tool set, proper CLI with clap, session storage, configuration loading.
-**Exit criteria:** `alfred "audit this repository"` completes a multi-step task on a real repo with all six core tools available.
+**Exit criteria:** `clido "audit this repository"` completes a multi-step task on a real repo with all six core tools available.
 
 ---
 
@@ -617,7 +617,7 @@ alfred/
 
 #### 3.1.1 Implement `ReadTool`
 
-1. In `alfred-tools/src/read.rs`:
+1. In `clido-tools/src/read.rs`:
    - `name()` → `"Read"`.
    - `is_read_only()` → `true`.
    - Parameters: `file_path` (string, required), `offset` (integer, optional, 1-based line number), `limit` (integer, optional, number of lines).
@@ -636,7 +636,7 @@ alfred/
 
 #### 3.1.2 Implement `WriteTool`
 
-1. In `alfred-tools/src/write.rs`:
+1. In `clido-tools/src/write.rs`:
    - `is_read_only()` → `false`.
    - Parameters: `file_path` (string, required), `content` (string, required).
    - Implementation:
@@ -651,7 +651,7 @@ alfred/
 
 #### 3.1.3 Implement `EditTool`
 
-1. In `alfred-tools/src/edit.rs`:
+1. In `clido-tools/src/edit.rs`:
    - `is_read_only()` → `false`.
    - Parameters: `file_path`, `old_string`, `new_string`, `replace_all` (boolean, default false).
    - Implementation:
@@ -669,7 +669,7 @@ alfred/
 
 #### 3.1.4 Implement `GlobTool`
 
-1. In `alfred-tools/src/glob.rs`:
+1. In `clido-tools/src/glob.rs`:
    - `is_read_only()` → `true`.
    - Parameters: `pattern` (string, required), `path` (string, optional, defaults to cwd).
    - Implementation:
@@ -684,7 +684,7 @@ alfred/
 
 #### 3.1.5 Implement `GrepTool`
 
-1. In `alfred-tools/src/grep.rs`:
+1. In `clido-tools/src/grep.rs`:
    - `is_read_only()` → `true`.
    - Parameters (from Cursor bundle analysis and observed error messages):
      - `pattern` (string, required)
@@ -711,7 +711,7 @@ alfred/
 
 #### 3.1.6 Register all tools in CLI
 
-1. In `alfred-cli/src/main.rs`:
+1. In `clido-cli/src/main.rs`:
    - Build `ToolRegistry` with all six tools: `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `GrepTool`, `BashTool`.
 2. Integration test: run agent with `"show me the first 5 lines of Cargo.toml"` — verify Read tool used.
 
@@ -725,11 +725,11 @@ alfred/
 
 **Reference:** Full CLI surface (all flags, subcommands, precedence, conflicts) is defined in [cli-interface-specification.md](cli-interface-specification.md). The struct below should include every V1 flag from the spec; extend with V1.5/V2 flags as those releases are implemented.
 
-1. In `alfred-cli/src/main.rs`, define `Cli` struct with `clap::Parser`:
+1. In `clido-cli/src/main.rs`, define `Cli` struct with `clap::Parser`:
 
    ```rust
    #[derive(Parser, Debug)]
-   #[command(name = "alfred", version, about = "Local-first CLI coding agent")]
+   #[command(name = "clido", version, about = "Local-first CLI coding agent")]
    struct Cli {
        /// Task to execute (positional)
        prompt: Option<String>,
@@ -799,28 +799,28 @@ alfred/
   }
   ```
 
-  Support `--version` and `alfred version` subcommand per spec (D1). Add `OutputFormat`, `PermissionMode`, and `InputFormat` as `clap::ValueEnum`. Env var equivalents (e.g. `ALFRED_MODEL`, `ALFRED_PROFILE`, `NO_COLOR`) are documented in the CLI spec; resolve from env when the flag is not set.
+  Support `--version` and `clido version` subcommand per spec (D1). Add `OutputFormat`, `PermissionMode`, and `InputFormat` as `clap::ValueEnum`. Env var equivalents (e.g. `CLIDO_MODEL`, `CLIDO_PROFILE`, `NO_COLOR`) are documented in the CLI spec; resolve from env when the flag is not set.
 
 2. Add `OutputFormat` and `PermissionMode` as `clap::ValueEnum`.
 3. Wire parsed flags into `AgentConfig`.
 4. Read prompt from stdin if not provided as arg and not `--print` mode (interactive REPL stub).
-5. Test: `alfred --help` prints usage; `alfred -p "hello"` runs.
+5. Test: `clido --help` prints usage; `clido -p "hello"` runs.
 
 #### 3.2.2 Add interactive REPL mode
 
 1. If no prompt given and not `--print`: enter interactive mode.
-2. Print `alfred> ` prompt, read line from stdin with `rustyline` crate (for history/editing).
+2. Print `clido> ` prompt, read line from stdin with `rustyline` crate (for history/editing).
 3. On each input, run agent loop with preserved history.
 4. Exit on Ctrl-C or `exit`/`quit` input.
-5. Test: `alfred` without args enters REPL; multi-turn conversation works.
+5. Test: `clido` without args enters REPL; multi-turn conversation works.
 
 #### 3.2.3 Implement session subcommands (canonical: `sessions list` / `show` / `fork`)
 
 **Reference:** Session command UX (output format, ID display, `--json`) is defined in [cli-interface-specification.md](cli-interface-specification.md) §9.
 
 1. Add `#[command(subcommand)] command: Option<Commands>` to `Cli`.
-2. Define canonical subcommands: `Sessions(SessionsCmd)` with `SessionsCmd::List`, `Show { session_id }`, `Fork { session_id }` (fork in V1.5). Use noun-first grouping: `alfred sessions list`, `alfred sessions show <id>`, `alfred sessions fork <id>`. Legacy aliases `list-sessions` and `show-session` remain as hidden aliases with a deprecation notice to stderr (see spec §16).
-3. Implement in `alfred-cli/src/commands/sessions.rs` (or list_sessions.rs):
+2. Define canonical subcommands: `Sessions(SessionsCmd)` with `SessionsCmd::List`, `Show { session_id }`, `Fork { session_id }` (fork in V1.5). Use noun-first grouping: `clido sessions list`, `clido sessions show <id>`, `clido sessions fork <id>`. Legacy aliases `list-sessions` and `show-session` remain as hidden aliases with a deprecation notice to stderr (see spec §16).
+3. Implement in `clido-cli/src/commands/sessions.rs` (or list_sessions.rs):
    - Read session directory (see 3.3).
    - Print session_id (first 8 + `...` + last 4 chars), first message preview (50 chars), timestamp, turn count, cost. Sort newest first.
 
@@ -832,7 +832,7 @@ alfred/
 
 #### 3.3.1 Define session data structures
 
-1. In `alfred-storage/src/session.rs`:
+1. In `clido-storage/src/session.rs`:
    - `SessionEnvelope`:
 
      ```rust
@@ -868,7 +868,7 @@ alfred/
 #### 3.3.2 Implement session write (JSONL)
 
 1. Compute session directory: `{data_dir}/projects/{sanitized_cwd}/{session_id}.jsonl`.
-   - Use `directories::ProjectDirs::from("", "", "alfred")` → `data_dir()`.
+   - Use `directories::ProjectDirs::from("", "", "clido")` → `data_dir()`.
    - Sanitize cwd: replace `/` with `-`, strip leading `-`.
 2. Implement `SessionWriter`:
    - Opens/creates JSONL file on first write.
@@ -891,7 +891,7 @@ alfred/
    - Enumerate `*.jsonl` files in project session dir.
    - For each: read first user line for preview, get file modified time.
    - Return sorted by modified time descending.
-2. Wire into `alfred sessions list` (and legacy `alfred list-sessions` with deprecation notice).
+2. Wire into `clido sessions list` (and legacy `clido list-sessions` with deprecation notice).
 
 ---
 
@@ -903,20 +903,20 @@ alfred/
 
 **Config loading order** (each level overrides the previous):
 1. Built-in defaults
-2. Global user config: `~/.config/alfred/config.toml`
-3. Project config: `.alfred/config.toml` in the current working directory (or the nearest ancestor directory containing it — walk upward, stop at home dir or fs root)
+2. Global user config: `~/.config/clido/config.toml`
+3. Project config: `.clido/config.toml` in the current working directory (or the nearest ancestor directory containing it — walk upward, stop at home dir or fs root)
 4. CLI flags (highest priority)
 
-This means a repo can have its own `.alfred/config.toml` that selects a different provider, model, or profile for that project without touching the global config.
+This means a repo can have its own `.clido/config.toml` that selects a different provider, model, or profile for that project without touching the global config.
 
-**Global config location:** `~/.config/alfred/config.toml` (via `directories`).
+**Global config location:** `~/.config/clido/config.toml` (via `directories`).
 
 **Config schema:**
 
 ```toml
 # ---
 # Default profile active for this machine/repo.
-# Override per-invocation with: alfred --profile cheap
+# Override per-invocation with: clido --profile cheap
 default_profile = "default"
 
 # ---
@@ -956,7 +956,7 @@ allowed = []               # empty = all allowed
 disallowed = ["Bash"]      # example
 ```
 
-**Project-level config** (`.alfred/config.toml` in cwd or ancestor):
+**Project-level config** (`.clido/config.toml` in cwd or ancestor):
 - Uses the same schema.
 - Only the fields it specifies are merged; the rest inherit from the global config.
 - Example: a project that always uses OpenRouter + Sonnet only needs:
@@ -971,10 +971,10 @@ disallowed = ["Bash"]      # example
   ```
 
 **Config::load():**
-1. Check `$ALFRED_CONFIG_FILE`; if set, use that path as the global config.
-2. Otherwise: `~/.config/alfred/config.toml`.
+1. Check `$CLIDO_CONFIG_FILE`; if set, use that path as the global config.
+2. Otherwise: `~/.config/clido/config.toml`.
 3. Parse global config with `toml` crate. Fall back to empty defaults if file absent.
-4. Walk from cwd upward (stop at `$HOME` or fs root) to find `.alfred/config.toml`. If found, merge it: project config values override global config values.
+4. Walk from cwd upward (stop at `$HOME` or fs root) to find `.clido/config.toml`. If found, merge it: project config values override global config values.
 5. Merge: CLI flags override merged config.
 
 **API key validation:**
@@ -982,7 +982,7 @@ When the selected profile's `api_key_env` is set but the corresponding environme
 ```
 Error: API key not found for profile 'default'.
 Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
-~/.config/alfred/config.toml or .alfred/config.toml.
+~/.config/clido/config.toml or .clido/config.toml.
 ```
 
 **Tests:**
@@ -992,22 +992,22 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 - Select a profile with missing API key env var → verify helpful error at startup.
 - CLI `--profile cheap` → verify that profile's provider/model are active.
 
-#### 3.4.2 Load project instructions (`ALFRED.md` or `CLAUDE.md`)
+#### 3.4.2 Load project instructions (`CLIDO.md` or `CLAUDE.md`)
 
-1. In `alfred-context/src/project.rs`:
-   - Walk from cwd upward to find `ALFRED.md` or `CLAUDE.md`.
+1. In `clido-context/src/project.rs`:
+   - Walk from cwd upward to find `CLIDO.md` or `CLAUDE.md`.
    - Read content; treat as additional system prompt prefix.
-   - **Trust-on-first-use:** Maintain a small allowlist of (canonical path → hash) for project instruction files that the user has already approved (e.g. in `{data_dir}/trusted_project_instructions.json`). When loading an `ALFRED.md` or `CLAUDE.md` that is not on the allowlist (or whose content hash has changed), prompt the user once: `"Load project instructions from {path}? [y/N]"`. If the user confirms, add the path and hash to the allowlist. If not, skip loading project instructions for this run. In non-interactive mode, skip loading unless the path is already trusted.
+   - **Trust-on-first-use:** Maintain a small allowlist of (canonical path → hash) for project instruction files that the user has already approved (e.g. in `{data_dir}/trusted_project_instructions.json`). When loading an `CLIDO.md` or `CLAUDE.md` that is not on the allowlist (or whose content hash has changed), prompt the user once: `"Load project instructions from {path}? [y/N]"`. If the user confirms, add the path and hash to the allowlist. If not, skip loading project instructions for this run. In non-interactive mode, skip loading unless the path is already trusted.
    - **Size limit:** Enforce a maximum size on project instructions (e.g. ~4,000 tokens using the same token counter as context). If the file exceeds the limit, truncate with a trailing note `"[Project instructions truncated at {limit} tokens.]"` and log a warning. This limits both cost and the impact of adversarial or accidental huge files.
    - Notify user when project instructions are loaded.
 2. Prepend project instructions to system prompt in context builder.
-3. Test: create `ALFRED.md` in fixture dir, verify it's included in system prompt.
+3. Test: create `CLIDO.md` in fixture dir, verify it's included in system prompt.
 4. Test: load from an untrusted path (not in allowlist); verify prompt is shown; confirm and verify path is trusted on next run.
-5. Test: create `ALFRED.md` larger than token limit; verify truncation and warning.
+5. Test: create `CLIDO.md` larger than token limit; verify truncation and warning.
 
 #### 3.4.3 Inject tool usage guidance into system prompt
 
-1. In `alfred-context/src/guidance.rs`:
+1. In `clido-context/src/guidance.rs`:
    - Define `fn build_tool_guidance(registry: &ToolRegistry) -> String`.
    - Output a structured block appended to the system prompt:
 
@@ -1055,7 +1055,7 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 
 #### 3.5.2 Wire streaming to CLI output
 
-1. In `alfred-cli/src/output/streaming.rs`:
+1. In `clido-cli/src/output/streaming.rs`:
    - For `text` output format: print `TextDelta` chunks directly to stdout without newline.
    - For `stream-json` format: print each event as a JSON object on its own line.
    - For `json` format: buffer everything, print final JSON object.
@@ -1077,7 +1077,7 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 
 #### 4.1.1 Implement OpenAI provider
 
-1. In `alfred-providers/src/openai.rs`:
+1. In `clido-providers/src/openai.rs`:
    - Struct `OpenAIProvider` with `client`, `api_key`, `base_url`, `model`.
    - Map `Message`/`ContentBlock` to OpenAI chat completions format:
      - `tool_use` → `assistant` message with `tool_calls` array.
@@ -1089,7 +1089,7 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 
 #### 4.1.2 Implement OpenRouter provider
 
-1. In `alfred-providers/src/openrouter.rs`:
+1. In `clido-providers/src/openrouter.rs`:
    - OpenRouter uses OpenAI-compatible API at `https://openrouter.ai/api/v1`.
    - Reuse `OpenAIProvider` implementation with configurable `base_url`.
    - Add `HTTP-Referer` and `X-Title` headers (OpenRouter requirements).
@@ -1098,7 +1098,7 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 
 #### 4.1.3 Implement local model provider (Ollama)
 
-1. In `alfred-providers/src/local.rs`:
+1. In `clido-providers/src/local.rs`:
    - Target: Ollama at `http://localhost:11434/v1` (OpenAI-compatible endpoint).
    - Tool call support: depends on model. Implement best-effort JSON parsing for function calling.
    - Fallback: if model doesn't support tool use natively, inject tool schemas into system prompt as JSON and parse tool calls from text output.
@@ -1106,21 +1106,21 @@ Set the environment variable ANTHROPIC_API_KEY, or configure 'api_key_env' in
 
 **Offline / air-gapped mode:**
 
-Alfred is designed to be local-first. Users running Ollama (or another local provider) should be able to operate Alfred with zero internet access. Define this explicitly:
+Clido is designed to be local-first. Users running Ollama (or another local provider) should be able to operate Clido with zero internet access. Define this explicitly:
 
-- **Config key:** `[provider] offline = true` (or equivalently, use a profile with `provider_type = "ollama"`). When `offline = true`, Alfred must **never** attempt to reach any external host. This includes:
+- **Config key:** `[provider] offline = true` (or equivalently, use a profile with `provider_type = "ollama"`). When `offline = true`, Clido must **never** attempt to reach any external host. This includes:
   - Model API calls (all go to `localhost` only).
   - Telemetry/analytics pings — disabled completely.
-  - `alfred update-pricing` — skipped with a message (no network call attempted).
-  - `fastembed` model download (Phase 5.5.3) — if the ONNX model cache is absent in offline mode, fail with a clear message: `"Embedding model not cached. Run 'alfred fetch-models' with network access first, then switch to offline mode."` Do not silently fail or produce wrong embeddings.
-  - `alfred doctor` connectivity check — skip the API ping; mark as `[skipped — offline mode]` not `✗`.
+  - `clido update-pricing` — skipped with a message (no network call attempted).
+  - `fastembed` model download (Phase 5.5.3) — if the ONNX model cache is absent in offline mode, fail with a clear message: `"Embedding model not cached. Run 'clido fetch-models' with network access first, then switch to offline mode."` Do not silently fail or produce wrong embeddings.
+  - `clido doctor` connectivity check — skip the API ping; mark as `[skipped — offline mode]` not `✗`.
 - **Startup check in offline mode:** If `offline = true` and the selected provider is not local (i.e. has an `api_base_url` that is not `localhost` or `127.0.0.1`), emit an error at startup: `"offline = true but provider points to '{url}'. Set provider_type to 'ollama' or configure a localhost base_url."`.
 - **CI:** Tests that use mock HTTP servers (wiremock) are fine; tests that require real network access must be guarded with `#[cfg(feature = "online-tests")]` and excluded from the default CI matrix.
 - Document the offline mode in the user README under "Offline / Air-gapped Usage."
 
 #### 4.1.4 Implement Alibaba Cloud (Qwen) provider
 
-1. In `alfred-providers/src/alibaba.rs`:
+1. In `clido-providers/src/alibaba.rs`:
    - Alibaba Cloud DashScope API: `https://dashscope.aliyuncs.com/compatible-mode/v1` (OpenAI-compatible).
    - Add `Authorization: Bearer {api_key}` header.
    - Support Qwen model names (e.g. `qwen-max`, `qwen-plus`).
@@ -1128,21 +1128,21 @@ Alfred is designed to be local-first. Users running Ollama (or another local pro
 
 #### 4.1.5 Provider factory
 
-1. In `alfred-providers/src/lib.rs`:
+1. In `clido-providers/src/lib.rs`:
    - `fn build_provider(config: &ProviderConfig) -> Result<Arc<dyn ModelProvider>>`:
      - Resolve the active profile from config (using `--profile` flag or `default_profile`).
      - Extract `provider_type`, `model`, and `api_key_env` from the resolved profile.
      - If `--provider` CLI flag is set, override `provider_type`. If `--model` flag is set, override `model`.
-     - **Unsupported provider guard:** If the requested `provider_type` is not implemented in the current binary, return a clear `AlfredError::Config` immediately, **not** a runtime HTTP error. Example: in V1, only `Anthropic` is available; selecting `openrouter` returns `"Provider 'openrouter' is not yet supported in this version. Available: anthropic."`. This matters because V1 ships with a full profile config schema — users may configure profiles for providers that only become available in V2.
-     - Read API key from the environment variable named by `api_key_env`. If the variable is missing or empty, return a helpful `AlfredError::Config` (see validation in 3.4.1) rather than proceeding to get an opaque HTTP 401.
-     - **Model tool-use compatibility check:** After building the provider, make a cheap validation call or use a static lookup to verify the selected model supports tool use. If the model is known not to support tool use (e.g. most local Ollama models), emit a prominent warning at startup: `"Warning: model '{model}' may not support tool use. Alfred requires tool use to function. Continuing, but expect errors."` Do not abort — local models vary; emit the warning and proceed. Document which models are known-compatible in the user docs.
+     - **Unsupported provider guard:** If the requested `provider_type` is not implemented in the current binary, return a clear `ClidoError::Config` immediately, **not** a runtime HTTP error. Example: in V1, only `Anthropic` is available; selecting `openrouter` returns `"Provider 'openrouter' is not yet supported in this version. Available: anthropic."`. This matters because V1 ships with a full profile config schema — users may configure profiles for providers that only become available in V2.
+     - Read API key from the environment variable named by `api_key_env`. If the variable is missing or empty, return a helpful `ClidoError::Config` (see validation in 3.4.1) rather than proceeding to get an opaque HTTP 401.
+     - **Model tool-use compatibility check:** After building the provider, make a cheap validation call or use a static lookup to verify the selected model supports tool use. If the model is known not to support tool use (e.g. most local Ollama models), emit a prominent warning at startup: `"Warning: model '{model}' may not support tool use. Clido requires tool use to function. Continuing, but expect errors."` Do not abort — local models vary; emit the warning and proceed. Document which models are known-compatible in the user docs.
 2. Wire into CLI config loading.
 3. All HTTP-based providers must use the shared retry/backoff logic from Phase 5.1.0 when making API calls (so rate limits and 5xx are handled consistently).
 4. Test: provider factory returns correct type for each config variant.
 5. Test: resolve profile `cheap` → verify OpenRouter provider and haiku model are selected.
 6. Test: `--profile review --model claude-haiku-3-5` → verify model override wins over profile.
-7. Test: profile with missing API key env var → verify `AlfredError::Config` with actionable message.
-8. Test: V1 binary with profile pointing to `openrouter` → verify `AlfredError::Config("not yet supported")` not a runtime panic.
+7. Test: profile with missing API key env var → verify `ClidoError::Config` with actionable message.
+8. Test: V1 binary with profile pointing to `openrouter` → verify `ClidoError::Config("not yet supported")` not a runtime panic.
 9. Test: model known not to support tool use → verify warning is emitted at startup, agent still starts.
 
 ---
@@ -1153,7 +1153,7 @@ Alfred is designed to be local-first. Users running Ollama (or another local pro
 
 #### 4.2.1 Implement token counter
 
-1. In `alfred-context/src/compaction.rs`:
+1. In `clido-context/src/compaction.rs`:
    - Use `tiktoken-rs` crate for cl100k/o200k token counting as a rough estimate.
    - Note: Claude uses a different tokenizer; counts are approximate (±10%). Use conservatively.
    - Implement `fn count_tokens(messages: &[Message]) -> usize`.
@@ -1163,7 +1163,7 @@ Alfred is designed to be local-first. Users running Ollama (or another local pro
 
 #### 4.2.2 Implement context builder
 
-1. In `alfred-context/src/builder.rs`:
+1. In `clido-context/src/builder.rs`:
 
    ```rust
    pub struct ContextBuilder {
@@ -1211,13 +1211,13 @@ Alfred is designed to be local-first. Users running Ollama (or another local pro
 
 **Dependency:** 4.2.1 complete, 4.1 (Anthropic provider) complete.
 
-**Rationale:** Anthropic's prompt caching bills cached input tokens at 10% of the normal price with up to 85% lower latency on long prompts. In a multi-turn agent session, the system prompt, tool definitions, and ALFRED.md content are sent with every API call. Without caching, these tokens are billed at full price every turn. With caching, they are billed at 1/10th price after the first call. On a 20-turn session with a 10K-token system prompt, this reduces input costs by 60–80%.
+**Rationale:** Anthropic's prompt caching bills cached input tokens at 10% of the normal price with up to 85% lower latency on long prompts. In a multi-turn agent session, the system prompt, tool definitions, and CLIDO.md content are sent with every API call. Without caching, these tokens are billed at full price every turn. With caching, they are billed at 1/10th price after the first call. On a 20-turn session with a 10K-token system prompt, this reduces input costs by 60–80%.
 
 Anthropic also supports **automatic caching** for multi-turn conversations since 2025: the API automatically applies cache breakpoints to the last cacheable message block. The implementation below adds explicit breakpoints for the highest-value fixed content (system prompt, tools), and relies on automatic caching for the conversation history.
 
 #### 4.2.4.1 Mark system prompt and tool definitions as cacheable
 
-1. In `alfred-providers/src/anthropic.rs`, when building the API request:
+1. In `clido-providers/src/anthropic.rs`, when building the API request:
    - Add `"cache_control": {"type": "ephemeral"}` to the last text block of the system prompt content array.
    - Add `"cache_control": {"type": "ephemeral"}` to the last tool definition in the tools array.
 
@@ -1260,7 +1260,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.3.1 Implement permission checker
 
-1. In `alfred-agent/src/permissions.rs`:
+1. In `clido-agent/src/permissions.rs`:
    - `PermissionChecker` struct with `mode: PermissionMode`, `allowed: Vec<ToolPattern>`, `disallowed: Vec<ToolPattern>`.
    - `async fn check(&self, tool_name: &str, input: &serde_json::Value) -> PermissionDecision`.
    - `PermissionDecision` enum: `Allow`, `Deny`, `AskUser`.
@@ -1298,13 +1298,13 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 #### 4.4.1 Track cumulative cost per session
 
 1. **Configurable pricing:** Do not hardcode the `ModelPricing` table in Rust source. Instead:
-   - Ship a default `pricing.toml` with Alfred (e.g. in `alfred-providers/data/pricing.toml` or embedded in the binary) containing per-model input/output/cache_creation/cache_read prices for major models (Claude Opus, Sonnet, Haiku, GPT-4o, etc.).
-   - At startup, load pricing: first look for `{config_dir}/alfred/pricing.toml` (user override); if absent, use the shipped default. Document in user docs how to override (e.g. copy the default file and edit). This allows users to update prices when providers change them without recompiling.
+   - Ship a default `pricing.toml` with Clido (e.g. in `clido-providers/data/pricing.toml` or embedded in the binary) containing per-model input/output/cache_creation/cache_read prices for major models (Claude Opus, Sonnet, Haiku, GPT-4o, etc.).
+   - At startup, load pricing: first look for `{config_dir}/clido/pricing.toml` (user override); if absent, use the shipped default. Document in user docs how to override (e.g. copy the default file and edit). This allows users to update prices when providers change them without recompiling.
    - Define a `ModelPricing` struct and a loader `fn load_pricing(config_dir: Option<&Path>) -> ModelPricing` that merges or falls back to built-in defaults when the file is missing or a model is not listed.
-2. **Staleness warning:** At startup, if the active `pricing.toml` (whether the default or user override) was last modified more than 90 days ago, emit a startup warning: `"Warning: your pricing.toml is {N} days old. Provider prices may have changed. Run 'alfred update-pricing' or edit {path} to update."`. The `alfred doctor` command (Phase 8.4) also surfaces this as a non-fatal warning. Record the file's mtime when loading; compare to `SystemTime::now()`.
-3. **`alfred update-pricing` command (V2+):** For V1, pricing updates are manual (edit the TOML). From V2 onward, optionally add an `alfred update-pricing` subcommand that fetches a canonical pricing file from a hosted URL (e.g. `https://raw.githubusercontent.com/your-org/alfred/main/data/pricing.toml`) and writes it to `{config_dir}/alfred/pricing.toml`. This command is offline-safe: it must fail gracefully with a clear message if the network is unavailable, never corrupting the existing file. Implementation: download to a temp file, validate TOML parse, then rename atomically.
+2. **Staleness warning:** At startup, if the active `pricing.toml` (whether the default or user override) was last modified more than 90 days ago, emit a startup warning: `"Warning: your pricing.toml is {N} days old. Provider prices may have changed. Run 'clido update-pricing' or edit {path} to update."`. The `clido doctor` command (Phase 8.4) also surfaces this as a non-fatal warning. Record the file's mtime when loading; compare to `SystemTime::now()`.
+3. **`clido update-pricing` command (V2+):** For V1, pricing updates are manual (edit the TOML). From V2 onward, optionally add an `clido update-pricing` subcommand that fetches a canonical pricing file from a hosted URL (e.g. `https://raw.githubusercontent.com/your-org/clido/main/data/pricing.toml`) and writes it to `{config_dir}/clido/pricing.toml`. This command is offline-safe: it must fail gracefully with a clear message if the network is unavailable, never corrupting the existing file. Implementation: download to a temp file, validate TOML parse, then rename atomically.
 4. **Missing model fallback:** If a model is requested that is not listed in the pricing table, log a `warn!` and fall back to a configurable `default_pricing` entry rather than erroring out. This prevents cost tracking failure from blocking the agent.
-5. In `alfred-agent/src/loop.rs`, add:
+5. In `clido-agent/src/loop.rs`, add:
    - `cumulative_cost_usd: f64`
    - After each model call: estimate cost from usage tokens × per-token price (from the loaded `ModelPricing`).
 6. After each turn, check: `if cumulative_cost_usd > config.max_budget_usd → return error`.
@@ -1325,7 +1325,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 1. `--permission-mode plan` → only read-only tools allowed.
 2. In `PermissionChecker`: `PlanOnly` restricts to `Read`, `Glob`, `Grep` (no Bash, no Write, no Edit).
 3. Agent still loops; model can still request state-changing tools, but they'll be denied with an inline message per spec (e.g. `[plan mode] Edit blocked — ExitPlanMode to allow`).
-4. **ExitPlanMode tool:** Register a tool `ExitPlanMode` (no parameters). When the model calls it, switch the session to agent mode (state-changing tools allowed). Display the inline announcement per spec (rich: "⚡ Switching to agent mode — state-changing tools now available"; ASCII: `[mode] Switching to agent mode - state-changing tools now available`). Session start in plan mode must mention: "Alfred is running in plan mode. State-changing tools are disabled. The agent can switch to agent mode using ExitPlanMode."
+4. **ExitPlanMode tool:** Register a tool `ExitPlanMode` (no parameters). When the model calls it, switch the session to agent mode (state-changing tools allowed). Display the inline announcement per spec (rich: "⚡ Switching to agent mode — state-changing tools now available"; ASCII: `[mode] Switching to agent mode - state-changing tools now available`). Session start in plan mode must mention: "Clido is running in plan mode. State-changing tools are disabled. The agent can switch to agent mode using ExitPlanMode."
 5. Test: run in plan mode; verify Write/Edit/Bash are blocked; call ExitPlanMode; verify state-changing tools then succeed and announcement was shown.
 
 ---
@@ -1343,7 +1343,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.6.2 Parallelize read-only tool calls
 
-1. In `alfred-agent/src/executor.rs`:
+1. In `clido-agent/src/executor.rs`:
    - When model returns multiple `ToolUse` blocks:
      - If ALL are read-only: execute them concurrently with `futures::future::join_all`.
      - If ANY is state-changing: execute all sequentially in order.
@@ -1352,7 +1352,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.6.3 Add semaphore-based concurrency limit
 
-1. In `alfred-agent/src/executor.rs`, add a `Semaphore` to `ToolExecutor`:
+1. In `clido-agent/src/executor.rs`, add a `Semaphore` to `ToolExecutor`:
 
    ```rust
    pub struct ToolExecutor {
@@ -1377,7 +1377,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.7.1 Define SubAgent types
 
-1. In `alfred-agent/src/subagent.rs`:
+1. In `clido-agent/src/subagent.rs`:
 
    ```rust
    pub struct SubAgentConfig {
@@ -1403,7 +1403,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.7.2 Implement SubAgentManager
 
-1. In `alfred-agent/src/subagent.rs`:
+1. In `clido-agent/src/subagent.rs`:
 
    ```rust
    pub struct SubAgentManager {
@@ -1419,7 +1419,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    Use a thread-safe cost accumulator (e.g. `Arc<AtomicU64>` storing cents, or `Arc<RwLock<f64>>` for USD) shared between the parent `AgentLoop` and the `SubAgentManager`. The parent's `AgentConfig.max_budget_usd` is passed into the manager.
 
 2. `spawn()`:
-   - **Budget check:** Before creating a subagent, check that `cost_accumulator.current() + subagent_cost_estimate` does not exceed `max_budget_usd`. The estimate can be conservative (e.g. assume one turn at current model price). If the check fails, return an error (e.g. `AlfredError::BudgetExceeded`) and do not spawn.
+   - **Budget check:** Before creating a subagent, check that `cost_accumulator.current() + subagent_cost_estimate` does not exceed `max_budget_usd`. The estimate can be conservative (e.g. assume one turn at current model price). If the check fails, return an error (e.g. `ClidoError::BudgetExceeded`) and do not spawn.
    - Create a new `AgentLoop` with shared `Arc<dyn ModelProvider>`, `Arc<ToolRegistry>`, and the same `cost_accumulator`. The subagent's cost tracking (Phase 4.4) must write back to this shared accumulator so that every dollar spent by a subagent counts against the parent's budget.
    - Apply `subagent_type` restrictions (ReadOnly → PlanOnly permission mode).
    - Spawn with `tokio::task::spawn(async move { agent.run(&config.prompt).await })`.
@@ -1431,7 +1431,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.7.3 Implement `AgentTool` (spawns subagents from within the loop)
 
-1. Add `AgentTool` to `alfred-tools/src/`:
+1. Add `AgentTool` to `clido-tools/src/`:
    - Parameters: `prompt` (string, required), `description` (string, optional), `subagent_type` (string, optional).
    - `is_read_only()` → `false` (subagents may write).
    - `execute()`: calls `SubAgentManager::spawn()` and immediately waits (synchronous from the outer agent's perspective).
@@ -1461,7 +1461,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.8.1 Define task graph types
 
-1. In `alfred-planner/src/task_graph.rs`:
+1. In `clido-planner/src/task_graph.rs`:
 
    ```rust
    pub struct Task {
@@ -1492,7 +1492,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.8.2 Define Planner trait
 
-1. In `alfred-planner/src/planner.rs`:
+1. In `clido-planner/src/planner.rs`:
 
    ```rust
    #[async_trait::async_trait]
@@ -1510,7 +1510,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    - Builds a system prompt instructing the model to output a JSON `TaskGraph`.
    - Calls `provider.complete()` with a single user message containing the task prompt.
    - Parses response as JSON; deserializes into `TaskGraph`.
-   - Validates the graph; on failure returns `AlfredError::Planner`.
+   - Validates the graph; on failure returns `ClidoError::Planner`.
    - System prompt example:
 
      ```
@@ -1524,7 +1524,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.8.3 Implement TaskExecutor
 
-1. In `alfred-planner/src/executor.rs`:
+1. In `clido-planner/src/executor.rs`:
 
    ```rust
    pub struct TaskExecutor {
@@ -1552,7 +1552,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 1. **Checkpoint:** Before running `TaskExecutor::execute()` (same mechanism as Milestone 5.6): if cwd is a git repository, record a baseline (e.g. `git status --porcelain`, `git diff --stat` or a stash). If execution fails partway, the user can restore from this baseline to undo partial edits.
 2. **On graph execution failure:** Report which nodes succeeded and which failed (see 4.8.3). Do not leave the user without a clear picture of what was applied.
-3. **Resume-plan:** Provide an `alfred resume-plan {session_id}` (or equivalent) mechanism: load the last executed plan and its `ExecutionSummary` from the session; allow the user to re-run from the next unexecuted node (or re-run from a chosen node). This requires persisting the plan and per-node results in the session so that a subsequent run can continue rather than re-execute from scratch. Document that resuming may require manual fix of the codebase if files were changed between the failed run and the resume.
+3. **Resume-plan:** Provide an `clido resume-plan {session_id}` (or equivalent) mechanism: load the last executed plan and its `ExecutionSummary` from the session; allow the user to re-run from the next unexecuted node (or re-run from a chosen node). This requires persisting the plan and per-node results in the session so that a subsequent run can continue rather than re-execute from scratch. Document that resuming may require manual fix of the codebase if files were changed between the failed run and the resume.
 
 #### 4.8.4 Implement plan-refine loop
 
@@ -1565,7 +1565,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 4.8.5 Wire planner into CLI
 
-1. Add `--planner` flag to `alfred-cli`.
+1. Add `--planner` flag to `clido-cli`.
 2. If `--planner` flag present or `config.use_planner = true`:
    - Run `ModelPlanner::plan()` first.
    - Display the plan to user (see Milestone 8.6).
@@ -1589,20 +1589,20 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 5.1.0 Shared retry and backoff (all providers)
 
-1. In `alfred-providers/src/retry.rs`:
+1. In `clido-providers/src/retry.rs`:
    - Implement a shared middleware (or helper) used by **every** provider (Anthropic, OpenAI, OpenRouter, Alibaba, and any future HTTP-based provider).
    - On HTTP 429 (rate limit): parse `Retry-After` header when present; otherwise use exponential backoff: 1s, 2s, 4s, 8s. Max 3 retries.
    - On HTTP 5xx: retry up to 3 times with the same backoff.
    - Use `tokio::time::sleep` between retries. Log each retry at `warn!` level.
-   - On HTTP 4xx (except 429): do not retry, return `AlfredError::Provider`.
+   - On HTTP 4xx (except 429): do not retry, return `ClidoError::Provider`.
    - Expose something like `async fn with_retry<F, Fut>(f: F) -> Result<...>` so each provider's `complete()` can wrap its HTTP call.
-2. **Anthropic** (5.1.1): Use the shared retry in `alfred-providers/src/anthropic.rs` for every `complete()` request.
+2. **Anthropic** (5.1.1): Use the shared retry in `clido-providers/src/anthropic.rs` for every `complete()` request.
 3. **OpenAI / OpenRouter / Alibaba** (Phase 4.1): When implementing those providers, use the same `retry.rs` middleware for their HTTP calls. Do not implement retry only for Anthropic; all providers must use the shared logic.
 4. Test: mock server returning 429 → verify retry behavior for at least one provider; test that a second provider (e.g. OpenAI) also retries when its mock returns 429.
 
 #### 5.1.1 Anthropic provider uses shared retry
 
-1. In `alfred-providers/src/anthropic.rs`, wrap every `complete()` HTTP request with the shared `retry::with_retry` (or equivalent) from 5.1.0.
+1. In `clido-providers/src/anthropic.rs`, wrap every `complete()` HTTP request with the shared `retry::with_retry` (or equivalent) from 5.1.0.
 2. Test: mock Anthropic server returning 429 → verify retry behavior (as in 5.1.0).
 
 #### 5.1.2 Handle tool execution failures gracefully
@@ -1614,7 +1614,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 5.1.3 Validate tool input schemas before execution
 
-1. In `alfred-tools/src/registry.rs`:
+1. In `clido-tools/src/registry.rs`:
    - Before calling `tool.execute(input)`, validate `input` against the tool's `schema()` using `jsonschema` crate.
    - If validation fails: return `ToolOutput { is_error: true, content: "InputValidationError: ..." }` without executing.
 2. Test: call Grep with unknown parameter → verify InputValidationError (matching observed format).
@@ -1644,7 +1644,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 1. Add `SessionStorage::fork(session_id: &str) -> Result<String>`:
    - Copies session JSONL to a new session_id file.
    - Returns new session_id.
-2. Expose via `alfred fork {session_id}` subcommand.
+2. Expose via `clido fork {session_id}` subcommand.
 3. Test: fork a session; run both; verify they diverge independently.
 
 #### 5.2.3 Validate file state on resume
@@ -1654,7 +1654,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    - For each such file: read current mtime (or compute current content hash); compare to the stored value.
    - If any file has changed: warn the user and offer to abort resume, or continue anyway (resuming may then apply edits to outdated content and produce incorrect diffs or corruption). In non-interactive mode, exit with an error unless the user has passed a flag such as `--resume-ignore-stale`.
 2. Implementation details (prompt text, flag name, and tests) are in Milestone 5.6.4.
-3. Test: complete a session with one Edit; change that file on disk; run `alfred --resume {id}`; verify validation runs and user is prompted or error is returned.
+3. Test: complete a session with one Edit; change that file on disk; run `clido --resume {id}`; verify validation runs and user is prompted or error is returned.
 
 ---
 
@@ -1664,7 +1664,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 #### 5.3.1 Handle Ctrl-C
 
-1. Install `tokio::signal::ctrl_c()` handler in `alfred-cli/src/main.rs`.
+1. Install `tokio::signal::ctrl_c()` handler in `clido-cli/src/main.rs`.
 2. On Ctrl-C:
    - If tool is currently executing: let it finish or timeout after 2s.
    - Print `"\nInterrupted. Session saved to {session_id}."`.
@@ -1699,12 +1699,12 @@ Coverage is measured with `cargo-tarpaulin --all-features`. CI fails if overall 
 
 | Crate | V1 floor | V2 floor | V3 floor | V4 floor |
 |---|---|---|---|---|
-| `alfred-agent` (agent loop, executor) | **70 %** | 75 % | 80 % | 85 % |
-| `alfred-providers` (all providers) | **75 %** | 80 % | 85 % | 85 % |
-| `alfred-context` (context engine, compaction) | **70 %** | 75 % | 80 % | 80 % |
-| `alfred-tools` (all built-in tools) | **80 %** | 85 % | 85 % | 85 % |
-| `alfred-session` (JSONL persistence) | **75 %** | 80 % | 80 % | 80 % |
-| `alfred-memory` *(V3+)* | — | — | **70 %** | 80 % |
+| `clido-agent` (agent loop, executor) | **70 %** | 75 % | 80 % | 85 % |
+| `clido-providers` (all providers) | **75 %** | 80 % | 85 % | 85 % |
+| `clido-context` (context engine, compaction) | **70 %** | 75 % | 80 % | 80 % |
+| `clido-tools` (all built-in tools) | **80 %** | 85 % | 85 % | 85 % |
+| `clido-session` (JSONL persistence) | **75 %** | 80 % | 80 % | 80 % |
+| `clido-memory` *(V3+)* | — | — | **70 %** | 80 % |
 | Workspace overall | **70 %** | 75 %  | 78 % | 82 % |
 
 **V1 critical-path tests (must pass before V1 release, regardless of coverage):**
@@ -1726,7 +1726,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 #### 5.5.1 Define memory types
 
-1. In `alfred-memory/src/lib.rs`:
+1. In `clido-memory/src/lib.rs`:
 
    ```rust
    pub enum MemoryType {
@@ -1773,7 +1773,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 #### 5.5.2 Implement short-term memory (in-session)
 
-1. In `alfred-memory/src/short_term.rs`:
+1. In `clido-memory/src/short_term.rs`:
    - `InMemoryStore`: `HashMap<String, MemoryEntry>` guarded by `tokio::sync::RwLock`.
    - `search()`: substring match on `content` (no embedding needed for in-session speed).
    - Used for: noting intermediate findings within a session that should be referenced later.
@@ -1781,7 +1781,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 #### 5.5.3 Implement local embedding engine
 
-1. In `alfred-memory/src/embeddings.rs`:
+1. In `clido-memory/src/embeddings.rs`:
    - Use `fastembed` crate (ONNX-based, local inference, no API key, no internet).
    - Model: `EmbeddingModel::BGESmallENV15` — 384-dim, ~25MB model file, fast CPU inference.
    - Model file is downloaded once on first use to `{data_dir}/models/` and cached locally.
@@ -1807,7 +1807,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 #### 5.5.4 Implement long-term memory (SQLite + FTS5 + sqlite-vec)
 
-1. In `alfred-memory/src/long_term.rs`:
+1. In `clido-memory/src/long_term.rs`:
    - Use `rusqlite` (sync, via `tokio::task::spawn_blocking`).
    - Load `sqlite-vec` extension on connection open: `conn.load_extension(sqlite_vec::sqlite3_vec_init, None)`.
    - Schema:
@@ -1865,7 +1865,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
    - This ensures the 10 injected memories are semantically relevant to the current task, not just the most recent ones.
 
-3. Implement `MemoryTool` in `alfred-tools/`:
+3. Implement `MemoryTool` in `clido-tools/`:
    - Parameters: `action` (`save` | `search` | `list`), `content` (for save), `query` (for search).
    - On `save`: generate embedding for `content`, populate `entry.embedding`, call `memory.save()`.
    - On `search`: call `memory.search(query, 10)` (hybrid).
@@ -1878,9 +1878,9 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 1. **Max entries and eviction:** Add a configurable `max_memory_entries` (default 10,000) to the long-term store. When inserting a new entry would exceed this limit, evict the least-recently-used entry (or the oldest by `created_at`) so the store size stays bounded. Config key e.g. `[memory] max_entries = 10000`.
 2. **Deduplication on save:** Before inserting a new memory, run a semantic similarity check: if an existing entry has cosine similarity to the new entry's embedding above a threshold (e.g. 0.95), treat the new save as a no-op (skip insert, or update the existing entry's `created_at` so it is not evicted soon). This avoids storing many near-duplicate insights across sessions.
-3. **Per-session write cap:** To prevent runaway `MemoryTool` usage from flooding the store (a misguided model saving every line of output), enforce a configurable `max_memory_writes_per_session` (default: 50). Config key: `[memory] max_writes_per_session = 50`. When the cap is reached mid-session, `MemoryTool` returns `is_error: true` with the message: `"Memory write limit reached for this session ({n} of {max}). Alfred will not save more memories this session. Existing memories are still readable."`. The cap resets at the start of each new session. Rationale: without a write cap, a model that repeatedly calls `MemoryTool` in a long session can fill `max_memory_entries` with low-quality entries, evicting valuable older memories. The cap forces selective saving.
-4. **Manual prune command:** Implement `alfred memory prune` (or `alfred memory cleanup`): optionally accept `--older-than-days N` or `--keep N`; remove entries that do not meet the keep criteria. Without arguments, prune to `max_memory_entries` by evicting oldest first. This gives users control when the automatic eviction is not enough.
-5. Test: insert 10,001 entries with max_entries=10,000 → verify size stays at 10,000. Save the same content twice (or two very similar contents) → verify dedup prevents duplicate. Run `alfred memory prune --keep 100` → verify only 100 entries remain.
+3. **Per-session write cap:** To prevent runaway `MemoryTool` usage from flooding the store (a misguided model saving every line of output), enforce a configurable `max_memory_writes_per_session` (default: 50). Config key: `[memory] max_writes_per_session = 50`. When the cap is reached mid-session, `MemoryTool` returns `is_error: true` with the message: `"Memory write limit reached for this session ({n} of {max}). Clido will not save more memories this session. Existing memories are still readable."`. The cap resets at the start of each new session. Rationale: without a write cap, a model that repeatedly calls `MemoryTool` in a long session can fill `max_memory_entries` with low-quality entries, evicting valuable older memories. The cap forces selective saving.
+4. **Manual prune command:** Implement `clido memory prune` (or `clido memory cleanup`): optionally accept `--older-than-days N` or `--keep N`; remove entries that do not meet the keep criteria. Without arguments, prune to `max_memory_entries` by evicting oldest first. This gives users control when the automatic eviction is not enough.
+5. Test: insert 10,001 entries with max_entries=10,000 → verify size stays at 10,000. Save the same content twice (or two very similar contents) → verify dedup prevents duplicate. Run `clido memory prune --keep 100` → verify only 100 entries remain.
 6. Test: call `MemoryTool` 51 times in one session (max_writes_per_session=50) → verify 51st call returns `is_error: true` with cap message; verify 50 entries were written, not 51.
 7. Document in user docs: how to inspect memory size, how to adjust `max_memory_entries` and `max_writes_per_session`, and when to run manual prune.
 
@@ -1890,7 +1890,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 **Dependency:** 5.1 complete, 5.2 complete, 3.3 complete.
 
-**Rationale:** If Alfred makes multiple `Edit` calls in a session and edit 1–3 succeed but edit 4 fails catastrophically (crash, SIGKILL), the codebase is left in a partial state. Graceful edit failures return `is_error: true` and the model can recover; unclean exits do not. This milestone adds detection and user visibility so operators can recover from partial edits.
+**Rationale:** If Clido makes multiple `Edit` calls in a session and edit 1–3 succeed but edit 4 fails catastrophically (crash, SIGKILL), the codebase is left in a partial state. Graceful edit failures return `is_error: true` and the model can recover; unclean exits do not. This milestone adds detection and user visibility so operators can recover from partial edits.
 
 #### 5.6.1 Session start: baseline snapshot
 
@@ -1909,7 +1909,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 1. On process exit, if the session did not complete normally (no final result line, or process received SIGINT/SIGTERM):
    - If a baseline was recorded: run `git status --porcelain` again; diff against baseline to list files that were modified during the session.
-   - Print to stderr: `"Session ended without completing. The following files were modified during this session: {list}. Review changes with git diff or resume with alfred --resume {session_id}."`
+   - Print to stderr: `"Session ended without completing. The following files were modified during this session: {list}. Review changes with git diff or resume with clido --resume {session_id}."`
 2. Test: start session, perform one Edit, kill process (SIGTERM); verify warning lists the edited file.
 
 #### 5.6.4 Session resume: detect stale edited files
@@ -1917,7 +1917,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 1. When resuming a session (Phase 5.2), load the list of files that were edited in the previous run (from session JSONL / metadata).
 2. For each such file: read current mtime (or hash); compare to the value stored at the time of the last successful edit in that session.
 3. If any file has changed (mtime or hash differs): before continuing, prompt the user (or in non-interactive mode, emit a warning and exit with an error unless `--resume-ignore-stale` is set): `"The following files were modified since the last session run: {list}. Resuming may apply edits to outdated content. Abort (a), continue anyway (c), or exit (e)."`
-4. Test: run session with one Edit; manually change the edited file; run `alfred --resume {id}`; verify warning and choice are offered.
+4. Test: run session with one Edit; manually change the edited file; run `clido --resume {id}`; verify warning and choice are offered.
 
 ---
 
@@ -1934,14 +1934,14 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 #### 6.1.1 Profile startup time
 
 1. Add `tracing::span!` around startup steps: config load, provider init, tool registry build.
-2. Use `cargo flamegraph` or `samply` to profile a simple `alfred -p "hello"` run.
+2. Use `cargo flamegraph` or `samply` to profile a simple `clido -p "hello"` run.
 3. Target: `< 200ms` to first API request.
 
 #### 6.1.2 Lazy provider initialization
 
 1. Wrap provider in `tokio::sync::OnceCell`; initialize on first use.
 2. Do not perform any I/O in `ProviderFactory::build()` — only construct structs.
-3. Move connection test (if any) to an optional `alfred doctor` command.
+3. Move connection test (if any) to an optional `clido doctor` command.
 
 #### 6.1.3 Optimize JSON serialization
 
@@ -1990,7 +1990,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 #### 6.4.1 Implement in-memory LRU cache for file reads
 
-1. In `alfred-tools/src/cache.rs`:
+1. In `clido-tools/src/cache.rs`:
    - Use `lru` crate: `LruCache<PathBuf, CacheEntry>` — path → `CacheEntry`.
    - `CacheEntry` stores `content: String`, `mtime: SystemTime`, and `content_hash: u64` (xxHash or Blake3 of the content, chosen for speed not security).
    - Cache capacity: configurable, default 50 entries.
@@ -2041,7 +2041,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
    - Deny: network access, write outside cwd, access to `~/.config`, `~/.ssh`, `~/.gnupg`.
    - **Deprecation note:** `sandbox-exec` is deprecated as of macOS 14 Sonoma and may be removed in a future release. Users on current macOS may see deprecation warnings. Document in user-facing docs that `--sandbox` on macOS is best-effort on modern versions and that a hardened solution is a V2+ follow-on.
 2. **Alternative paths (for a future hardened solution):**
-   - **App Sandbox:** Use Apple's App Sandbox entitlements (requires code signing and possibly notarization). Suitable if Alfred is distributed as a signed app bundle.
+   - **App Sandbox:** Use Apple's App Sandbox entitlements (requires code signing and possibly notarization). Suitable if Clido is distributed as a signed app bundle.
    - **Process-level containment:** Spawn Bash inside a helper that uses `sandbox-exec` only when available, or a lightweight container mechanism (e.g. `darwin-containers` or similar) if the ecosystem matures.
    - Until then: `--sandbox` on macOS remains best-effort; Linux seccomp/Docker sandbox (7.1.3) is the primary hardened path.
 3. Gate behind `--sandbox` CLI flag (opt-in initially).
@@ -2086,7 +2086,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 
 1. Every tool call (name, input summary, result summary, is_error, duration_ms) → append to `{data_dir}/audit.jsonl`.
 2. This is separate from the session file; the audit log is append-only and never compacted.
-3. Expose via `alfred audit` subcommand: tail or search the audit log.
+3. Expose via `clido audit` subcommand: tail or search the audit log.
 
 ---
 
@@ -2114,11 +2114,11 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
    command = "git diff --stat"
    ```
 
-3. Hook receives env vars: `ALFRED_TOOL_NAME`, `ALFRED_TOOL_INPUT`, `ALFRED_TOOL_RESULT`, `ALFRED_SESSION_ID`.
+3. Hook receives env vars: `CLIDO_TOOL_NAME`, `CLIDO_TOOL_INPUT`, `CLIDO_TOOL_RESULT`, `CLIDO_SESSION_ID`.
 
 #### 8.1.2 Implement hook executor
 
-1. In `alfred-agent/src/events.rs`:
+1. In `clido-agent/src/events.rs`:
    - After each tool call, check for matching hooks.
    - For matching hooks: spawn subprocess `sh -c {hook_command}` with env vars.
    - Capture output; log at `debug!` level.
@@ -2175,7 +2175,7 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
    - `{ "type": "tool_use", "name": "Bash", "input": {...} }` when tool starts.
    - `{ "type": "tool_result", "name": "Bash", "is_error": false, "content": "..." }` when tool finishes.
    - `{ "type": "result", "exit_status": "completed"|"max_turns_reached"|"budget_exceeded"|"error", ... }` at end. The same `exit_status` taxonomy as 8.2.1 applies.
-2. Test: pipe `alfred --output-format stream-json` to `jq` → verify each line is valid JSON.
+2. Test: pipe `clido --output-format stream-json` to `jq` → verify each line is valid JSON.
 
 ---
 
@@ -2186,11 +2186,11 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
 #### 8.3.1 Implement MCP client
 
 1. MCP tools expose a JSON-RPC interface over stdio or HTTP.
-2. In `alfred-tools/src/mcp.rs`:
+2. In `clido-tools/src/mcp.rs`:
    - `McpClient` struct: connects to an MCP server process (stdio) or HTTP endpoint.
    - `fn list_tools(&self) -> Vec<ToolSchema>` — calls MCP `tools/list`.
    - `fn call_tool(&self, name: &str, input: Value) -> ToolOutput` — calls MCP `tools/call`.
-3. In `alfred-tools/src/registry.rs`: allow dynamic registration of MCP tools at startup.
+3. In `clido-tools/src/registry.rs`: allow dynamic registration of MCP tools at startup.
 
 #### 8.3.2 Wire MCP config
 
@@ -2204,12 +2204,12 @@ The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search fo
    ```
 
 2. At startup: spawn configured MCP servers, register their tools.
-3. Implement `alfred-cli/src/commands/run.rs` MCP startup routine.
+3. Implement `clido-cli/src/commands/run.rs` MCP startup routine.
 4. Tool guidance (Milestone 3.4.3) regenerates to include MCP tools after registration.
 
 #### 8.3.3 MCP security and trust model
 
-MCP servers are external processes that register as tools. They can read files, run commands, or exfiltrate data if malicious or compromised. Alfred's permission system (Phase 4.3) must apply to MCP tools; they must not bypass it.
+MCP servers are external processes that register as tools. They can read files, run commands, or exfiltrate data if malicious or compromised. Clido's permission system (Phase 4.3) must apply to MCP tools; they must not bypass it.
 
 1. **Allowlist:** MCP servers are only loaded if explicitly declared in the user's config (`config.toml` or equivalent). There is no automatic discovery of MCP servers. The list of MCP server names and commands is user-controlled (allowlist).
 2. **Permission behavior:** MCP tools are treated like built-in state-changing tools for permission purposes. Default to `AskUser` (Phase 4.3) for any MCP tool call unless the user has added the tool or server to an allow list for the session. Do not treat MCP tools as inherently read-only.
@@ -2218,7 +2218,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 ---
 
-### Milestone 8.4 — `alfred doctor` Command
+### Milestone 8.4 — `clido doctor` Command
 
 **Dependency:** 4.5 complete.
 
@@ -2226,7 +2226,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.4.1 Implement health check command
 
-**Version-awareness rule:** `alfred doctor` must only check capabilities that are present in the currently running binary. Checking for a missing database or an unbuilt feature as if it were a failure confuses users and hides real issues. The check list below is grouped by the release that introduces each check; later releases extend the list.
+**Version-awareness rule:** `clido doctor` must only check capabilities that are present in the currently running binary. Checking for a missing database or an unbuilt feature as if it were a failure confuses users and hides real issues. The check list below is grouped by the release that introduces each check; later releases extend the list.
 
 **V1 checks (always run):**
 - Rust/Cargo version (from `rustc --version`).
@@ -2260,10 +2260,10 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.5.1 Generate shell completions
 
-1. Add `build.rs` to `alfred-cli` using `clap_complete`:
+1. Add `build.rs` to `clido-cli` using `clap_complete`:
 
    ```rust
-   generate(Bash, &mut app, "alfred", &mut std::io::stdout());
+   generate(Bash, &mut app, "clido", &mut std::io::stdout());
    ```
 
 2. Generate completions for: bash, zsh, fish.
@@ -2271,8 +2271,8 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.5.2 Generate man page
 
-1. Use `clap_mangen` in `build.rs` to generate `alfred.1`.
-2. Add `alfred man` subcommand that prints the man page.
+1. Use `clap_mangen` in `build.rs` to generate `clido.1`.
+2. Add `clido man` subcommand that prints the man page.
 
 ---
 
@@ -2284,7 +2284,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.6.1 Implement live tool progress display
 
-1. In `alfred-cli/src/output/streaming.rs`, enhance existing tool status display:
+1. In `clido-cli/src/output/streaming.rs`, enhance existing tool status display:
    - When tool starts: print `"⏳ {tool_name}: {input_summary}"` on a new line.
    - When tool ends (success): overwrite/replace with `"✓ {tool_name}: {input_summary} ({duration_ms}ms)"`.
    - When tool ends (error): `"✗ {tool_name}: {input_summary} — {error_preview}"`.
@@ -2293,7 +2293,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.6.2 Implement plan display for planner mode
 
-1. In `alfred-cli/src/output/plan_display.rs`:
+1. In `clido-cli/src/output/plan_display.rs`:
    - `fn display_plan(graph: &TaskGraph)` — renders the task graph as a numbered list:
 
      ```
@@ -2317,7 +2317,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.6.3 Add `--verbose` flag for detailed tool I/O
 
-1. `alfred --verbose` prints full tool inputs and outputs inline.
+1. `clido --verbose` prints full tool inputs and outputs inline.
 2. Without `--verbose`: show only name and a short input summary.
 3. Test: verify verbose mode shows full `old_string`/`new_string` for Edit calls.
 
@@ -2325,15 +2325,15 @@ MCP servers are external processes that register as tools. They can read files, 
 
 ### Milestone 8.7 — Repository Indexing (Optional Advanced Feature)
 
-**Dependency:** Phase 5 complete, `alfred-index` crate created in Phase 1.
+**Dependency:** Phase 5 complete, `clido-index` crate created in Phase 1.
 
 **Rationale:** For large repositories (>10k files), Glob/Grep over raw files is slow. A pre-built index enables sub-millisecond symbol lookup and semantic search without touching every file.
 
-**Note:** This is gated behind `alfred index build` and `config.use_index = true`. The agent works without it; the index is purely a performance and capability enhancement.
+**Note:** This is gated behind `clido index build` and `config.use_index = true`. The agent works without it; the index is purely a performance and capability enhancement.
 
 #### 8.7.1 Implement file index
 
-1. In `alfred-index/src/file_index.rs`:
+1. In `clido-index/src/file_index.rs`:
    - Walk repository using `ignore::WalkBuilder` (respects .gitignore).
    - Store: path, size, mtime, language (from extension).
    - Persist as JSON file: `{data_dir}/index/{sanitized_path}/files.json`.
@@ -2342,7 +2342,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.7.2 Implement symbol extraction with tree-sitter
 
-1. In `alfred-index/src/symbol_index.rs`:
+1. In `clido-index/src/symbol_index.rs`:
    - Add `tree-sitter` + language grammars as optional dependencies:
      - `tree-sitter-rust`, `tree-sitter-javascript`, `tree-sitter-python`, `tree-sitter-typescript`.
    - For each supported file: parse with tree-sitter, extract:
@@ -2356,7 +2356,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.7.3 Implement full-text search with tantivy
 
-1. In `alfred-index/src/search.rs`:
+1. In `clido-index/src/search.rs`:
    - Use `tantivy` crate for full-text indexing of file contents.
    - Fields: `path`, `content`, `language`.
    - `fn index_file(path: &Path, content: &str, language: &str)`.
@@ -2381,10 +2381,10 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 8.7.5 Wire index CLI commands
 
-1. `alfred index build` — build index for current project.
-2. `alfred index update` — incremental update.
-3. `alfred index status` — show index freshness, file count, symbol count.
-4. On `alfred` startup with `use_index = true`: check if index exists; warn if stale (mtime > 10 min).
+1. `clido index build` — build index for current project.
+2. `clido index update` — incremental update.
+3. `clido index status` — show index freshness, file count, symbol count.
+4. On `clido` startup with `use_index = true`: check if index exists; warn if stale (mtime > 10 min).
 
 ---
 
@@ -2400,15 +2400,15 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 9.1.1 Unit test coverage targets
 
-1. `alfred-core`: ≥ 95% coverage (pure data types, easiest).
-2. `alfred-tools`: ≥ 90% coverage (test each tool with fixture files).
-3. `alfred-providers`: ≥ 85% coverage (use `wiremock` for HTTP mocking).
-4. `alfred-agent`: ≥ 80% coverage (use mock provider and mock tools).
-5. `alfred-context`: ≥ 85% coverage (token counting, compaction, guidance logic).
-6. `alfred-storage`: ≥ 85% coverage (JSONL read/write with tempfiles).
-7. `alfred-memory`: ≥ 85% coverage (both short-term and SQLite long-term).
-8. `alfred-planner`: ≥ 80% coverage (task graph validation, topological sort, executor).
-9. `alfred-index`: ≥ 75% coverage (file walk, symbol extraction, tantivy integration).
+1. `clido-core`: ≥ 95% coverage (pure data types, easiest).
+2. `clido-tools`: ≥ 90% coverage (test each tool with fixture files).
+3. `clido-providers`: ≥ 85% coverage (use `wiremock` for HTTP mocking).
+4. `clido-agent`: ≥ 80% coverage (use mock provider and mock tools).
+5. `clido-context`: ≥ 85% coverage (token counting, compaction, guidance logic).
+6. `clido-storage`: ≥ 85% coverage (JSONL read/write with tempfiles).
+7. `clido-memory`: ≥ 85% coverage (both short-term and SQLite long-term).
+8. `clido-planner`: ≥ 80% coverage (task graph validation, topological sort, executor).
+9. `clido-index`: ≥ 75% coverage (file walk, symbol extraction, tantivy integration).
 
 #### 9.1.2 End-to-end integration tests
 
@@ -2437,14 +2437,14 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 9.2.1 Add criterion benchmarks
 
-1. In `alfred-core/benches/`:
+1. In `clido-core/benches/`:
    - Benchmark JSON serialization of large `Message` arrays (simulating 50-turn context).
-2. In `alfred-context/benches/`:
+2. In `clido-context/benches/`:
    - Benchmark token counting for 100k-token contexts.
-3. In `alfred-tools/benches/`:
+3. In `clido-tools/benches/`:
    - Benchmark Grep over a large directory (e.g. the Linux kernel source).
    - Benchmark file read cache hit vs. miss.
-4. In `alfred-index/benches/`:
+4. In `clido-index/benches/`:
    - Benchmark symbol search over a 1000-symbol index.
 5. Run: `cargo bench`. Track in CI as regression check.
 
@@ -2458,7 +2458,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 9.3.1 Define telemetry event types
 
-1. In `alfred-core/src/telemetry.rs`:
+1. In `clido-core/src/telemetry.rs`:
 
    ```rust
    pub struct TelemetryEvent {
@@ -2484,25 +2484,25 @@ MCP servers are external processes that register as tools. They can read files, 
 
 #### 9.3.2 Instrument key code paths
 
-1. In `alfred-agent/src/executor.rs`:
+1. In `clido-agent/src/executor.rs`:
    - Before tool call: record start time.
    - After tool call: emit `TelemetryEvent { event_type: ToolCall, duration_ms, metadata: { tool_name, is_error } }`.
-2. In `alfred-providers/src/anthropic.rs`:
+2. In `clido-providers/src/anthropic.rs`:
    - Emit `ProviderRequest` event with `{ model, input_tokens, output_tokens, cost_usd, duration_ms }`.
    - Emit `ProviderRetry` event on each retry attempt.
-3. In `alfred-context/src/compaction.rs`:
+3. In `clido-context/src/compaction.rs`:
    - Emit `CompactionTriggered` with `{ tokens_before, tokens_after }`.
-4. In `alfred-planner/src/planner.rs`:
+4. In `clido-planner/src/planner.rs`:
    - Emit `PlannerCall` with `{ task_count, duration_ms }`.
 
 #### 9.3.3 Telemetry output targets
 
 1. Default: emit to `tracing::info!` spans (already wired to `tracing-subscriber`).
 2. Optional: write structured JSON to `{data_dir}/telemetry.jsonl` (append-only).
-3. `alfred stats` subcommand:
+3. `clido stats` subcommand:
    - Read `telemetry.jsonl` for current session or all sessions.
    - Display: tool call frequency table, average latency per tool, total model cost, retry rate.
-4. Test: run a multi-step task; verify `alfred stats` outputs correct tool counts.
+4. Test: run a multi-step task; verify `clido stats` outputs correct tool counts.
 
 ---
 
@@ -2510,7 +2510,7 @@ MCP servers are external processes that register as tools. They can read files, 
 
 **Dependency:** 9.2 complete.
 
-**Documentation standard:** All documentation in this milestone — and throughout the project — must meet the bar defined in `devdocs/guides/software-development-best-practices.md` under "Documentation Rules". The short version: everything is documented, always, for both human readers and automated agents (including Alfred itself). Documentation is not a finishing step; it is part of each change.
+**Documentation standard:** All documentation in this milestone — and throughout the project — must meet the bar defined in `devdocs/guides/software-development-best-practices.md` under "Documentation Rules". The short version: everything is documented, always, for both human readers and automated agents (including Clido itself). Documentation is not a finishing step; it is part of each change.
 
 #### 9.4.1 Public API documentation (agent-facing)
 
@@ -2518,7 +2518,7 @@ MCP servers are external processes that register as tools. They can read files, 
 2. Add `///` doc comments to every public type, function, and trait method. Describe what it does, what it assumes, and what it returns or mutates — not just the name restated.
 3. Run `cargo doc --workspace --no-deps`; verify no warnings.
 4. Add doc tests (`///` examples) for key public functions.
-5. Write an `ALFRED.md` at the root of every crate in the workspace. This file is written for AI coding agents (including Alfred) working on that crate. Include:
+5. Write an `CLIDO.md` at the root of every crate in the workspace. This file is written for AI coding agents (including Clido) working on that crate. Include:
    - The crate's single responsibility.
    - Which files to read first.
    - Key invariants and constraints.
@@ -2529,19 +2529,19 @@ MCP servers are external processes that register as tools. They can read files, 
 #### 9.4.2 User documentation (human-facing)
 
 1. Write `README.md`:
-   - Installation (`cargo install alfred` or binary releases).
+   - Installation (`cargo install clido` or binary releases).
    - Quick start (5 lines to first working agent call).
-   - Full configuration reference: **every key in `config.toml` and `.alfred/config.toml`**, its type, default, valid values, and a one-line description. No key ships undocumented.
+   - Full configuration reference: **every key in `config.toml` and `.clido/config.toml`**, its type, default, valid values, and a one-line description. No key ships undocumented.
    - Profile system: how to define and switch profiles; example profiles for common use cases (cheap, local, review).
    - Provider setup: API keys, env var names, local model setup (Ollama), OpenRouter setup.
    - All CLI flags with examples, including `--profile`, `--provider`, `--model`.
    - Error message reference: the most common user-visible errors and how to resolve them.
    - Session management.
    - MCP configuration.
-   - Memory system usage (including `alfred memory prune`).
+   - Memory system usage (including `clido memory prune`).
    - Planner mode.
    - Repo indexing.
-   - Self-improvement loop commands (`alfred reflect`, `alfred improve`).
+   - Self-improvement loop commands (`clido reflect`, `clido improve`).
 2. Write `CONTRIBUTING.md`: how to add a new tool, how to add a new provider, how to define a new profile, documentation requirements per change.
 
 #### 9.4.3 Architecture documentation (human-facing)
@@ -2553,7 +2553,7 @@ MCP servers are external processes that register as tools. They can read files, 
    - Tool schema format spec.
    - Task graph JSON schema.
    - Memory DB schema.
-   - Config schema: full field-by-field documentation of `config.toml`, `.alfred/config.toml`, and `pricing.toml`.
+   - Config schema: full field-by-field documentation of `config.toml`, `.clido/config.toml`, and `pricing.toml`.
    - Profile system design: how config loading, merging, and profile resolution work end to end.
 
 #### 9.4.4 Ongoing documentation hygiene
@@ -2595,23 +2595,23 @@ Implementation:
 1. At startup on Windows, detect whether a POSIX-compatible shell is available (`bash`, `sh` via WSL, or Git Bash). Detection order: `bash.exe` on `PATH`, then `wsl bash`. Store result in a static `OnceCell<Option<PathBuf>>`.
 2. If no POSIX shell found: `BashTool::execute()` returns `is_error: true` with message: `"BashTool is not available on Windows without a POSIX-compatible shell (bash/WSL/Git Bash). Install Git Bash or WSL to enable shell commands."`. Do not panic.
 3. If a shell is found: run commands through it (e.g. `bash.exe -c "{command}"`).
-4. `alfred doctor` on Windows adds a V1 check: verify POSIX shell availability; print a clear warning (not a failure) if absent.
+4. `clido doctor` on Windows adds a V1 check: verify POSIX shell availability; print a clear warning (not a failure) if absent.
 5. Document this limitation in the user-facing docs and README under "Platform Support."
 6. CI Windows build: run the full test suite with `BashTool` in degraded mode (mock/skip shell-dependent tests); all other tools must pass.
 7. Long-term (V2+): consider a `PowerShell` execution mode as a first-class alternative for Windows users.
 
 #### 9.5.2 Homebrew formula
 
-1. Create `alfred.rb` formula:
+1. Create `clido.rb` formula:
    - Download release tarball.
-   - `bin.install "alfred"`.
+   - `bin.install "clido"`.
    - Install shell completions.
 2. Publish to a Homebrew tap.
 
 #### 9.5.3 `cargo install` support
 
-1. Verify `cargo install alfred` (from crates.io) works.
-2. Publish `alfred-core`, `alfred-tools`, `alfred-providers`, `alfred-context`, `alfred-storage`, `alfred-memory`, `alfred-planner`, `alfred-index`, `alfred-agent`, `alfred-cli` to crates.io in dependency order.
+1. Verify `cargo install clido` (from crates.io) works.
+2. Publish `clido-core`, `clido-tools`, `clido-providers`, `clido-context`, `clido-storage`, `clido-memory`, `clido-planner`, `clido-index`, `clido-agent`, `clido-cli` to crates.io in dependency order.
 
 ---
 
@@ -2641,7 +2641,7 @@ Implementation:
 2. Run `cargo deny check` with a policy file (`licenses`, `bans`, `advisories`).
 3. Review all `unsafe` blocks (should be zero outside FFI if using pure Rust).
 4. Review all subprocess spawning for injection vulnerabilities.
-5. **Project instructions prompt injection:** Verify that `ALFRED.md` / `CLAUDE.md` loading uses trust-on-first-use and size limits (Phase 3.4.2). Confirm that a malicious repo with adversarial instructions cannot hijack Alfred without user approval on first load.
+5. **Project instructions prompt injection:** Verify that `CLIDO.md` / `CLAUDE.md` loading uses trust-on-first-use and size limits (Phase 3.4.2). Confirm that a malicious repo with adversarial instructions cannot hijack Clido without user approval on first load.
 
 #### 9.6.4 Release checklist
 
@@ -2663,14 +2663,14 @@ Implementation:
 
 **Dependency:** 3.3 (session JSONL), 5.5 (memory SQLite).
 
-**Rationale:** Alfred stores data in two durable formats: JSONL session files and the SQLite memory database. Without explicit schema versions and migration logic, any structural change (new field, renamed column, dropped table) silently breaks older data. Users upgrading Alfred must not lose sessions or memories.
+**Rationale:** Clido stores data in two durable formats: JSONL session files and the SQLite memory database. Without explicit schema versions and migration logic, any structural change (new field, renamed column, dropped table) silently breaks older data. Users upgrading Clido must not lose sessions or memories.
 
 #### 9.7.1 Session JSONL schema versioning
 
 1. Add a `schema_version: u32` field to the session metadata header (first line of every JSONL file), starting at `1`.
 2. When reading a session file:
    - If `schema_version` is absent: treat as version `0` (legacy).
-   - If `schema_version > CURRENT_VERSION`: refuse to load the file with a clear error: `"Session file was written by a newer version of Alfred (schema {found}, binary supports up to {max}). Upgrade Alfred to read this session."`.
+   - If `schema_version > CURRENT_VERSION`: refuse to load the file with a clear error: `"Session file was written by a newer version of Clido (schema {found}, binary supports up to {max}). Upgrade Clido to read this session."`.
    - If `schema_version < CURRENT_VERSION`: apply forward migration transforms before loading. Define a `SessionMigration` trait with a `migrate(old: Value) -> Value` method; register migrations by `(from_version, to_version)`.
 3. Migrations are cumulative and run in order. Each migration is a pure function over raw JSON values (no side effects, composable, testable).
 4. Bump `schema_version` whenever a breaking or additive field change is made to `SessionLine` or session metadata. Document each bump in `CHANGELOG.md`.
@@ -2693,8 +2693,8 @@ Implementation:
    ];
    ```
 4. After running all migrations, update `PRAGMA user_version` to `CURRENT_DB_VERSION`.
-5. If `user_version > CURRENT_DB_VERSION`: refuse to open and return: `"Memory database was written by a newer version of Alfred. Upgrade Alfred or run 'alfred memory reset' to start fresh."`.
-6. Store migration SQL in `alfred-memory/src/migrations/NNN_description.sql` files. These are embedded at compile time via `include_str!`.
+5. If `user_version > CURRENT_DB_VERSION`: refuse to open and return: `"Memory database was written by a newer version of Clido. Upgrade Clido or run 'clido memory reset' to start fresh."`.
+6. Store migration SQL in `clido-memory/src/migrations/NNN_description.sql` files. These are embedded at compile time via `include_str!`.
 7. Test: create a V0 database (no `user_version`), open with V1 reader → verify schema is migrated and version is updated. Open a V999 database → verify error and no data loss.
 
 #### 9.7.3 CHANGELOG discipline
@@ -2797,4 +2797,4 @@ Task-level dependencies (critical path):
 ---
 
 *Generated from: `devdocs/REPORT.md`, `devdocs/ARTIFACTS.md`, `devdocs/Instructions.md`*
-*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5); weakness audit round 2 (5.6 edit safety, 5.2.3 stale-file detection, 3.4.2 ALFRED.md trust, 7.1.2 sandbox deprecation, 8.3.3 MCP trust, 5.1.0 shared retry, 4.7.2 subagent budget, 4.2.1/4.2.2 token safety, 4.8.3a planner checkpoint, 5.5.6 memory pruning, 4.4.1 pricing.toml, 8.2.1 exit status, 4.2.3 pinned context); provider/model switching (3.4.1 profiles + project config, --profile/--provider CLI flags, API key validation, 4.1.5 factory); weakness audit round 3 (4.1.5 unsupported-provider guard + model tool-use check, 4.3.3 serialized AskUser permission gate, 4.2.3 compaction failure fallback, 5.4.2 per-release coverage floors + V1 critical-path tests, 9.5.1 Windows BashTool strategy, 5.5.6 per-session memory write cap, 9.7 schema versioning + migrations, 9.6.4 CHANGELOG CI enforcement, 4.4.1 pricing.toml staleness + update-pricing command, 4.1.3 offline mode, 6.4.1 mtime+hash dual-check cache, 8.4.1 version-aware doctor)*
+*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5); weakness audit round 2 (5.6 edit safety, 5.2.3 stale-file detection, 3.4.2 CLIDO.md trust, 7.1.2 sandbox deprecation, 8.3.3 MCP trust, 5.1.0 shared retry, 4.7.2 subagent budget, 4.2.1/4.2.2 token safety, 4.8.3a planner checkpoint, 5.5.6 memory pruning, 4.4.1 pricing.toml, 8.2.1 exit status, 4.2.3 pinned context); provider/model switching (3.4.1 profiles + project config, --profile/--provider CLI flags, API key validation, 4.1.5 factory); weakness audit round 3 (4.1.5 unsupported-provider guard + model tool-use check, 4.3.3 serialized AskUser permission gate, 4.2.3 compaction failure fallback, 5.4.2 per-release coverage floors + V1 critical-path tests, 9.5.1 Windows BashTool strategy, 5.5.6 per-session memory write cap, 9.7 schema versioning + migrations, 9.6.4 CHANGELOG CI enforcement, 4.4.1 pricing.toml staleness + update-pricing command, 4.1.3 offline mode, 6.4.1 mtime+hash dual-check cache, 8.4.1 version-aware doctor)*

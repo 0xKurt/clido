@@ -1,4 +1,4 @@
-# Alfred Release Plans
+# Clido Release Plans
 
 This directory translates the main `development-plan.md` into product-style release definitions with clear scope, rationale, and exit criteria.
 
@@ -44,7 +44,7 @@ Every phase from `development-plan.md` is assigned to exactly one release:
 | Phase 6.2 — Context Efficiency | V1.5 |
 | Phase 7.2 — Secret Detection | V1.5 |
 | Phase 8.2 — JSON and Stream-JSON Output | V1.5 |
-| Phase 8.4 — `alfred doctor` | V1.5 |
+| Phase 8.4 — `clido doctor` | V1.5 |
 | Phase 4.1 — Multi-Provider Support | V2 |
 | Phase 4.2.4 — Prompt Caching | V2 |
 | Phase 6.1 — Startup Performance | V2 |

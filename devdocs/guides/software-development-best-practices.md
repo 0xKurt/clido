@@ -344,27 +344,27 @@ Written for developers, operators, and contributors who need to understand, use,
 
 - User-facing docs: `devdocs/` (plans, guides) and inline `--help` text in the CLI.
 - Architecture docs: `devdocs/plans/development-plan.md` and crate-level `README.md` files.
-- Operational docs: included with release packages and available via `alfred --help` and man pages (Phase 8.5).
+- Operational docs: included with release packages and available via `clido --help` and man pages (Phase 8.5).
 
 ---
 
 ### Development and Agent-Facing Documentation
 
-Written for automated systems — AI coding agents (including Alfred itself), CI pipelines, and future automated reviewers — that need structured, machine-interpretable guidance to work on the codebase correctly.
+Written for automated systems — AI coding agents (including Clido itself), CI pipelines, and future automated reviewers — that need structured, machine-interpretable guidance to work on the codebase correctly.
 
 **What to document:**
 
-- **`ALFRED.md` in each crate or module** — written for Alfred and other coding agents working on that code. Include: purpose of the crate, key invariants, which files to read first, common pitfalls, what not to do, and which tests to run to validate changes.
+- **`CLIDO.md` in each crate or module** — written for Clido and other coding agents working on that code. Include: purpose of the crate, key invariants, which files to read first, common pitfalls, what not to do, and which tests to run to validate changes.
 - **API contracts** — function signatures, expected inputs, outputs, and panics in Rust doc comments (`///`). Not restating what the type already says — stating what the function assumes and guarantees.
 - **Test intent** — every test must have a comment or a descriptive name that makes its purpose clear to an agent reading it. An agent should be able to read a test and know what behavior it is validating and why.
-- **Tool and schema documentation** — every tool defined in `alfred-tools/` must have a clear description field in its `ToolSchema` that an agent (or model) can read to understand when and how to use it.
+- **Tool and schema documentation** — every tool defined in `clido-tools/` must have a clear description field in its `ToolSchema` that an agent (or model) can read to understand when and how to use it.
 - **Session and storage formats** — JSONL schema, memory DB schema, index format: document the schema in code and in `devdocs/`.
-- **Config schema** — the `pricing.toml`, `config.toml`, and `.alfred/config.toml` formats must be fully documented with field-by-field descriptions, not just examples.
+- **Config schema** — the `pricing.toml`, `config.toml`, and `.clido/config.toml` formats must be fully documented with field-by-field descriptions, not just examples.
 
 **Standards:**
 
 - Rust doc comments (`///`) on every public function, struct, enum, and trait. Not boilerplate — substantive descriptions.
-- `ALFRED.md` files are first-class artifacts. They must be kept up to date as the crate evolves. Stale agent instructions are worse than no instructions because they actively mislead.
+- `CLIDO.md` files are first-class artifacts. They must be kept up to date as the crate evolves. Stale agent instructions are worse than no instructions because they actively mislead.
 - If a behavior is subtle enough that a human would comment it, it is subtle enough that an agent needs it documented too.
 
 ---
@@ -421,7 +421,7 @@ Async Rust introduces specific failure modes that synchronous code does not have
 
 ### Use the workspace correctly
 
-Alfred is a multi-crate workspace. Keep it tidy.
+Clido is a multi-crate workspace. Keep it tidy.
 
 - Define all shared dependency versions in the root `[workspace.dependencies]` block.
 - Child crates reference workspace deps with `{ workspace = true }` — no version duplication.
@@ -437,7 +437,7 @@ Rust error handling is explicit. Treat it seriously.
 - Never use `.unwrap()` in production code paths; use `.expect("reason")` only when a panic would be a programming error, not a runtime condition.
 - Propagate errors with `?` rather than panicking.
 - Add context to errors at crate boundaries using `.context("...")` from `anyhow`.
-- Define `type Result<T> = std::result::Result<T, AlfredError>` per crate to keep signatures readable.
+- Define `type Result<T> = std::result::Result<T, ClidoError>` per crate to keep signatures readable.
 
 ### Write idiomatic Rust
 
@@ -575,7 +575,7 @@ Before merging significant work, verify:
 - security implications were considered
 - performance implications were considered
 - **human-readable documentation was updated** — every new flag, config key, behavior, error message, and design decision is documented
-- **agent-readable documentation was updated** — `///` doc comments on public API, `ALFRED.md` updated if the crate's purpose or invariants changed, tool schema descriptions updated if tool behavior changed
+- **agent-readable documentation was updated** — `///` doc comments on public API, `CLIDO.md` updated if the crate's purpose or invariants changed, tool schema descriptions updated if tool behavior changed
 - the change can be rolled back or recovered from if needed
 
 ## Final Rule

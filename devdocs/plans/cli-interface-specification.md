@@ -1,6 +1,6 @@
-# Alfred CLI Interface Specification
+# Clido CLI Interface Specification
 
-This document is the canonical product specification for Alfred's command-line interface. It defines every user-facing interaction across all releases. Implementation must follow this spec; the main roadmap ([development-plan.md](development-plan.md)) and release plans reference it.
+This document is the canonical product specification for Clido's command-line interface. It defines every user-facing interaction across all releases. Implementation must follow this spec; the main roadmap ([development-plan.md](development-plan.md)) and release plans reference it.
 
 **Evidence base:** This spec is grounded in [REPORT.md](../REPORT.md) and [ARTIFACTS.md](../ARTIFACTS.md) (reverse-engineering of Claude CLI and Cursor agent).
 
@@ -10,14 +10,14 @@ This document is the canonical product specification for Alfred's command-line i
 
 ### Principles
 
-- **CLI-first, not API-first** — Alfred is a tool users run in a terminal; automation is a first-class path, not an afterthought.
-- **Excellent first-run path** — Automatic detection on first run; no mandatory `alfred init` before first use.
+- **CLI-first, not API-first** — Clido is a tool users run in a terminal; automation is a first-class path, not an afterthought.
+- **Excellent first-run path** — Automatic detection on first run; no mandatory `clido init` before first use.
 - **Deterministic automation path** — Stable JSON schemas, exit codes, and env vars for scripts and CI.
 - **Safe by default** — Destructive or state-changing actions require permission or explicit flags.
 - **Progressive disclosure** — Simple on first run; power users get profiles, memory, and MCP without clutter for beginners.
 - **One obvious way** — Common tasks have one canonical command or flag; aliases exist only for compatibility.
 - **Human-readable by default, machine-readable when requested** — Text mode is rich and helpful; `--output-format json` and `--json` per command when needed.
-- **Consistency over imitation** — Alfred's surface is consistent; we do not blindly copy every Claude/Cursor quirk.
+- **Consistency over imitation** — Clido's surface is consistent; we do not blindly copy every Claude/Cursor quirk.
 
 ### Non-Goals
 
@@ -32,8 +32,8 @@ This document is the canonical product specification for Alfred's command-line i
 
 ### Personas
 
-1. **Solo Developer** — Uses Alfred daily on personal or small-team repos. Wants fast iteration, clear feedback, and safe edits.
-2. **Automation / CI Engineer** — Runs Alfred as a subprocess or from scripts. Needs stable output, exit codes, and no interactive prompts.
+1. **Solo Developer** — Uses Clido daily on personal or small-team repos. Wants fast iteration, clear feedback, and safe edits.
+2. **Automation / CI Engineer** — Runs Clido as a subprocess or from scripts. Needs stable output, exit codes, and no interactive prompts.
 3. **Power User** — Uses profiles, memory, subagents, MCP, and planner on complex repos. Wants control and observability.
 
 ### User Stories by Release
@@ -42,11 +42,11 @@ This document is the canonical product specification for Alfred's command-line i
 
 | As a… | I want to… | So that… |
 |-------|------------|----------|
-| Solo Developer | run `alfred "fix the test"` and get a result | I can complete small tasks without leaving the terminal. |
+| Solo Developer | run `clido "fix the test"` and get a result | I can complete small tasks without leaving the terminal. |
 | Solo Developer | be prompted before Edit/Write/Bash | I do not accidentally overwrite files. |
 | Solo Developer | resume a session after Ctrl-C | I do not lose context when I interrupt. |
-| Automation Engineer | run `alfred -p "task"` with no TTY | I can script Alfred in CI. |
-| Solo Developer | see which tool is running and the result | I understand what Alfred is doing. |
+| Automation Engineer | run `clido -p "task"` with no TTY | I can script Clido in CI. |
+| Solo Developer | see which tool is running and the result | I understand what Clido is doing. |
 
 **Acceptance:** Multi-turn tasks complete; permission prompts appear for state-changing tools; `--resume` restores session; non-TTY runs without hanging.
 
@@ -56,7 +56,7 @@ This document is the canonical product specification for Alfred's command-line i
 |-------|------------|----------|
 | Automation Engineer | get JSON output with exit status | I can branch on success/failure in scripts. |
 | Solo Developer | see cost per session | I can control spend. |
-| Solo Developer | run `alfred doctor` | I can fix setup issues quickly. |
+| Solo Developer | run `clido doctor` | I can fix setup issues quickly. |
 | Automation Engineer | use `--quiet` | I get only the final answer in text mode. |
 
 **Acceptance:** `--output-format json` has stable schema and exit codes; cost appears in footer; doctor runs and reports config/provider/storage.
@@ -66,8 +66,8 @@ This document is the canonical product specification for Alfred's command-line i
 | As a… | I want to… | So that… |
 |-------|------------|----------|
 | Power User | switch provider/model via `--profile` or `--model` | I can use different models for different tasks. |
-| Power User | run `alfred audit` and `alfred stats` | I can inspect tool usage and cost. |
-| Automation Engineer | use `--input-format stream-json` | I can drive Alfred from an SDK. |
+| Power User | run `clido audit` and `clido stats` | I can inspect tool usage and cost. |
+| Automation Engineer | use `--input-format stream-json` | I can drive Clido from an SDK. |
 | Solo Developer | use shell completion | I can discover commands and flags. |
 
 **Acceptance:** Profiles and overrides work; audit and stats output match spec; completions install and work.
@@ -76,9 +76,9 @@ This document is the canonical product specification for Alfred's command-line i
 
 | As a… | I want to… | So that… |
 |-------|------------|----------|
-| Power User | use `alfred memory list` and `alfred memory prune` | I can manage what Alfred remembers. |
+| Power User | use `clido memory list` and `clido memory prune` | I can manage what Clido remembers. |
 | Power User | call SemanticSearch from the model | I get semantic code search. |
-| Power User | run MCP tools with clear permission prompts | I can extend Alfred safely. |
+| Power User | run MCP tools with clear permission prompts | I can extend Clido safely. |
 
 **Acceptance:** Memory commands work; SemanticSearch is available to the model; MCP tools appear and respect permissions.
 
@@ -98,47 +98,47 @@ This document is the canonical product specification for Alfred's command-line i
 
 | Command / Flag | V1 | V1.5 | V2 | V3 | V4 |
 |----------------|----|------|----|----|-----|
-| `alfred <prompt>` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred run <prompt>` | — | — | ✓ | ✓ | ✓ |
-| `alfred --version` / `alfred version` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --continue` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --resume <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --print` / `-p` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --allowed-tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --disallowed-tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --permission-mode` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --profile` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --model` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --provider` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --system-prompt` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --system-prompt-file` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --append-system-prompt` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --max-turns` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --max-budget-usd` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --output-format` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --no-color` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --verbose` / `-v` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred --quiet` / `-q` | — | ✓ | ✓ | ✓ | ✓ |
-| `alfred --input-format` | — | — | ✓ | ✓ | ✓ |
-| `alfred --mcp-config <file>` | — | ✓ | ✓ | ✓ | ✓ |
-| `alfred --sandbox` | — | — | ✓ | ✓ | ✓ |
-| `alfred --planner` | — | — | — | — | ✓ |
-| `alfred sessions list` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred sessions show <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred sessions fork <id>` | — | ✓ | ✓ | ✓ | ✓ |
-| `alfred doctor` | — | ✓ | ✓ | ✓ | ✓ |
-| `alfred audit` | — | — | ✓ | ✓ | ✓ |
-| `alfred stats` | — | — | ✓ | ✓ | ✓ |
-| `alfred list-models` | — | ✓ | ✓ | ✓ | ✓ |
-| `alfred update-pricing` | — | ✓ | ✓ | ✓ | ✓ |
-| `alfred init` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `alfred completions <shell>` | — | — | ✓ | ✓ | ✓ |
-| `alfred man` | — | — | ✓ | ✓ | ✓ |
-| `alfred memory list` | — | — | — | ✓ | ✓ |
-| `alfred memory prune` | — | — | — | ✓ | ✓ |
-| `alfred memory reset` | — | — | — | ✓ | ✓ |
-| `alfred fetch-models` | — | — | — | ✓ | ✓ |
+| `clido <prompt>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido run <prompt>` | — | — | ✓ | ✓ | ✓ |
+| `clido --version` / `clido version` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --continue` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --resume <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --print` / `-p` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --allowed-tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --disallowed-tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --permission-mode` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --profile` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --model` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --provider` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --system-prompt` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --system-prompt-file` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --append-system-prompt` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --max-turns` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --max-budget-usd` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --output-format` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --no-color` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --verbose` / `-v` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --quiet` / `-q` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido --input-format` | — | — | ✓ | ✓ | ✓ |
+| `clido --mcp-config <file>` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido --sandbox` | — | — | ✓ | ✓ | ✓ |
+| `clido --planner` | — | — | — | — | ✓ |
+| `clido sessions list` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido sessions show <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido sessions fork <id>` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido doctor` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido audit` | — | — | ✓ | ✓ | ✓ |
+| `clido stats` | — | — | ✓ | ✓ | ✓ |
+| `clido list-models` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido update-pricing` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido init` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido completions <shell>` | — | — | ✓ | ✓ | ✓ |
+| `clido man` | — | — | ✓ | ✓ | ✓ |
+| `clido memory list` | — | — | — | ✓ | ✓ |
+| `clido memory prune` | — | — | — | ✓ | ✓ |
+| `clido memory reset` | — | — | — | ✓ | ✓ |
+| `clido fetch-models` | — | — | — | ✓ | ✓ |
 | SemanticSearch tool | — | — | — | ✓ | ✓ |
 | ExitPlanMode tool | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -163,7 +163,7 @@ This document is the canonical product specification for Alfred's command-line i
 ### Precedence and conflicts
 
 **Configuration precedence:**  
-`CLI flag > env var > project config (.alfred/config.toml) > user config (~/.config/alfred/config.toml) > built-in default`
+`CLI flag > env var > project config (.clido/config.toml) > user config (~/.config/clido/config.toml) > built-in default`
 
 **Invalid flag combinations (must error at startup):**
 
@@ -175,9 +175,9 @@ This document is the canonical product specification for Alfred's command-line i
 
 ### Top-level information architecture
 
-`alfred --help` groups commands as follows:
+`clido --help` groups commands as follows:
 
-- **Run:** `alfred <prompt>`, `run`
+- **Run:** `clido <prompt>`, `run`
 - **Sessions:** `sessions list`, `sessions show`, `sessions fork`
 - **Health and diagnostics:** `doctor`, `stats`, `audit`
 - **Memory:** `memory list`, `memory prune`, `memory reset`
@@ -187,28 +187,28 @@ This document is the canonical product specification for Alfred's command-line i
 
 | Env var | Equivalent flag | Notes |
 |---------|-----------------|-------|
-| `ALFRED_MODEL` | `--model` | |
-| `ALFRED_PROFILE` | `--profile` | |
-| `ALFRED_PROVIDER` | `--provider` | |
-| `ALFRED_MAX_TURNS` | `--max-turns` | Integer |
-| `ALFRED_MAX_BUDGET_USD` | `--max-budget-usd` | Float |
-| `ALFRED_PERMISSION_MODE` | `--permission-mode` | `default`, `accept-all`, `plan` |
-| `ALFRED_SYSTEM_PROMPT` | `--system-prompt` | |
-| `ALFRED_OUTPUT_FORMAT` | `--output-format` | `text`, `json`, `stream-json` |
-| `ALFRED_CONFIG` | (config file path) | Override config location |
-| `ALFRED_DATA_DIR` | (data directory) | Override data directory |
-| `ALFRED_SESSION_DIR` | (session directory) | Override session directory |
-| `ALFRED_LOG` | (log level) | `error`, `warn`, `info`, `debug`, `trace` |
+| `CLIDO_MODEL` | `--model` | |
+| `CLIDO_PROFILE` | `--profile` | |
+| `CLIDO_PROVIDER` | `--provider` | |
+| `CLIDO_MAX_TURNS` | `--max-turns` | Integer |
+| `CLIDO_MAX_BUDGET_USD` | `--max-budget-usd` | Float |
+| `CLIDO_PERMISSION_MODE` | `--permission-mode` | `default`, `accept-all`, `plan` |
+| `CLIDO_SYSTEM_PROMPT` | `--system-prompt` | |
+| `CLIDO_OUTPUT_FORMAT` | `--output-format` | `text`, `json`, `stream-json` |
+| `CLIDO_CONFIG` | (config file path) | Override config location |
+| `CLIDO_DATA_DIR` | (data directory) | Override data directory |
+| `CLIDO_SESSION_DIR` | (session directory) | Override session directory |
+| `CLIDO_LOG` | (log level) | `error`, `warn`, `info`, `debug`, `trace` |
 | `NO_COLOR` | `--no-color` | Standard; respected unconditionally |
 
 ### Canonical command naming and aliases
 
-**Canonical form:** Noun-first grouped subcommands (e.g. `alfred sessions list`, `alfred memory prune`).
+**Canonical form:** Noun-first grouped subcommands (e.g. `clido sessions list`, `clido memory prune`).
 
 **Legacy aliases:** `list-sessions` → `sessions list`, `show-session` → `sessions show`. When a legacy name is used, print once to stderr:
 
 ```
-Warning: 'alfred list-sessions' is deprecated. Use 'alfred sessions list' instead.
+Warning: 'clido list-sessions' is deprecated. Use 'clido sessions list' instead.
 ```
 
 Deprecation window: aliases remain for at least one full major release after the canonical name ships.
@@ -228,9 +228,9 @@ Main agent run: **dual-mode**.
 
 ### Auto-detection on first run
 
-Alfred does **not** require `alfred init` before first use. When no config file exists:
+Clido does **not** require `clido init` before first use. When no config file exists:
 
-1. Alfred starts and detects no `~/.config/alfred/config.toml` (or `ALFRED_CONFIG` path).
+1. Clido starts and detects no `~/.config/clido/config.toml` (or `CLIDO_CONFIG` path).
 2. If stdin is a TTY: print a one-time setup header and run an interactive setup flow.
 3. Ask: provider (Anthropic / OpenAI / OpenRouter / Local).
 4. If cloud: ask for API key (or confirm use of existing env var).
@@ -238,16 +238,16 @@ Alfred does **not** require `alfred init` before first use. When no config file 
 6. Write minimal config to the config path.
 7. Proceed with the user's original task.
 
-### `alfred init`
+### `clido init`
 
-`alfred init` exists as an explicit command that runs the same setup flow. It can be re-run to switch providers or reset config. Useful when the user wants to reconfigure without running a task.
+`clido init` exists as an explicit command that runs the same setup flow. It can be re-run to switch providers or reset config. Useful when the user wants to reconfigure without running a task.
 
 ### Non-interactive first run
 
 When stdout is not a TTY (or `--print` is set) and no config exists, do **not** prompt. Exit immediately with:
 
 ```
-Error [Config]: No configuration found. Run 'alfred init' to set up Alfred.
+Error [Config]: No configuration found. Run 'clido init' to set up Clido.
 ```
 
 Exit code: `2`.
@@ -264,18 +264,18 @@ Exit code: `2`.
 
 **Examples:**
 
-- `echo "fix the failing test" | alfred` → single-turn with that prompt
-- `alfred < task.txt` → single-turn with file contents as prompt
-- `alfred "fix the failing test"` → single-turn with that prompt
-- `alfred` (TTY) → REPL
-- `alfred --print` (TTY, no prompt) → `Error [Usage]: No prompt provided. Pass a prompt as an argument or pipe it via stdin.`
+- `echo "fix the failing test" | clido` → single-turn with that prompt
+- `clido < task.txt` → single-turn with file contents as prompt
+- `clido "fix the failing test"` → single-turn with that prompt
+- `clido` (TTY) → REPL
+- `clido --print` (TTY, no prompt) → `Error [Usage]: No prompt provided. Pass a prompt as an argument or pipe it via stdin.`
 
 ### Empty-state output
 
-- **`alfred sessions list`** (no sessions): `No sessions yet. Run 'alfred <prompt>' to start one.`
-- **`alfred memory list`** (no memories): `No memories yet. Alfred will save insights as you work.`
-- **`alfred list-models`** (provider unreachable): `Error [Provider]: Could not reach provider. Check your API key and network.`
-- **`alfred list-models --provider local`** (Ollama not running): `No local models found. Is Ollama running? (ollama serve)`
+- **`clido sessions list`** (no sessions): `No sessions yet. Run 'clido <prompt>' to start one.`
+- **`clido memory list`** (no memories): `No memories yet. Clido will save insights as you work.`
+- **`clido list-models`** (provider unreachable): `Error [Provider]: Could not reach provider. Check your API key and network.`
+- **`clido list-models --provider local`** (Ollama not running): `No local models found. Is Ollama running? (ollama serve)`
 
 ---
 
@@ -418,8 +418,8 @@ Error [<Category>]: <message>
 ```
 Error [Config]: Missing API key for provider 'anthropic'
 
-  Set ANTHROPIC_API_KEY in your environment or in ~/.config/alfred/config.toml
-  Run: alfred doctor  to check all configuration
+  Set ANTHROPIC_API_KEY in your environment or in ~/.config/clido/config.toml
+  Run: clido doctor  to check all configuration
 ```
 
 **Categories:** `Config`, `Provider`, `Tool`, `Session`, `Budget`, `Permission`, `Usage`
@@ -449,7 +449,7 @@ Exact formats (for model consumption and session replay):
 | `2` | Usage / config error (bad flags, missing key) |
 | `3` | Soft limit reached (budget or turns) |
 
-**`alfred doctor` only:**
+**`clido doctor` only:**
 
 | Code | Meaning |
 |------|---------|
@@ -506,9 +506,9 @@ There is no `--yolo` alias; use `--permission-mode accept-all`.
 
 ## 8. REPL (Interactive Mode) UX
 
-**Entry:** `alfred` with no arguments and stdin is a TTY.
+**Entry:** `clido` with no arguments and stdin is a TTY.
 
-**Prompt:** `alfred> `  
+**Prompt:** `clido> `  
 Optional: cost in right gutter when wide enough, e.g. `[$0.0042]`.
 
 **Input:**
@@ -535,13 +535,13 @@ Optional: cost in right gutter when wide enough, e.g. `[$0.0042]`.
 
 **Session:** One continuous session per REPL invocation; all turns share the same session ID and file.
 
-**ASCII:** Prompt remains `alfred> `; no gutter cost indicator.
+**ASCII:** Prompt remains `clido> `; no gutter cost indicator.
 
 ---
 
 ## 9. Session Management UX
 
-### `alfred sessions list`
+### `clido sessions list`
 
 ```
   ID              Date         Turns   Cost      Preview
@@ -556,11 +556,11 @@ Optional: cost in right gutter when wide enough, e.g. `[$0.0042]`.
 - Cost: `$0.XXXX` (4 decimal places).
 - `--json` supported.
 
-### `alfred sessions show <id>`
+### `clido sessions show <id>`
 
 Full transcript replay. `--json` supported.
 
-### `alfred sessions fork <id>`
+### `clido sessions fork <id>`
 
 Fork from that session; new session ID. `--json` supported.
 
@@ -574,7 +574,7 @@ Resumes the **newest** session for the **current project path** (cwd-matched). N
 
 ### Auto non-interactive
 
-When stdout is not a TTY, Alfred behaves as if `--print` were set. `AskUser` permission prompts auto-deny with a warning to stderr.
+When stdout is not a TTY, Clido behaves as if `--print` were set. `AskUser` permission prompts auto-deny with a warning to stderr.
 
 ### `--output-format json`
 
@@ -618,21 +618,21 @@ Progress events (tool pending/in_progress) are not included by default; use `--v
 
 ---
 
-## 11. `alfred doctor` Output Design
+## 11. `clido doctor` Output Design
 
 Version-aware checks (see development-plan Phase 8.4.1). Example:
 
 ```
-$ alfred doctor
+$ clido doctor
 
-  Alfred v0.1.0  (V1 checks)
+  Clido v0.1.0  (V1 checks)
 
   ✓  rustc 1.78.0
   ✓  ANTHROPIC_API_KEY set
   ✓  Provider reachable (anthropic, 243ms)
-  ✓  Session directory writable (~/.local/share/alfred/sessions)
+  ✓  Session directory writable (~/.local/share/clido/sessions)
   ✓  pricing.toml present
-  ⚠  pricing.toml is 94 days old — run 'alfred update-pricing' to refresh
+  ⚠  pricing.toml is 94 days old — run 'clido update-pricing' to refresh
 
   1 warning. All required checks passed.
   Exit code: 2
@@ -641,23 +641,23 @@ $ alfred doctor
 - `✓` = passed; `✗` = failed (mandatory); `⚠` = warning (optional).
 - Offline mode: skipped checks show `[skipped — offline mode]`.
 - Every `✗` line includes a one-line remediation hint.
-- `alfred doctor --json`: machine-readable array of check results.
+- `clido doctor --json`: machine-readable array of check results.
 - Check ordering: stable within each version group (e.g. alphabetical).
 - Exit codes: `0` = all pass, `1` = mandatory fail, `2` = warnings only.
 
 ---
 
-## 12. `alfred audit` UX
+## 12. `clido audit` UX
 
 **Availability:** V2 (requires audit log).
 
 ```
-$ alfred audit
-$ alfred audit --tail
-$ alfred audit --session <id>
-$ alfred audit --tool Edit
-$ alfred audit --since 2026-03-01
-$ alfred audit --json
+$ clido audit
+$ clido audit --tail
+$ clido audit --session <id>
+$ clido audit --tool Edit
+$ clido audit --since 2026-03-01
+$ clido audit --json
 ```
 
 Default (newest first, tabular):
@@ -674,20 +674,20 @@ Default (newest first, tabular):
 
 ---
 
-## 13. `alfred stats` UX
+## 13. `clido stats` UX
 
 **Availability:** V2 (requires telemetry).
 
 ```
-$ alfred stats
-$ alfred stats --session <id>
-$ alfred stats --json
+$ clido stats
+$ clido stats --session <id>
+$ clido stats --json
 ```
 
 Default:
 
 ```
-  Alfred usage summary
+  Clido usage summary
 
   Tool calls                         Avg latency
   ──────────────────────────────     ───────────
@@ -703,11 +703,11 @@ Default:
 
 ## 14. Shell Completion and Discovery
 
-- **Bash:** `alfred completions bash` → write to e.g. `~/.bash_completion.d/alfred`
-- **Zsh:** `alfred completions zsh` → write to e.g. `~/.zsh/completions/_alfred`
-- **Fish:** `alfred completions fish` → write to e.g. `~/.config/fish/completions/alfred.fish`
-- **Help:** `alfred --help` and `alfred help <cmd>` / `alfred <cmd> --help` (both supported).
-- **Man:** `alfred man` prints the man page to stdout.
+- **Bash:** `clido completions bash` → write to e.g. `~/.bash_completion.d/clido`
+- **Zsh:** `clido completions zsh` → write to e.g. `~/.zsh/completions/_clido`
+- **Fish:** `clido completions fish` → write to e.g. `~/.config/fish/completions/clido.fish`
+- **Help:** `clido --help` and `clido help <cmd>` / `clido <cmd> --help` (both supported).
+- **Man:** `clido man` prints the man page to stdout.
 
 Man page sections: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMENT, FILES, EXIT STATUS, EXAMPLES, SEE ALSO.
 
@@ -718,7 +718,7 @@ Man page sections: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMEN
 - Status is conveyed by **symbol and text**; never by color or glyph alone.
 - ASCII mode provides full information without Unicode.
 - All examples use copy-paste-safe characters (no smart quotes or invisible chars).
-- In docs, Windows path examples may use forward slashes (Alfred normalizes).
+- In docs, Windows path examples may use forward slashes (Clido normalizes).
 - Color is not the only distinction (e.g. green/red); symbols carry meaning.
 
 ---
@@ -749,4 +749,4 @@ Before considering the spec complete for a release:
 
 ---
 
-*This specification is the single source of truth for Alfred's CLI. The development plan and release documents reference it and must stay consistent with it.*
+*This specification is the single source of truth for Clido's CLI. The development plan and release documents reference it and must stay consistent with it.*

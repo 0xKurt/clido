@@ -8,7 +8,7 @@ Ideation. Not committed to the roadmap. This document is intentionally forward-l
 
 This document explores a product concept: a networked service layer where agents can discover, acquire, install, and execute reusable skills and workflows, with optional machine-to-machine payments using `x402` or a comparable agent-native protocol.
 
-The core thesis is that Alfred's long-term competitive position is not just as a better local coding agent, but as the runtime and trust layer for a capability economy — a system where agents acquire behavior on demand, pay for it programmatically, and execute it under policy.
+The core thesis is that Clido's long-term competitive position is not just as a better local coding agent, but as the runtime and trust layer for a capability economy — a system where agents acquire behavior on demand, pay for it programmatically, and execute it under policy.
 
 The most important constraint is this:
 
@@ -28,7 +28,7 @@ That means:
 - monetization requires manual, human-mediated flows
 - agents cannot acquire new capabilities autonomously when a task requires them
 
-If Alfred had a structured registry and payment layer, it could evolve from a single-user tool into a platform — a runtime where capability is distributed, trusted, and transactable.
+If Clido had a structured registry and payment layer, it could evolve from a single-user tool into a platform — a runtime where capability is distributed, trusted, and transactable.
 
 ## Core Concepts
 
@@ -119,7 +119,7 @@ That could evolve into:
 
 The system has four layers.
 
-### Layer 1: Local Alfred Runtime
+### Layer 1: Local Clido Runtime
 
 This is the execution core and remains the primary product.
 
@@ -251,7 +251,7 @@ A user should be able to:
 
 ### Model A: Cloud metadata, local execution
 
-Flow: Alfred downloads the skill or workflow package, validates the signature, stores it locally, executes locally.
+Flow: Clido downloads the skill or workflow package, validates the signature, stores it locally, executes locally.
 
 Suitable for: open-source packs, text-based skills, local workflow definitions.
 
@@ -259,7 +259,7 @@ Trade-offs: preserves local-first behavior and privacy; harder to revoke comprom
 
 ### Model B: Cloud metadata, remote execution
 
-Flow: Alfred discovers the workflow, pays to invoke a hosted service, sends context, receives results.
+Flow: Clido discovers the workflow, pays to invoke a hosted service, sends context, receives results.
 
 Suitable for: compute-heavy services, proprietary evaluation logic, providers who cannot or will not distribute their internals.
 
@@ -319,13 +319,13 @@ The product is only viable if wallet access is treated as a security architectur
 
 ### Model 1: Fully custodial platform wallet
 
-The service holds funds. Alfred spends using an API token.
+The service holds funds. Clido spends using an API token.
 
 Suitable for early adoption and teams that want simplicity. High trust burden on the platform. Introduces custodial and regulatory risk.
 
-### Model 2: User wallet delegated to Alfred
+### Model 2: User wallet delegated to Clido
 
-Alfred requests signatures or executes limited payments from the user's own wallet.
+Clido requests signatures or executes limited payments from the user's own wallet.
 
 Better alignment with self-custody values. Hard UX. High risk if the wallet is broadly exposed to the agent process.
 
@@ -337,7 +337,7 @@ Good balance of safety and autonomy. Spend is bounded by design. Requires a wall
 
 ### Model 4: Policy-gated delegated wallet (recommended medium-term)
 
-Alfred receives constrained spending authority under explicit, machine-readable rules.
+Clido receives constrained spending authority under explicit, machine-readable rules.
 
 Possible constraints:
 - maximum spend per transaction
@@ -351,7 +351,7 @@ This model balances usability, safety, and auditability better than the alternat
 
 ## Recommended Trust Model for Wallet Access
 
-Do not give Alfred unrestricted wallet access.
+Do not give Clido unrestricted wallet access.
 
 Use layered controls that grow with demonstrated safety:
 
@@ -410,7 +410,7 @@ Not all published content should be treated equally.
 
 ## Workflow Execution Safety Metadata
 
-Every workflow should declare its operational requirements so Alfred can make an informed permission decision before executing.
+Every workflow should declare its operational requirements so Clido can make an informed permission decision before executing.
 
 Required metadata fields:
 - `modifies_files: bool`
@@ -421,7 +421,7 @@ Required metadata fields:
 - `requires_sandboxed_bash: bool`
 - `operates_on_private_repos: bool`
 
-Alfred uses this metadata to:
+Clido uses this metadata to:
 - decide whether the workflow is permitted under current policy
 - determine whether human approval is required
 - determine whether wallet payment can proceed autonomously
@@ -485,15 +485,15 @@ Privacy principles for this system:
 Skills and workflows will change over time. A versioning model is necessary.
 
 - packages use semantic versioning
-- Alfred tracks the installed version and can pin to a version
+- Clido tracks the installed version and can pin to a version
 - the registry retains old versions for reproducibility
 - breaking changes in a workflow's `input_schema` require a major version bump
-- Alfred can evaluate whether an installed version satisfies the compatibility requirements of a session config
+- Clido can evaluate whether an installed version satisfies the compatibility requirements of a session config
 
 Compatibility metadata example:
 ```json
 {
-  "min_alfred_version": "1.5.0",
+  "min_clido_version": "1.5.0",
   "required_tools": ["Read", "Bash"],
   "required_mcp_servers": []
 }
@@ -524,9 +524,9 @@ Examples:
 
 ## Why This Could Matter Strategically
 
-Alfred as a local agent competes on model quality and UX. Both are hard to differentiate permanently.
+Clido as a local agent competes on model quality and UX. Both are hard to differentiate permanently.
 
-Alfred as a capability platform competes on:
+Clido as a capability platform competes on:
 - ecosystem scale and content quality
 - trust mediation between publishers and agents
 - transaction infrastructure for the agent economy
@@ -563,7 +563,7 @@ If the marketplace rewards shallow skill packs over genuinely useful workflows, 
 
 If this moves forward:
 
-- **Keep the runtime local-first.** The registry enhances Alfred; it does not replace its local execution value.
+- **Keep the runtime local-first.** The registry enhances Clido; it does not replace its local execution value.
 - **Separate discovery from execution.** A free registry can exist and provide value before paid execution exists.
 - **Separate execution from payment.** Free skills and workflows are the foundation. Paid content must earn its place.
 - **Treat wallet access as a security product.** Do not ship autonomous spending until policy, audit, and revocation systems are fully in place.
@@ -612,9 +612,9 @@ Deliverables:
 - service-to-service settlement
 - richer economic protocols
 
-## How This Fits Alfred Specifically
+## How This Fits Clido Specifically
 
-Alfred already has the building blocks:
+Clido already has the building blocks:
 - a permission system (Phase 4.3) that can gate workflow execution
 - a tool registry that can host locally-installed workflow tools
 - a session storage system that can record entitlement proofs
@@ -622,7 +622,7 @@ Alfred already has the building blocks:
 - a context engine that can inject skill instructions into system prompts
 - a subagent architecture (Phase 4.7) that can execute workflow subgraphs
 
-The registry and payment layer extend these rather than replacing them. Alfred would use its own permission model to govern wallet access, its own session storage to record purchases, and MCP to expose remote workflow capabilities as locally-callable tools.
+The registry and payment layer extend these rather than replacing them. Clido would use its own permission model to govern wallet access, its own session storage to record purchases, and MCP to expose remote workflow capabilities as locally-callable tools.
 
 ## Open Questions
 
@@ -640,7 +640,7 @@ Organized by category:
 
 ### Payment implementation
 - Is `x402` mature enough for production use today, or should the first version use simpler account credit models?
-- Should wallet functionality live inside Alfred, inside a companion signer process, or entirely server-side?
+- Should wallet functionality live inside Clido, inside a companion signer process, or entirely server-side?
 - How should refunds and disputes work for failed or low-quality workflow executions?
 
 ### Registry operations
@@ -660,6 +660,6 @@ But it is only viable if it is built as a trust and payments infrastructure prob
 
 The registry and discovery layer are straightforward to build. The hard part is giving agents the authority to transact safely, at scale, without requiring humans to approve every purchase.
 
-If Alfred gets that trust model right, it can move from "agent application" to "agent platform with a programmable capability economy."
+If Clido gets that trust model right, it can move from "agent application" to "agent platform with a programmable capability economy."
 
 That is significantly bigger than a plugin system. It is the foundation for software agents that discover, evaluate, acquire, and execute capabilities on behalf of the people they serve — with full policy control and an auditable trail.
