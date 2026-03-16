@@ -892,9 +892,13 @@ alfred/
 1. In `alfred-context/src/project.rs`:
    - Walk from cwd upward to find `ALFRED.md` or `CLAUDE.md`.
    - Read content; treat as additional system prompt prefix.
+   - **Trust-on-first-use:** Maintain a small allowlist of (canonical path → hash) for project instruction files that the user has already approved (e.g. in `{data_dir}/trusted_project_instructions.json`). When loading an `ALFRED.md` or `CLAUDE.md` that is not on the allowlist (or whose content hash has changed), prompt the user once: `"Load project instructions from {path}? [y/N]"`. If the user confirms, add the path and hash to the allowlist. If not, skip loading project instructions for this run. In non-interactive mode, skip loading unless the path is already trusted.
+   - **Size limit:** Enforce a maximum size on project instructions (e.g. ~4,000 tokens using the same token counter as context). If the file exceeds the limit, truncate with a trailing note `"[Project instructions truncated at {limit} tokens.]"` and log a warning. This limits both cost and the impact of adversarial or accidental huge files.
    - Notify user when project instructions are loaded.
 2. Prepend project instructions to system prompt in context builder.
 3. Test: create `ALFRED.md` in fixture dir, verify it's included in system prompt.
+4. Test: load from an untrusted path (not in allowlist); verify prompt is shown; confirm and verify path is trusted on next run.
+5. Test: create `ALFRED.md` larger than token limit; verify truncation and warning.
 
 #### 3.4.3 Inject tool usage guidance into system prompt
 
@@ -957,8 +961,8 @@ alfred/
 
 ## Phase 4 — Feature Expansion
 
-**Goal:** Multi-provider support, context compaction, permission system, subagents, bounded concurrency, task graph planner (optional), plan mode.
-**Exit criteria:** All providers work; context compaction triggers on long sessions; permission prompts work; subagents can run in parallel; bounded concurrency prevents runaway tool calls.
+**Goal:** Multi-provider support, context compaction, prompt caching, permission system, subagents, bounded concurrency, task graph planner (optional), plan mode.
+**Exit criteria:** All providers work; context compaction triggers on long sessions; prompt caching is active on Anthropic (verified via `cache_read_input_tokens > 0` in multi-turn sessions); permission prompts work; subagents can run in parallel; bounded concurrency prevents runaway tool calls.
 
 ---
 
@@ -1010,7 +1014,8 @@ alfred/
      - Match on `config.provider_type`.
      - Read API key from `config.api_key` or env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DASHSCOPE_API_KEY`).
 2. Wire into CLI config loading.
-3. Test: provider factory returns correct type for each config variant.
+3. All HTTP-based providers must use the shared retry/backoff logic from Phase 5.1.0 when making API calls (so rate limits and 5xx are handled consistently).
+4. Test: provider factory returns correct type for each config variant.
 
 ---
 
@@ -1025,6 +1030,7 @@ alfred/
    - Note: Claude uses a different tokenizer; counts are approximate (±10%). Use conservatively.
    - Implement `fn count_tokens(messages: &[Message]) -> usize`.
    - Serialize each message to its JSON API format, then count tokens.
+   - **Safety margin:** Because of the ±10% error, the effective context limit used for compaction must leave headroom. Either reserve a fixed `context_overflow_safety_margin` (e.g. 1000 tokens) that is never used for input content, or use a compaction threshold that is conservative (see 4.2.2). This avoids context overflow API errors when the true token count is higher than the estimate.
 2. Test: known text → known token count (within ±10%).
 
 #### 4.2.2 Implement context builder
@@ -1034,7 +1040,11 @@ alfred/
    ```rust
    pub struct ContextBuilder {
        max_tokens: usize,
-       compaction_threshold: f64,  // e.g. 0.85 = compact at 85% of max
+       /// Compaction triggers when context reaches this fraction of max_tokens. Default 0.75 (not 0.85)
+       /// to account for tiktoken ±10% error and leave headroom for the next model response.
+       compaction_threshold: f64,
+       /// Optional: tokens always reserved (never used for input). Further reduces overflow risk.
+       context_overflow_safety_margin: usize,
    }
    impl ContextBuilder {
        pub fn build(&self, config: &AgentConfig, history: &[Message]) -> Vec<Message>
@@ -1042,19 +1052,69 @@ alfred/
    ```
 
 2. `build()` logic:
+   - Effective limit = `max_tokens - context_overflow_safety_margin` (e.g. default margin 1000).
    - Include system prompt as first message (or as API `system` field).
    - Walk history from oldest to newest; count tokens as you add.
-   - If adding the next message would exceed `max_tokens * compaction_threshold`: trigger compaction.
+   - If adding the next message would exceed `effective_limit * compaction_threshold`: trigger compaction. Default `compaction_threshold` to 0.75 so that even with 10% undercount we stay well below provider limits.
    - Otherwise: include all messages.
 
 #### 4.2.3 Implement context compaction
 
-1. When context exceeds threshold:
-   - Take the oldest N messages (those that won't fit).
+1. **Pinned context:** Before compaction, identify messages that must never be summarized away (e.g. user constraints like "never touch files in /prod", or messages explicitly marked as critical). Options: (a) allow the user to prefix a message with a marker (e.g. `IMPORTANT:` or a configurable prefix) so the system treats it as pinned; (b) or heuristically detect constraint-like user messages (e.g. "never", "always", "do not", "must not" in the first user message). Pinned messages are not included in the "oldest N" block that gets summarized; they are prepended to the compacted summary so they remain in full in the context.
+2. When context exceeds threshold:
+   - Take the oldest N **non-pinned** messages (those that won't fit).
    - Call a secondary "summarize" request to the model: `"Summarize the following conversation history in 3-5 sentences, focusing on decisions made and context established: {oldest_messages}"`.
-   - Replace oldest messages with a single `system` message: `"[Compacted history] {summary}"`.
+   - Replace those oldest messages with a single `system` message: `"[Compacted history] {summary}"`. Then prepend any pinned messages so they appear in full above the summary.
    - Emit a `SessionLine::System { subtype: "compact_boundary" }` to the session file.
-2. Test: create a fixture with a very long conversation; verify compaction triggers and summary is included.
+3. Test: create a fixture with a very long conversation; verify compaction triggers and summary is included.
+4. Test: include an early user message with "IMPORTANT: never modify src/prod/"; run until compaction; verify that constraint still appears verbatim in the context (or that pinned messages survive compaction).
+
+---
+
+### Milestone 4.2.4 — Prompt Caching (Anthropic)
+
+**Dependency:** 4.2.1 complete, 4.1 (Anthropic provider) complete.
+
+**Rationale:** Anthropic's prompt caching bills cached input tokens at 10% of the normal price with up to 85% lower latency on long prompts. In a multi-turn agent session, the system prompt, tool definitions, and ALFRED.md content are sent with every API call. Without caching, these tokens are billed at full price every turn. With caching, they are billed at 1/10th price after the first call. On a 20-turn session with a 10K-token system prompt, this reduces input costs by 60–80%.
+
+Anthropic also supports **automatic caching** for multi-turn conversations since 2025: the API automatically applies cache breakpoints to the last cacheable message block. The implementation below adds explicit breakpoints for the highest-value fixed content (system prompt, tools), and relies on automatic caching for the conversation history.
+
+#### 4.2.4.1 Mark system prompt and tool definitions as cacheable
+
+1. In `alfred-providers/src/anthropic.rs`, when building the API request:
+   - Add `"cache_control": {"type": "ephemeral"}` to the last text block of the system prompt content array.
+   - Add `"cache_control": {"type": "ephemeral"}` to the last tool definition in the tools array.
+
+   ```rust
+   // Example: system prompt as content block array (Anthropic API format)
+   let mut system_blocks = build_system_blocks(&context);
+   if let Some(last) = system_blocks.last_mut() {
+       last["cache_control"] = json!({"type": "ephemeral"});
+   }
+
+   // Example: tool definitions
+   let mut tools = build_tool_schemas(&registry);
+   if let Some(last) = tools.last_mut() {
+       last["cache_control"] = json!({"type": "ephemeral"});
+   }
+   ```
+
+2. Anthropic requires at least 1,024 tokens in a cacheable block for caching to activate. Log a `debug!` warning if the system prompt is shorter.
+
+#### 4.2.4.2 Track cache metrics in Usage
+
+1. `Usage` already has `cache_creation_input_tokens: Option<u64>` and `cache_read_input_tokens: Option<u64>` — ensure these are populated from the API response.
+2. In cost tracking (4.4), apply the correct rate for cached tokens:
+   - `cache_creation_input_tokens` → billed at 125% of normal (one-time write cost)
+   - `cache_read_input_tokens` → billed at 10% of normal
+3. Update `ModelPricing` struct to include `cache_creation_multiplier` and `cache_read_multiplier` fields.
+4. Display cache read tokens in the per-turn cost summary: `"Cost: $0.0012 (↓ 73% via cache)"`.
+
+#### 4.2.4.3 Tests
+
+1. Mock Anthropic server: verify `cache_control` fields are present on system blocks and tool definitions.
+2. Two consecutive calls with identical system prompt: verify second call has `cache_read_input_tokens > 0` in response.
+3. Cost calculation: inject a usage with 1000 normal + 500 cache_read tokens → verify cost uses 10% rate for cached portion.
 
 ---
 
@@ -1093,13 +1153,16 @@ alfred/
 
 #### 4.4.1 Track cumulative cost per session
 
-1. In `alfred-agent/src/loop.rs`, add:
+1. **Configurable pricing:** Do not hardcode the `ModelPricing` table in Rust source. Instead:
+   - Ship a default `pricing.toml` with Alfred (e.g. in `alfred-providers/data/pricing.toml` or embedded in the binary) containing per-model input/output/cache_creation/cache_read prices for major models (Claude Opus, Sonnet, Haiku, GPT-4o, etc.).
+   - At startup, load pricing: first look for `{config_dir}/alfred/pricing.toml` (user override); if absent, use the shipped default. Document in user docs how to override (e.g. copy the default file and edit). This allows users to update prices when providers change them without recompiling.
+   - Define a `ModelPricing` struct and a loader `fn load_pricing(config_dir: Option<&Path>) -> ModelPricing` that merges or falls back to built-in defaults when the file is missing or a model is not listed.
+2. In `alfred-agent/src/loop.rs`, add:
    - `cumulative_cost_usd: f64`
-   - After each model call: estimate cost from usage tokens × per-token price.
-   - Store a `ModelPricing` table (hardcoded to major models: Claude Opus, Sonnet, Haiku, GPT-4o, etc.).
-2. After each turn, check: `if cumulative_cost_usd > config.max_budget_usd → return error`.
-3. Print cost summary in result message: `"Total cost: $0.0123 USD"`.
-4. Store `total_cost_usd` in `SessionLine::Result`.
+   - After each model call: estimate cost from usage tokens × per-token price (from the loaded `ModelPricing`).
+3. After each turn, check: `if cumulative_cost_usd > config.max_budget_usd → return error`.
+4. Print cost summary in result message: `"Total cost: $0.0123 USD"`.
+5. Store `total_cost_usd` in `SessionLine::Result`.
 
 ---
 
@@ -1196,23 +1259,24 @@ alfred/
        provider: Arc<dyn ModelProvider>,
        tools: Arc<ToolRegistry>,
        active: HashMap<String, SubAgentHandle>,
-   }
-
-   impl SubAgentManager {
-       pub async fn spawn(&mut self, config: SubAgentConfig) -> Result<String>;
-       pub async fn wait(&mut self, id: &str) -> Result<String>;
-       pub async fn wait_all(&mut self) -> Vec<Result<String>>;
+       /// Shared with parent: cumulative cost in USD. All subagent spending is charged here.
+       cost_accumulator: Arc<CostAccumulator>,
+       max_budget_usd: f64,
    }
    ```
 
+   Use a thread-safe cost accumulator (e.g. `Arc<AtomicU64>` storing cents, or `Arc<RwLock<f64>>` for USD) shared between the parent `AgentLoop` and the `SubAgentManager`. The parent's `AgentConfig.max_budget_usd` is passed into the manager.
+
 2. `spawn()`:
-   - Create a new `AgentLoop` with shared `Arc<dyn ModelProvider>` and `Arc<ToolRegistry>`.
+   - **Budget check:** Before creating a subagent, check that `cost_accumulator.current() + subagent_cost_estimate` does not exceed `max_budget_usd`. The estimate can be conservative (e.g. assume one turn at current model price). If the check fails, return an error (e.g. `AlfredError::BudgetExceeded`) and do not spawn.
+   - Create a new `AgentLoop` with shared `Arc<dyn ModelProvider>`, `Arc<ToolRegistry>`, and the same `cost_accumulator`. The subagent's cost tracking (Phase 4.4) must write back to this shared accumulator so that every dollar spent by a subagent counts against the parent's budget.
    - Apply `subagent_type` restrictions (ReadOnly → PlanOnly permission mode).
    - Spawn with `tokio::task::spawn(async move { agent.run(&config.prompt).await })`.
    - Store handle in `active`.
    - Return subagent id.
 3. `wait()`: await the join handle for a given id, return result.
 4. `wait_all()`: `futures::future::join_all` over all active handles.
+5. **Test:** Parent has `max_budget_usd = 0.10`. Spawn two subagents that each spend ~$0.06; then attempt to spawn a third. Verify the third spawn is refused (budget would be exceeded) and the error is returned to the caller.
 
 #### 4.7.3 Implement `AgentTool` (spawns subagents from within the loop)
 
@@ -1331,6 +1395,13 @@ alfred/
    - For each group (tasks with satisfied dependencies): execute all tasks in the group concurrently (respecting semaphore).
    - Store results in `results` map keyed by task id.
    - If a task fails (`is_error: true`): record failure, continue executing independent tasks; collect all errors in `ExecutionSummary`.
+   - **Partial execution visibility:** When execution stops (due to failure or user interrupt), `ExecutionSummary` must report which node ids succeeded and which failed. Emit this to the user (and to the session/audit log) so the codebase state is interpretable (e.g. "Nodes A, B, C completed; node D failed.").
+
+#### 4.8.3a Checkpoint before planner execution and resume-plan
+
+1. **Checkpoint:** Before running `TaskExecutor::execute()` (same mechanism as Milestone 5.6): if cwd is a git repository, record a baseline (e.g. `git status --porcelain`, `git diff --stat` or a stash). If execution fails partway, the user can restore from this baseline to undo partial edits.
+2. **On graph execution failure:** Report which nodes succeeded and which failed (see 4.8.3). Do not leave the user without a clear picture of what was applied.
+3. **Resume-plan:** Provide an `alfred resume-plan {session_id}` (or equivalent) mechanism: load the last executed plan and its `ExecutionSummary` from the session; allow the user to re-run from the next unexecuted node (or re-run from a chosen node). This requires persisting the plan and per-node results in the session so that a subsequent run can continue rather than re-execute from scratch. Document that resuming may require manual fix of the codebase if files were changed between the failed run and the resume.
 
 #### 4.8.4 Implement plan-refine loop
 
@@ -1365,16 +1436,23 @@ alfred/
 
 **Dependency:** Phase 4 complete.
 
-#### 5.1.1 Handle provider rate limits and transient errors
+#### 5.1.0 Shared retry and backoff (all providers)
 
-1. In `alfred-providers/src/anthropic.rs`:
-   - On HTTP 429 (rate limit): parse `Retry-After` header.
-   - Implement exponential backoff: 1s, 2s, 4s, 8s, max 3 retries.
-   - Use `tokio::time::sleep` between retries.
-   - Log each retry attempt at `warn!` level.
-2. On HTTP 5xx: retry up to 3 times.
-3. On HTTP 4xx (except 429): do not retry, return `AlfredError::Provider`.
-4. Test: mock server returning 429 → verify retry behavior.
+1. In `alfred-providers/src/retry.rs`:
+   - Implement a shared middleware (or helper) used by **every** provider (Anthropic, OpenAI, OpenRouter, Alibaba, and any future HTTP-based provider).
+   - On HTTP 429 (rate limit): parse `Retry-After` header when present; otherwise use exponential backoff: 1s, 2s, 4s, 8s. Max 3 retries.
+   - On HTTP 5xx: retry up to 3 times with the same backoff.
+   - Use `tokio::time::sleep` between retries. Log each retry at `warn!` level.
+   - On HTTP 4xx (except 429): do not retry, return `AlfredError::Provider`.
+   - Expose something like `async fn with_retry<F, Fut>(f: F) -> Result<...>` so each provider's `complete()` can wrap its HTTP call.
+2. **Anthropic** (5.1.1): Use the shared retry in `alfred-providers/src/anthropic.rs` for every `complete()` request.
+3. **OpenAI / OpenRouter / Alibaba** (Phase 4.1): When implementing those providers, use the same `retry.rs` middleware for their HTTP calls. Do not implement retry only for Anthropic; all providers must use the shared logic.
+4. Test: mock server returning 429 → verify retry behavior for at least one provider; test that a second provider (e.g. OpenAI) also retries when its mock returns 429.
+
+#### 5.1.1 Anthropic provider uses shared retry
+
+1. In `alfred-providers/src/anthropic.rs`, wrap every `complete()` HTTP request with the shared `retry::with_retry` (or equivalent) from 5.1.0.
+2. Test: mock Anthropic server returning 429 → verify retry behavior (as in 5.1.0).
 
 #### 5.1.2 Handle tool execution failures gracefully
 
@@ -1417,6 +1495,15 @@ alfred/
    - Returns new session_id.
 2. Expose via `alfred fork {session_id}` subcommand.
 3. Test: fork a session; run both; verify they diverge independently.
+
+#### 5.2.3 Validate file state on resume
+
+1. When `--resume {session_id}` is used, before reconstructing the loop and continuing:
+   - Load from the session JSONL the list of every file that was successfully edited in the previous run, together with the mtime (or content hash) recorded at the time of that edit (see 5.6.2 for how these are stored).
+   - For each such file: read current mtime (or compute current content hash); compare to the stored value.
+   - If any file has changed: warn the user and offer to abort resume, or continue anyway (resuming may then apply edits to outdated content and produce incorrect diffs or corruption). In non-interactive mode, exit with an error unless the user has passed a flag such as `--resume-ignore-stale`.
+2. Implementation details (prompt text, flag name, and tests) are in Milestone 5.6.4.
+3. Test: complete a session with one Edit; change that file on disk; run `alfred --resume {id}`; verify validation runs and user is prompted or error is returned.
 
 ---
 
@@ -1463,6 +1550,8 @@ alfred/
 
 **Rationale:** Session history covers a single run. Memory persists knowledge across sessions: repo structure, user preferences, past findings, recurring patterns.
 
+The memory system uses a **hybrid retrieval strategy**: FTS5 full-text search for exact keyword matches combined with vector similarity search (`sqlite-vec`) for semantic matches. Embeddings are generated locally via `fastembed-rs` (ONNX inference, no API calls, no internet required). This gives Cursor-level retrieval quality while remaining fully local and offline.
+
 #### 5.5.1 Define memory types
 
 1. In `alfred-memory/src/lib.rs`:
@@ -1479,6 +1568,19 @@ alfred/
        pub tags: Vec<String>,
        pub created_at: DateTime<Utc>,
        pub session_id: Option<String>,
+       pub embedding: Option<Vec<f32>>,  // 384-dim vector (bge-small-en-v1.5)
+   }
+
+   pub struct MemorySearchResult {
+       pub entry: MemoryEntry,
+       pub score: f32,       // combined relevance score (0.0–1.0)
+       pub match_type: MatchType,
+   }
+
+   pub enum MatchType {
+       Keyword,   // FTS5 hit
+       Semantic,  // vector similarity hit
+       Hybrid,    // both
    }
    ```
 
@@ -1488,7 +1590,10 @@ alfred/
    #[async_trait::async_trait]
    pub trait MemoryStore: Send + Sync {
        async fn save(&self, entry: &MemoryEntry) -> Result<()>;
-       async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+       /// Hybrid search: FTS5 + vector similarity, merged by Reciprocal Rank Fusion.
+       async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>>;
+       async fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>>;
+       async fn search_semantic(&self, embedding: &[f32], limit: usize) -> Result<Vec<MemorySearchResult>>;
        async fn list_recent(&self, limit: usize) -> Result<Vec<MemoryEntry>>;
        async fn delete(&self, id: &str) -> Result<()>;
    }
@@ -1498,48 +1603,147 @@ alfred/
 
 1. In `alfred-memory/src/short_term.rs`:
    - `InMemoryStore`: `HashMap<String, MemoryEntry>` guarded by `tokio::sync::RwLock`.
-   - Simple `search()`: substring match on `content`.
+   - `search()`: substring match on `content` (no embedding needed for in-session speed).
    - Used for: noting intermediate findings within a session that should be referenced later.
 2. Test: save 5 entries; search by keyword; verify correct entries returned.
 
-#### 5.5.3 Implement long-term memory (SQLite)
+#### 5.5.3 Implement local embedding engine
+
+1. In `alfred-memory/src/embeddings.rs`:
+   - Use `fastembed` crate (ONNX-based, local inference, no API key, no internet).
+   - Model: `EmbeddingModel::BGESmallENV15` — 384-dim, ~25MB model file, fast CPU inference.
+   - Model file is downloaded once on first use to `{data_dir}/models/` and cached locally.
+   - Wrap in `EmbeddingEngine` struct:
+
+     ```rust
+     pub struct EmbeddingEngine {
+         model: TextEmbedding,  // fastembed::TextEmbedding
+     }
+
+     impl EmbeddingEngine {
+         pub fn new(data_dir: &Path) -> Result<Self>;
+         /// Generate a single embedding. Runs in a spawn_blocking task.
+         pub async fn embed(&self, text: &str) -> Result<Vec<f32>>;
+         /// Batch embed for efficiency. Runs in a spawn_blocking task.
+         pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+     }
+     ```
+
+   - `embed()` calls `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+2. Test: embed two semantically similar strings ("async Rust", "concurrent Tokio code") → cosine similarity > 0.8. Embed two unrelated strings → similarity < 0.3.
+3. Test: model file is created at expected path after first `EmbeddingEngine::new()`.
+
+#### 5.5.4 Implement long-term memory (SQLite + FTS5 + sqlite-vec)
 
 1. In `alfred-memory/src/long_term.rs`:
-   - Use `rusqlite` (sync, via `tokio::task::spawn_blocking`) or `sqlx` with SQLite async feature.
+   - Use `rusqlite` (sync, via `tokio::task::spawn_blocking`).
+   - Load `sqlite-vec` extension on connection open: `conn.load_extension(sqlite_vec::sqlite3_vec_init, None)`.
    - Schema:
 
      ```sql
+     -- Main store
      CREATE TABLE memories (
          id TEXT PRIMARY KEY,
          content TEXT NOT NULL,
-         tags TEXT,          -- JSON array
-         created_at TEXT,
+         tags TEXT,              -- JSON array
+         created_at TEXT NOT NULL,
          session_id TEXT
      );
-     CREATE VIRTUAL TABLE memories_fts USING fts5(content, tags);
+
+     -- FTS5 index for keyword search
+     CREATE VIRTUAL TABLE memories_fts USING fts5(
+         content, tags,
+         content=memories, content_rowid=rowid
+     );
+
+     -- Vector index for semantic search (384-dim bge-small-en-v1.5)
+     CREATE VIRTUAL TABLE memories_vec USING vec0(
+         rowid INTEGER PRIMARY KEY,
+         embedding FLOAT[384]
+     );
      ```
 
-   - `save()`: insert into both tables.
-   - `search()`: use FTS5 for full-text search on content + tags.
-   - `list_recent()`: `ORDER BY created_at DESC LIMIT ?`.
+   - `save(entry)`:
+     1. Insert into `memories`.
+     2. Insert into `memories_fts` (trigger or explicit insert).
+     3. If `entry.embedding` is `Some(v)`: insert into `memories_vec`.
+   - `search_keyword(query, limit)`: FTS5 query, return ranked results.
+   - `search_semantic(embedding, limit)`: `SELECT rowid, distance FROM memories_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`, join with `memories`.
+   - `search(query, limit)`: run both, merge with **Reciprocal Rank Fusion** (RRF):
+     - RRF score: `Σ 1/(k + rank_i)` where `k = 60` (standard constant).
+     - Return top `limit` entries sorted by combined score.
+
 2. DB path: `{data_dir}/memory.db`.
-3. Test: save 100 entries; full-text search; verify correct results; verify persistence across process restart.
+3. Test: save 100 entries; FTS5 search for exact term → verify match. Semantic search for paraphrase → verify relevant result found even without shared keywords. Hybrid search → verify combined ranking is better than either alone.
+4. Test: persistence across process restart.
+5. Test: memories without embeddings are still found by keyword search (embedding is optional).
 
-#### 5.5.4 Wire memory into agent loop
+#### 5.5.5 Wire memory into agent loop
 
-1. Add `memory: Arc<dyn MemoryStore>` to `AgentLoop`.
-2. At session start: load recent memories (top 10 by recency), inject as system prompt section:
+1. Add `memory: Arc<dyn MemoryStore>` and `embeddings: Arc<EmbeddingEngine>` to `AgentLoop`.
+2. At session start: retrieve **relevant** memories by querying against the initial user prompt (not by recency):
+   - Generate embedding of the user's first message via `EmbeddingEngine::embed()`.
+   - Call `memory.search(user_prompt, 10)` — returns hybrid-ranked results.
+   - Inject the top results as a system prompt section:
 
-   ```
-   ## Relevant Memory
-   - {entry.content}
-   ```
+     ```
+     ## Relevant Memory
+     - {entry.content}
+     ```
+
+   - This ensures the 10 injected memories are semantically relevant to the current task, not just the most recent ones.
 
 3. Implement `MemoryTool` in `alfred-tools/`:
    - Parameters: `action` (`save` | `search` | `list`), `content` (for save), `query` (for search).
+   - On `save`: generate embedding for `content`, populate `entry.embedding`, call `memory.save()`.
+   - On `search`: call `memory.search(query, 10)` (hybrid).
    - Register in tool registry.
    - Model can explicitly save insights: `MemoryTool(action="save", content="This repo uses X pattern for Y")`.
-4. Test: save a memory in session 1; start session 2; verify memory appears in context.
+4. Test: save a memory in session 1; start session 2 with a semantically related (but not identical) prompt; verify the memory surfaces in context.
+5. Test: save a memory about topic A; start session 2 with a completely unrelated prompt about topic B; verify memory about A does NOT appear in context (relevance filtering works).
+
+#### 5.5.6 Memory capacity, deduplication, and pruning
+
+1. **Max entries and eviction:** Add a configurable `max_memory_entries` (default 10,000) to the long-term store. When inserting a new entry would exceed this limit, evict the least-recently-used entry (or the oldest by `created_at`) so the store size stays bounded. Config key e.g. `[memory] max_entries = 10000`.
+2. **Deduplication on save:** Before inserting a new memory, run a semantic similarity check: if an existing entry has cosine similarity to the new entry's embedding above a threshold (e.g. 0.95), treat the new save as a no-op (skip insert, or update the existing entry's `created_at` so it is not evicted soon). This avoids storing many near-duplicate insights across sessions.
+3. **Manual prune command:** Implement `alfred memory prune` (or `alfred memory cleanup`): optionally accept `--older-than-days N` or `--keep N`; remove entries that do not meet the keep criteria. Without arguments, prune to `max_memory_entries` by evicting oldest first. This gives users control when the automatic eviction is not enough.
+4. Test: insert 10,001 entries with max_entries=10,000 → verify size stays at 10,000. Save the same content twice (or two very similar contents) → verify dedup prevents duplicate. Run `alfred memory prune --keep 100` → verify only 100 entries remain.
+5. Document in user docs: how to inspect memory size, how to adjust `max_memory_entries`, and when to run manual prune.
+
+---
+
+### Milestone 5.6 — Edit Safety and Partial Write Detection
+
+**Dependency:** 5.1 complete, 5.2 complete, 3.3 complete.
+
+**Rationale:** If Alfred makes multiple `Edit` calls in a session and edit 1–3 succeed but edit 4 fails catastrophically (crash, SIGKILL), the codebase is left in a partial state. Graceful edit failures return `is_error: true` and the model can recover; unclean exits do not. This milestone adds detection and user visibility so operators can recover from partial edits.
+
+#### 5.6.1 Session start: baseline snapshot
+
+1. At session start (before the first turn), if the current working directory is inside a git repository:
+   - Run `git status --porcelain` and `git diff --stat` (or equivalent via `git2` crate); store the output and the list of modified/untracked paths.
+   - Store this baseline in the session metadata (e.g. first line of the JSONL or a separate `session_meta.json`).
+2. If not a git repo: record a list of file paths that will be considered "touched" as edits occur (no baseline diff possible; only track which files were edited in-session).
+3. Test: start session in a git repo with one modified file; verify baseline is recorded.
+
+#### 5.6.2 Track edited files per session
+
+1. In the session writer (Phase 3.3), for every `Edit` tool call that completes successfully, append the edited file path and its post-edit mtime (or content hash) to a "touched files" list in session metadata or in each relevant `SessionLine`.
+2. On unclean exit (no final `SessionLine::Result`), this list is still available for the next run.
+
+#### 5.6.3 Unclean exit: warn user
+
+1. On process exit, if the session did not complete normally (no final result line, or process received SIGINT/SIGTERM):
+   - If a baseline was recorded: run `git status --porcelain` again; diff against baseline to list files that were modified during the session.
+   - Print to stderr: `"Session ended without completing. The following files were modified during this session: {list}. Review changes with git diff or resume with alfred --resume {session_id}."`
+2. Test: start session, perform one Edit, kill process (SIGTERM); verify warning lists the edited file.
+
+#### 5.6.4 Session resume: detect stale edited files
+
+1. When resuming a session (Phase 5.2), load the list of files that were edited in the previous run (from session JSONL / metadata).
+2. For each such file: read current mtime (or hash); compare to the value stored at the time of the last successful edit in that session.
+3. If any file has changed (mtime or hash differs): before continuing, prompt the user (or in non-interactive mode, emit a warning and exit with an error unless `--resume-ignore-stale` is set): `"The following files were modified since the last session run: {list}. Resuming may apply edits to outdated content. Abort (a), continue anyway (c), or exit (e)."`
+4. Test: run session with one Edit; manually change the edited file; run `alfred --resume {id}`; verify warning and choice are offered.
 
 ---
 
@@ -1653,11 +1857,16 @@ alfred/
 
 #### 7.1.2 Platform sandboxing (macOS)
 
-1. On macOS: wrap Bash commands in `sandbox-exec` with a restrictive profile:
+1. **Current approach (best-effort):** On macOS, wrap Bash commands in `sandbox-exec` with a restrictive profile when `--sandbox` is set:
    - Allow: read from cwd subtree, write to cwd subtree, exec `/bin/sh`, `/usr/bin/*`, `/usr/local/bin/*`.
    - Deny: network access, write outside cwd, access to `~/.config`, `~/.ssh`, `~/.gnupg`.
-2. Gate behind `--sandbox` CLI flag (opt-in initially).
-3. Test: command attempting network access inside sandbox → verify denied.
+   - **Deprecation note:** `sandbox-exec` is deprecated as of macOS 14 Sonoma and may be removed in a future release. Users on current macOS may see deprecation warnings. Document in user-facing docs that `--sandbox` on macOS is best-effort on modern versions and that a hardened solution is a V2+ follow-on.
+2. **Alternative paths (for a future hardened solution):**
+   - **App Sandbox:** Use Apple's App Sandbox entitlements (requires code signing and possibly notarization). Suitable if Alfred is distributed as a signed app bundle.
+   - **Process-level containment:** Spawn Bash inside a helper that uses `sandbox-exec` only when available, or a lightweight container mechanism (e.g. `darwin-containers` or similar) if the ecosystem matures.
+   - Until then: `--sandbox` on macOS remains best-effort; Linux seccomp/Docker sandbox (7.1.3) is the primary hardened path.
+3. Gate behind `--sandbox` CLI flag (opt-in initially).
+4. Test: command attempting network access inside sandbox → verify denied (when sandbox-exec is present).
 
 #### 7.1.3 Platform sandboxing (Linux)
 
@@ -1748,11 +1957,20 @@ alfred/
 
 #### 8.2.1 Implement `--output-format json`
 
-1. Buffer all events; on completion, output:
+1. Buffer all events; on completion, output a single JSON object. Include an explicit **exit status** so automation (e.g. CI) can distinguish outcomes without parsing `result` or `error`:
+
+   **Exit status taxonomy:** `exit_status` is one of:
+   - `completed` — session ended normally with a final answer.
+   - `max_turns_reached` — the loop stopped because `max_turns` was hit; `result` may contain partial output.
+   - `budget_exceeded` — the loop stopped because `max_budget_usd` was exceeded.
+   - `error` — session ended due to an error (provider failure, tool failure, etc.); `error` field has details.
+
+   Example schema:
 
    ```json
    {
      "type": "result",
+     "exit_status": "completed",
      "result": "...",
      "session_id": "...",
      "num_turns": 5,
@@ -1763,7 +1981,9 @@ alfred/
    }
    ```
 
-2. On error: `"is_error": true`, `"error": "..."`.
+   When `exit_status` is `max_turns_reached` or `budget_exceeded`, still include `result` (partial output so far) and set `is_error` to `false` or according to whether the run is considered a failure for the caller. When `exit_status` is `error`, set `"is_error": true` and include `"error": "..."`.
+
+2. Document the `exit_status` values and schema in user docs so CI scripts can branch on them.
 
 #### 8.2.2 Implement `--output-format stream-json`
 
@@ -1771,7 +1991,7 @@ alfred/
    - `{ "type": "text", "text": "..." }` for each text chunk.
    - `{ "type": "tool_use", "name": "Bash", "input": {...} }` when tool starts.
    - `{ "type": "tool_result", "name": "Bash", "is_error": false, "content": "..." }` when tool finishes.
-   - `{ "type": "result", ... }` at end.
+   - `{ "type": "result", "exit_status": "completed"|"max_turns_reached"|"budget_exceeded"|"error", ... }` at end. The same `exit_status` taxonomy as 8.2.1 applies.
 2. Test: pipe `alfred --output-format stream-json` to `jq` → verify each line is valid JSON.
 
 ---
@@ -1803,6 +2023,15 @@ alfred/
 2. At startup: spawn configured MCP servers, register their tools.
 3. Implement `alfred-cli/src/commands/run.rs` MCP startup routine.
 4. Tool guidance (Milestone 3.4.3) regenerates to include MCP tools after registration.
+
+#### 8.3.3 MCP security and trust model
+
+MCP servers are external processes that register as tools. They can read files, run commands, or exfiltrate data if malicious or compromised. Alfred's permission system (Phase 4.3) must apply to MCP tools; they must not bypass it.
+
+1. **Allowlist:** MCP servers are only loaded if explicitly declared in the user's config (`config.toml` or equivalent). There is no automatic discovery of MCP servers. The list of MCP server names and commands is user-controlled (allowlist).
+2. **Permission behavior:** MCP tools are treated like built-in state-changing tools for permission purposes. Default to `AskUser` (Phase 4.3) for any MCP tool call unless the user has added the tool or server to an allow list for the session. Do not treat MCP tools as inherently read-only.
+3. **Audit logging:** Every MCP tool call (server name, tool name, input summary) is recorded in the same append-only audit log as built-in tool calls (Phase 7.3). This enables forensics and policy review.
+4. **Environment restriction:** When spawning an MCP server process, do not pass through the full environment. Use a restricted environment: only explicitly allowlisted env vars (e.g. `PATH`, `HOME`, or user-configured `mcp_env_allow`) are passed. Strip `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`, `AWS_*`, and other sensitive vars unless the user has explicitly allowlisted them for that server in config. Document the allowlist in the config schema.
 
 ---
 
@@ -2164,6 +2393,7 @@ alfred/
 2. Run `cargo deny check` with a policy file (`licenses`, `bans`, `advisories`).
 3. Review all `unsafe` blocks (should be zero outside FFI if using pure Rust).
 4. Review all subprocess spawning for injection vulnerabilities.
+5. **Project instructions prompt injection:** Verify that `ALFRED.md` / `CLAUDE.md` loading uses trust-on-first-use and size limits (Phase 3.4.2). Confirm that a malicious repo with adversarial instructions cannot hijack Alfred without user approval on first load.
 
 #### 9.6.4 Release checklist
 
@@ -2264,6 +2494,8 @@ Task-level dependencies (critical path):
 | `clap_complete` | 4.x | Shell completion generation |
 | `clap_mangen` | 0.2 | Man page generation |
 | `rusqlite` or `sqlx` | latest | SQLite for long-term memory |
+| `sqlite-vec` | 0.1.x | Vector similarity search extension for SQLite (pure C, no server) |
+| `fastembed` | 4.x | Local ONNX-based embedding generation (BGE-small, no API required) |
 | `lru` | 0.12 | LRU cache for file reads |
 | `tree-sitter` | 0.22 | Code parsing for symbol extraction (optional) |
 | `tree-sitter-rust` | 0.21 | Rust grammar for tree-sitter (optional) |
@@ -2273,4 +2505,4 @@ Task-level dependencies (critical path):
 ---
 
 *Generated from: `devdocs/REPORT.md`, `devdocs/ARTIFACTS.md`, `devdocs/Instructions.md`*
-*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3)*
+*Updated: 2026-03-16 — added bounded concurrency (4.6.3), tool guidance prompts (3.4.3), subagent architecture (4.7), task graph planner (4.8), memory system (5.5), file read LRU cache (6.4), live plan visualization (8.6), repo indexing (8.7), structured telemetry (9.3); prompt caching (4.2.4), hybrid memory with sqlite-vec + fastembed (5.5.3–5.5.5), relevance-based memory injection (5.5.5)*
