@@ -205,9 +205,7 @@ clido/
    resolver = "2"
    ```
 
-3. Create `.cargo/config.toml` with:
-   - `[profile.dev] opt-level = 1` (faster incremental builds)
-   - `[profile.release] lto = "thin"`, `codegen-units = 1`
+3. Create `.cargo/config.toml` with the content specified in [devdocs/guides/ci-and-release.md](../guides/ci-and-release.md) (§4): `[profile.dev] opt-level = 1` (faster incremental builds), `[profile.release] lto = "thin"`, `codegen-units = 1`.
 4. Add a top-level `rust-toolchain.toml` pinning a stable channel (e.g. `channel = "1.78"`).
 5. Verify: `cargo metadata --no-deps` outputs all workspace members.
 
@@ -971,7 +969,7 @@ disallowed = ["Bash"]      # example
   ```
 
 **Config::load():**
-1. Check `$CLIDO_CONFIG_FILE`; if set, use that path as the global config.
+1. Check `$CLIDO_CONFIG`; if set, use that path as the global config.
 2. Otherwise: `~/.config/clido/config.toml`.
 3. Parse global config with `toml` crate. Fall back to empty defaults if file absent.
 4. Walk from cwd upward (stop at `$HOME` or fs root) to find `.clido/config.toml`. If found, merge it: project config values override global config values.
@@ -1186,11 +1184,13 @@ Clido is designed to be local-first. Users running Ollama (or another local prov
    - If adding the next message would exceed `effective_limit * compaction_threshold`: trigger compaction. Default `compaction_threshold` to 0.75 so that even with 10% undercount we stay well below provider limits.
    - Otherwise: include all messages.
 
+**Pinned messages (definition):** A message is **pinned** if and only if it is a `system`-role message injected by the context builder (e.g. project instructions from CLIDO.md, tool usage guidance, or other builder-injected system content). User messages are never pinned. The compaction pass skips pinned messages when selecting the "oldest N" block to summarize; after generating the summary, it re-inserts all pinned messages verbatim above the summary block so they remain in full in the context. There is no user-facing command to pin arbitrary messages; pinning is automatic and limited to builder-injected content. See [devdocs/algorithms/context-compaction.md](../algorithms/context-compaction.md).
+
 #### 4.2.3 Implement context compaction
 
 **Output UX:** Compaction must be visible to the user (never silent). Rich TTY: transient message (e.g. "↻ Compacting context…" then "✓ Context compacted"); ASCII/non-TTY: persistent lines `[compact] …`. See [cli-interface-specification.md](cli-interface-specification.md) §5 (D10). Emit `compact_start` / `compact_end` in `--output-format stream-json`.
 
-1. **Pinned context:** Before compaction, identify messages that must never be summarized away (e.g. user constraints like "never touch files in /prod", or messages explicitly marked as critical). Options: (a) allow the user to prefix a message with a marker (e.g. `IMPORTANT:` or a configurable prefix) so the system treats it as pinned; (b) or heuristically detect constraint-like user messages (e.g. "never", "always", "do not", "must not" in the first user message). Pinned messages are not included in the "oldest N" block that gets summarized; they are prepended to the compacted summary so they remain in full in the context.
+1. **Pinned messages:** Apply the definition above. Only system-injected messages (project instructions, tool guidance) are pinned and preserved verbatim; they are prepended to the compacted summary.
 2. When context exceeds threshold:
    - Take the oldest N **non-pinned** messages (those that won't fit).
    - Call a secondary "summarize" request to the model: `"Summarize the following conversation history in 3-5 sentences, focusing on decisions made and context established: {oldest_messages}"`.
@@ -1204,6 +1204,7 @@ Clido is designed to be local-first. Users running Ollama (or another local prov
 4. Test: include an early user message with "IMPORTANT: never modify src/prod/"; run until compaction; verify that constraint still appears verbatim in the context (or that pinned messages survive compaction).
 5. Test: mock summarization provider to return an error → verify compaction is skipped, agent continues, `warn!` is emitted.
 6. Test: context exceeds hard model limit and summarization fails → verify user-visible error message and halted turn (not a panic).
+7. **Measurable compaction criterion:** The compaction summary must contain the file path of every file successfully read or edited in the compacted turns, and the name of every tool called in those turns. Test: run a fixture with exactly 5 known tool calls across 3 known files; trigger compaction; verify the summary text contains all 3 file paths and all 5 tool names (e.g. via string assertion or regex). This makes "retains enough context" testable.
 
 ---
 
@@ -1268,8 +1269,7 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 #### 4.3.2 Implement permission modes
 
 1. `PermissionMode::AcceptAll` → always return `Allow`.
-2. `PermissionMode::PlanOnly` → allow only: `Read`, `Glob`, `Grep`, `Bash` read-only patterns.
-   - For `Bash`: only allow if command matches read-only patterns (e.g. `ls`, `cat`, `find`, `grep`, `git diff`, `git log`). Otherwise `Deny`.
+2. `PermissionMode::PlanOnly` → allow only: `Read`, `Glob`, `Grep` (no Bash, no Write, no Edit). Bash is blocked entirely in plan mode; see Milestone 4.5.1.
 3. `PermissionMode::Default` → check allow/disallow lists; if state-changing tool not in allow list → `AskUser`.
 
 #### 4.3.3 Implement interactive permission prompt
@@ -1341,14 +1341,16 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
    - `Read`, `Glob`, `Grep` → `true`.
    - `Write`, `Edit`, `Bash` → `false`.
 
-#### 4.6.2 Parallelize read-only tool calls
+#### 4.6.2 Parallelize read-only tool calls and mixed batch ordering
 
-1. In `clido-agent/src/executor.rs`:
-   - When model returns multiple `ToolUse` blocks:
-     - If ALL are read-only: execute them concurrently with `futures::future::join_all`.
-     - If ANY is state-changing: execute all sequentially in order.
-   - Collect results preserving original tool call ordering.
-2. Test: model requests `[Read, Read, Read]` → verify all three execute concurrently.
+1. In `clido-agent/src/executor.rs`, when the model returns multiple `ToolUse` blocks in one response, use this **explicit algorithm**:
+   - **(a)** Execute all read-only tools concurrently (under the semaphore from 4.6.3), and collect their results.
+   - **(b)** Execute state-changing tools one at a time, in the order they appear in the model response; collect their results.
+   - **(c)** Return all results to the model in the **original tool-call order** (so the model sees results aligned with its request order).
+   - If the batch is all read-only: only step (a) applies. If all state-changing: only step (b) applies. Mixed: do (a) then (b), then merge results into the original order.
+2. Collect results preserving original tool call ordering in all cases.
+3. Test: model requests `[Read, Read, Read]` → verify all three execute concurrently.
+4. Test: model requests `[Read, Edit, Read]` → verify both Reads run first (concurrently), then Edit runs; results returned in order Read, Edit, Read.
 
 #### 4.6.3 Add semaphore-based concurrency limit
 
@@ -2222,21 +2224,33 @@ MCP servers are external processes that register as tools. They can read files, 
 
 **Dependency:** 4.5 complete.
 
-**Reference:** Doctor output format, check ordering, exit codes (0=all pass, 1=mandatory fail, 2=warnings only), and `--json` output are defined in [cli-interface-specification.md](cli-interface-specification.md) §11.
+**Reference:** Doctor output format, check ordering, exit codes (0=all pass, 1=mandatory fail, 2=warnings only), and `--json` output are defined in [cli-interface-specification.md](cli-interface-specification.md) §12.
 
 #### 8.4.1 Implement health check command
 
 **Version-awareness rule:** `clido doctor` must only check capabilities that are present in the currently running binary. Checking for a missing database or an unbuilt feature as if it were a failure confuses users and hides real issues. The check list below is grouped by the release that introduces each check; later releases extend the list.
 
-**V1 checks (always run):**
-- Rust/Cargo version (from `rustc --version`).
-- API key presence for the configured provider.
-- Provider connectivity (simple API ping — model list or lightweight probe).
+**V1 check list (canonical):**
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| Config file found and parseable | Mandatory | Global config file (e.g. `~/.config/clido/config.toml` or `$CLIDO_CONFIG`) exists and is valid TOML. |
+| Active profile's `api_key_env` variable is set | Mandatory | The selected profile's `api_key_env` (e.g. `ANTHROPIC_API_KEY`) is set in the environment and non-empty. |
+| Session directory writable | Mandatory | Session storage directory exists and is writable. |
+| `pricing.toml` present and not stale (>90 days) | Warning only | Pricing file present (shipped default or user override); if mtime &gt; 90 days ago, report warning. |
+| POSIX shell available (Windows only) | Warning only | On Windows, a POSIX-compatible shell (bash/WSL/Git Bash) is available for BashTool. |
+
+V1 does not include provider connectivity ping (that is added in V1.5). Optional: Rust/Cargo version from `rustc --version` can be reported as informational in V1.
+
+**V1 checks (implementation):**
 - CLI config file readable and valid TOML.
+- API key presence for the active profile (`api_key_env`).
 - Session storage directory exists and is writable.
 - `pricing.toml` present (default or user-override); warn if the file is older than 90 days (see 4.4.1).
+- On Windows: POSIX shell availability (warning only).
 
 **V1.5 checks (added when MCP is available):**
+- Provider connectivity: simple API ping (model list or lightweight probe) for the configured provider.
 - MCP servers listed in config: spawn each and attempt a `ping`; report latency and pass/fail per server.
 
 **V3 checks (added when memory is available):**

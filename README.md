@@ -29,4 +29,4 @@ Early stage: architecture and product are specified in `devdocs/`. Implementatio
 
 ## License
 
-See repository license (if any).
+[MIT](LICENSE)

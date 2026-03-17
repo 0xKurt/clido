@@ -118,12 +118,12 @@ clido "list all public functions"
 
 ## Constraining the agent during development
 
-### Read-only mode (`--plan`)
+### Read-only mode (`--permission-mode plan`)
 
 Use plan mode when you want to observe the agent's behavior without allowing any writes or shell commands:
 
 ```sh
-clido --plan "refactor the error handling in src/main.rs"
+clido --permission-mode plan "refactor the error handling in src/main.rs"
 ```
 
 In plan mode, `Write`, `Edit`, and `Bash` calls are blocked. The agent can still read, glob, and grep. This is useful when you are iterating on context assembly or tool routing and don't want file modifications.
@@ -153,7 +153,7 @@ If the agent exceeds the limit, it stops and reports a clean result rather than 
 Prevent unexpected API spend during live-provider testing:
 
 ```sh
-clido --profile real --max-budget 0.05 "fix this test"
+clido --profile real --max-budget-usd 0.05 "fix this test"
 ```
 
 The agent will stop and report when the cumulative cost reaches the limit. The session is saved and can be resumed.

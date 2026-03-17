@@ -39,12 +39,13 @@ Every phase from `development-plan.md` is assigned to exactly one release:
 | Phase 5.3 — Graceful Shutdown | V1 |
 | Phase 5.4 — Integration Test Suite | V1 |
 | Phase 5.6 — Edit Safety and Partial Write Detection | V1 |
+| Phase 8.4 (basic) — `clido doctor` (API key, session dir, pricing.toml) | V1 |
 | Phase 4.4 — Cost Tracking | V1.5 |
 | Phase 4.6 — Parallel Tool Execution | V1.5 |
 | Phase 6.2 — Context Efficiency | V1.5 |
 | Phase 7.2 — Secret Detection | V1.5 |
 | Phase 8.2 — JSON and Stream-JSON Output | V1.5 |
-| Phase 8.4 — `clido doctor` | V1.5 |
+| Phase 8.4 (expanded) — `clido doctor` (MCP, connectivity ping) | V1.5 |
 | Phase 4.1 — Multi-Provider Support | V2 |
 | Phase 4.2.4 — Prompt Caching | V2 |
 | Phase 6.1 — Startup Performance | V2 |

@@ -103,6 +103,7 @@ This document is the canonical product specification for Clido's command-line in
 | `clido --version` / `clido version` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido --continue` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido --resume <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --resume-ignore-stale` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido --print` / `-p` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido --tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido --allowed-tools <list>` | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -457,6 +458,8 @@ Exact formats (for model consumption and session replay):
 | `1` | One or more mandatory checks failed |
 | `2` | Mandatory passed; one or more optional warnings |
 
+**Note:** `clido doctor` exit code 2 (warnings) is intentionally distinct from the main agent exit code 2 (usage error). Scripts should not chain `clido doctor && clido ...` unless they intend to stop on warnings. Use `clido doctor --strict` (V2+) to treat warnings as failures when zero-tolerance behavior is needed.
+
 ### Secret redaction
 
 Any error or log line that would display an API key or token is redacted, e.g. `ANTHROPIC_API_KEY=sk-ant-***...***`.
@@ -568,6 +571,15 @@ Fork from that session; new session ID. `--json` supported.
 
 Resumes the **newest** session for the **current project path** (cwd-matched). Not global.
 
+### `--resume <id>` and `--resume-ignore-stale`
+
+`--resume <id>` resumes the session with the given ID. Before continuing, Clido validates that no file edited in that session has been changed on disk since (stale-file detection). If any file is stale:
+
+- **Interactive mode:** Warn and ask "Continue anyway? [y/N]". If no, abort.
+- **Non-interactive mode:** Exit with an error unless `--resume-ignore-stale` is set. Error message lists the modified files and suggests running with `--resume-ignore-stale` to continue anyway.
+
+`--resume-ignore-stale` skips stale-file validation and resumes regardless. Use when the user has intentionally changed files or accepts the risk of applying further edits on top of changed content.
+
 ---
 
 ## 10. CI / Non-Interactive Mode Contract
@@ -618,7 +630,44 @@ Progress events (tool pending/in_progress) are not included by default; use `--v
 
 ---
 
-## 11. `clido doctor` Output Design
+## 11. MCP config file format
+
+The `--mcp-config <file>` flag (V1.5+) points to a TOML file that declares MCP servers. Each server is a table in the `[[server]]` array.
+
+### Schema
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Unique identifier for the server. Tools from this server are namespaced as `mcp__<name>__<tool_name>`. |
+| `transport` | string | yes | In V1.5 only `stdio` is supported. `sse` is deferred to V3. |
+| `command` | string | yes | Executable to spawn (e.g. `npx`, `node`). |
+| `args` | array of string | yes | Arguments to the command (e.g. `["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]`). |
+| `env` | table | no | Environment variables for the subprocess. Keys and values are strings; values may use `${VAR}` to reference the current process env. |
+
+### Example
+
+```toml
+[[server]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[server]]
+name = "github"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+```
+
+### Tool namespacing
+
+Tools provided by MCP servers are registered with the prefix `mcp__<server_name>__` followed by the tool name returned by the server. This avoids collisions with built-in tools (Read, Write, Edit, Glob, Grep, Bash) and between servers.
+
+---
+
+## 12. `clido doctor` Output Design
 
 Version-aware checks (see development-plan Phase 8.4.1). Example:
 
@@ -647,7 +696,7 @@ $ clido doctor
 
 ---
 
-## 12. `clido audit` UX
+## 13. `clido audit` UX
 
 **Availability:** V2 (requires audit log).
 
@@ -674,7 +723,7 @@ Default (newest first, tabular):
 
 ---
 
-## 13. `clido stats` UX
+## 14. `clido stats` UX
 
 **Availability:** V2 (requires telemetry).
 
@@ -701,7 +750,7 @@ Default:
 
 ---
 
-## 14. Shell Completion and Discovery
+## 15. Shell Completion and Discovery
 
 - **Bash:** `clido completions bash` → write to e.g. `~/.bash_completion.d/clido`
 - **Zsh:** `clido completions zsh` → write to e.g. `~/.zsh/completions/_clido`
@@ -713,7 +762,7 @@ Man page sections: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMEN
 
 ---
 
-## 15. Accessibility and Portability
+## 16. Accessibility and Portability
 
 - Status is conveyed by **symbol and text**; never by color or glyph alone.
 - ASCII mode provides full information without Unicode.
@@ -723,7 +772,7 @@ Man page sections: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMEN
 
 ---
 
-## 16. Deprecation and Compatibility Policy
+## 17. Deprecation and Compatibility Policy
 
 - **Aliases:** Renamed commands/flags keep the old name as a hidden alias for at least one full major release.
 - **Deprecation notice:** `Warning: '<old>' is deprecated. Use '<new>' instead.` — printed to stderr once per session.
@@ -733,7 +782,7 @@ Man page sections: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMEN
 
 ---
 
-## 17. Validation Checklist (Spec Completeness)
+## 18. Validation Checklist (Spec Completeness)
 
 Before considering the spec complete for a release:
 
@@ -746,6 +795,32 @@ Before considering the spec complete for a release:
 - [ ] Every error category has a message template and hint.
 - [ ] Roadmap and release docs reference this spec.
 - [ ] New UX behaviors have corresponding tests in the testing strategy.
+
+### Per-flag reference (global flags, V1 surface)
+
+| Flag | Type | Default | Env var | Conflicts |
+|------|------|---------|--------|-----------|
+| `--resume <id>` | string | — | — | `--continue` |
+| `--resume-ignore-stale` | flag | false | — | — |
+| `--continue` | flag | false | — | `--resume` |
+| `--print` / `-p` | flag | false | — | — |
+| `--profile <name>` | string | config default | `CLIDO_PROFILE` | — |
+| `--model <id>` | string | config default | `CLIDO_MODEL` | — |
+| `--provider <id>` | string | config default | `CLIDO_PROVIDER` | — |
+| `--permission-mode` | `default` \| `accept-all` \| `plan` | config | `CLIDO_PERMISSION_MODE` | — |
+| `--max-turns <n>` | integer | 50 | `CLIDO_MAX_TURNS` | — |
+| `--max-budget-usd <f>` | float | 5.0 | `CLIDO_MAX_BUDGET_USD` | — |
+| `--output-format` | `text` \| `json` \| `stream-json` | text | `CLIDO_OUTPUT_FORMAT` | — |
+| `--no-color` | flag | false | `NO_COLOR` | — |
+| `--verbose` / `-v` | flag | false | — | `--quiet` (V1.5+) |
+| `--system-prompt <s>` | string | — | `CLIDO_SYSTEM_PROMPT` | `--system-prompt-file` |
+| `--system-prompt-file <path>` | path | — | — | `--system-prompt` |
+| `--append-system-prompt <s>` | string | — | — | — |
+| `--allowed-tools` | list | config | — | — |
+| `--disallowed-tools` | list | config | — | — |
+| `--tools` | list | config | — | — |
+
+Config file path: env `CLIDO_CONFIG`. Session dir: `CLIDO_SESSION_DIR`. Data dir: `CLIDO_DATA_DIR`. Log level: `CLIDO_LOG`.
 
 ---
 
