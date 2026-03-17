@@ -2,6 +2,8 @@
 
 This guide explains how to develop and test clido locally without running the agent against repositories you care about.
 
+**Config and env:** Config is loaded from `CLIDO_CONFIG` (if set), then `~/.config/clido/config.toml`, then `.clido/config.toml` (walk upward). Use `--max-budget-usd` to cap spend. Use `CLIDO_LOG=debug` (or `-v`) to increase log verbosity. Profile selection (`--profile`) uses the loaded config; without a config file, the default profile is still applied from built-in defaults.
+
 ## The core problem
 
 clido reads and modifies files. During development, you will run incomplete or experimental builds that may behave unexpectedly — wrong edits, runaway loops, missing permission prompts. Running these against your actual repositories is risky.

@@ -47,8 +47,9 @@ This document is the canonical product specification for Clido's command-line in
 | Solo Developer | resume a session after Ctrl-C | I do not lose context when I interrupt. |
 | Automation Engineer | run `clido -p "task"` with no TTY | I can script Clido in CI. |
 | Solo Developer | see which tool is running and the result | I understand what Clido is doing. |
+| Solo Developer | run `clido doctor` for basic local checks | I can catch missing API keys, unwritable session dirs, or stale pricing metadata early. |
 
-**Acceptance:** Multi-turn tasks complete; permission prompts appear for state-changing tools; `--resume` restores session; non-TTY runs without hanging.
+**Acceptance:** Multi-turn tasks complete; permission prompts appear for state-changing tools; `--resume` restores session; non-TTY runs without hanging; `clido doctor` performs the V1 basic checks.
 
 #### V1.5
 
@@ -56,10 +57,10 @@ This document is the canonical product specification for Clido's command-line in
 |-------|------------|----------|
 | Automation Engineer | get JSON output with exit status | I can branch on success/failure in scripts. |
 | Solo Developer | see cost per session | I can control spend. |
-| Solo Developer | run `clido doctor` | I can fix setup issues quickly. |
+| Solo Developer | run an expanded `clido doctor` | I can diagnose provider and operator issues more quickly than in V1. |
 | Automation Engineer | use `--quiet` | I get only the final answer in text mode. |
 
-**Acceptance:** `--output-format json` has stable schema and exit codes; cost appears in footer; doctor runs and reports config/provider/storage.
+**Acceptance:** `--output-format json` has stable schema and exit codes; cost appears in footer; doctor expands beyond the V1 basic checks and reports provider/config/storage issues clearly.
 
 #### V2
 
@@ -128,7 +129,7 @@ This document is the canonical product specification for Clido's command-line in
 | `clido sessions list` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido sessions show <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido sessions fork <id>` | — | ✓ | ✓ | ✓ | ✓ |
-| `clido doctor` | — | ✓ | ✓ | ✓ | ✓ |
+| `clido doctor` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido audit` | — | — | ✓ | ✓ | ✓ |
 | `clido stats` | — | — | ✓ | ✓ | ✓ |
 | `clido list-models` | — | ✓ | ✓ | ✓ | ✓ |
@@ -449,6 +450,7 @@ Exact formats (for model consumption and session replay):
 | `1` | Runtime error (provider, tool, session) |
 | `2` | Usage / config error (bad flags, missing key) |
 | `3` | Soft limit reached (budget or turns) |
+| `130` | Interrupted by user (e.g. Ctrl-C / SIGINT); session is flushed before exit |
 
 **`clido doctor` only:**
 
@@ -616,6 +618,8 @@ Example shape:
 `exit_status`: `completed`, `max_turns_reached`, `budget_exceeded`, `error`.
 
 ### `--output-format stream-json`
+
+**V1:** Not yet implemented; using `stream-json` returns a usage error. Use `json` for machine-readable output.
 
 Newline-delimited JSON events on stdout. Example events:
 

@@ -1579,6 +1579,82 @@ Anthropic also supports **automatic caching** for multi-turn conversations since
 
 ---
 
+## Phase 4.9 — Workflow Engine (Declarative Execution Layer)
+
+**Depends on:** Phase 4.8 (Planner), AgentLoop, config (LoadedConfig, profiles), ToolRegistry, session paths.
+
+**Goal:** User-defined, repeatable pipelines via YAML (e.g. multi-phase code review, release checklists). One AgentLoop per step, template-driven prompts, per-step profile and tool allowlist. Workflows are general-purpose; faultline is one expected first use case.
+
+**New crate:** `clido-workflows` (orchestration only; step execution injected by CLI via a step-runner abstraction).
+
+---
+
+### Milestone 4.9.x — Pre-Flight und dynamische Parameter
+
+**Dependency:** Phase 4.9 workflow engine (loader, executor, CLI `workflow run`).
+
+Before any workflow run (and in `clido workflow check`), a Pre-Flight ensures all required tools, profiles, API keys, and optional prerequisites are satisfied. This allows safe local adoption of workflows from elsewhere (e.g. copy YAML into `.clido/workflows/` and run `workflow check` first).
+
+#### 4.9.x.1 What is checked
+
+| Check | Source | On failure |
+|-------|--------|------------|
+| **Step-Tools** | Union of all `tools` across steps | Each must exist in the ToolRegistry (after global filters). Error: list required vs missing. |
+| **Profile** | All `profile` values from steps (or default) | Each must exist in LoadedConfig. Error: "Profile 'X' not found in config". |
+| **API-Keys** | Per profile: `api_key_env` (e.g. `ANTHROPIC_API_KEY`) | Env must be set. Error: "Set ANTHROPIC_API_KEY for profile 'X'. Run: clido doctor". |
+| **Prerequisites** | Optional top-level `prerequisites` (see 4.9.x.2) | Commands on PATH, env vars set; optional entries only warn. Error for missing required; `--skip-prereq-check` skips entire prerequisites check. |
+
+Pre-Flight runs after Load + Validate and Config resolve, before cost estimate and run. On any hard failure: clear message, exit without API calls.
+
+#### 4.9.x.2 Prerequisites schema (optional)
+
+Workflows that depend on external commands or env vars (e.g. faultline with `go`, `forge`) may declare:
+
+```yaml
+prerequisites:
+  commands:
+    - "go"                      # required (default)
+    - name: "forge"
+      optional: true             # only warn if missing
+    - name: "cargo"
+      optional: false
+  env:
+    - "ANTHROPIC_API_KEY"        # required
+    - name: "GITHUB_TOKEN"
+      optional: true
+```
+
+- **commands:** Each entry is either a string (required) or `{ name: string, optional: bool }` (default `optional: false`). Pre-Flight checks each command is on PATH; missing required → error, missing optional → warning only.
+- **env:** Same structure. Pre-Flight checks each var is set; missing required → error, missing optional → warning only.
+
+Flag `--skip-prereq-check`: skip only the prerequisites check (commands + env); step-tools and profile/API-key checks still run. Useful in CI where only API keys are enforced.
+
+#### 4.9.x.3 Engine vs CLI
+
+- **Engine (clido-workflows):**
+  - Export `required_tools_and_profiles(def) -> (Vec<String>, Vec<String>)` so the CLI knows which tools and profile names the workflow needs.
+  - Optionally: `validate_prerequisites(prereq, checker)` using a small `PrereqChecker` trait (e.g. `fn command_on_path(&self, name: &str) -> bool`, `fn env_set(&self, name: &str) -> bool`) so the engine stays testable without real OS access; CLI implements the trait with actual PATH/env checks.
+- **CLI:** Load config, build registry, call engine to get required tools/profiles, then: (1) check step tools ⊆ registry tool names, (2) check step profiles ⊆ config profile names, (3) for each referenced profile check `api_key_env` is set, (4) if prerequisites present and not skipped, check commands and env (with optional → warn). On any failure, exit with clear message.
+
+#### 4.9.x.4 Subcommand `workflow check`
+
+- **Command:** `clido workflow check <file.yaml|name>`.
+- **Behavior:** Load workflow, validate (schema + template refs), load config, run Pre-Flight (step-tools, profiles, API keys, prerequisites). No cost estimate, no run.
+- **Exit:** 0 if all OK, 1 on validation or Pre-Flight failure. Use case: first step when adopting a foreign workflow — run `workflow check`, fix missing profile/tools/prereqs, then `workflow run`.
+
+#### 4.9.x.5 Pre-Flight vs step execution
+
+Pre-Flight only checks **availability** (tools in registry, profiles in config, API keys set, optional prerequisites on PATH/env). It does not execute steps.
+
+If a step runs a tool that uses a prerequisite (e.g. Bash runs `forge build`) and that command is missing (or was optional and not installed), the **tool returns a normal error result** (`is_error: true`). The step’s **`on_error`** policy (fail | continue | retry) applies; there is no special-case or “uncontrolled” bash failure. Document this explicitly in Phase 4.9: “Pre-Flight checks availability; failures during step execution (including missing optional prerequisites) are handled solely by the step’s `on_error` policy.”
+
+#### 4.9.x.6 Tests
+
+- Unit (engine): `required_tools_and_profiles` returns correct sets; prerequisite validation with mock checker (optional vs required, missing required fails, missing optional warns).
+- Integration: CLI `workflow check` with workflow that references missing profile → exit 1 and message; with missing optional prerequisite → warning and exit 0; with `--skip-prereq-check` and missing command → exit 0.
+
+---
+
 ## Phase 5 — Reliability Improvements
 
 **Goal:** Robust error handling, retry logic, session recovery, graceful shutdown, persistent memory.

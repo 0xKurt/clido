@@ -17,15 +17,18 @@ Planned capabilities include: core agent loop with tools, sessions, context and 
 
 ## Status
 
-Early stage: architecture and product are specified in `devdocs/`. Implementation will follow a Rust workspace layout and the CLI interface specification.
+**V1 implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes and ExitPlanMode, `clido doctor` and `clido init`, and hardening (retries, SIGINT, tests) are implemented. See [V1 gap analysis](devdocs/plans/releases/v1-gap-analysis.md) for current status and remaining gaps (e.g. interactive REPL, streaming UX). Build and test: `cargo build --workspace` and `cargo test --workspace`.
 
 ## Documentation
 
 | Doc | Description |
-|-----|-------------|
+| --- | --- |
+| [Implementation bootstrap](devdocs/guides/implementation-bootstrap.md) | Where to start, canonical doc order, locked pre-build decisions |
 | [Development plan](devdocs/plans/development-plan.md) | Architecture, Rust workspace, phased roadmap |
 | [CLI interface spec](devdocs/plans/cli-interface-specification.md) | Canonical command surface and behavior |
 | [Releases](devdocs/plans/releases/README.md) | V1 → V4 scope and exit criteria |
+| [Config reference](devdocs/schemas/config.md) | `config.toml`, `.clido/config.toml`, and `pricing.toml` schema |
+| [Testing strategy](devdocs/guides/testing-strategy-and-master-test-plan.md) | Full validation strategy and test taxonomy |
 
 ## License
 

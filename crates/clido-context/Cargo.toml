@@ -1,0 +1,11 @@
+[package]
+name = "clido-context"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+
+[dependencies]
+clido-core = { path = "../clido-core" }
+tracing = "0.1"

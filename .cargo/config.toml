@@ -1,0 +1,10 @@
+[build]
+# Use one target directory for the whole workspace (default)
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+# Faster incremental builds than default opt-level = 0

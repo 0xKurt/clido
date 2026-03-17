@@ -1,0 +1,21 @@
+[package]
+name = "clido-tools"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+
+[dependencies]
+clido-core = { path = "../clido-core" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+ignore = { workspace = true }
+regex = { workspace = true }
+glob = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -9,7 +9,7 @@ This directory translates the main `development-plan.md` into product-style rele
 | V1 | A real, usable agent on a single machine with one provider |
 | V1.5 | Safe to automate, cheaper to run, easier to operate |
 | V2 | Production-grade: multi-provider, packaged, benchmarked, documented |
-| V3 | Advanced capabilities: subagents, memory, MCP, indexing |
+| V3 | Advanced capabilities: subagents, memory, MCP, indexing, declarative workflows |
 | V4 | Experimental: task graph planner for specific hard workflows |
 
 Each release builds on the previous. Later releases are not planned in detail until earlier ones are shipped and measured.
@@ -19,7 +19,7 @@ Each release builds on the previous. Later releases are not planned in detail un
 - `v1.md` — Core agent loop, six tools, sessions, context, permissions.
 - `v1-5.md` — Operator quality: cost tracking, parallelism, secret safety, machine-readable output.
 - `v2.md` — Product readiness: multi-provider, sandboxing, telemetry, packaging.
-- `v3.md` — Advanced platform: subagents, memory, MCP, repository indexing.
+- `v3.md` — Advanced platform: subagents, memory, MCP, repository indexing, declarative workflows.
 - `v4.md` — Planner and experimental orchestration for complex task types.
 
 ## Roadmap Coverage
@@ -66,6 +66,8 @@ Every phase from `development-plan.md` is assigned to exactly one release:
 | Phase 5.5 — Memory System | V3 |
 | Phase 8.3 — MCP Support | V3 |
 | Phase 8.7 — Repository Indexing | V3 |
+| Phase 4.9 — Workflow Engine | V3 |
+| Phase 4.9.x — Pre-Flight und dynamische Parameter | V3 |
 | Phase 4.8 — Task Graph / Planner | V4 |
 
 ## Planning Principles
