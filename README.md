@@ -13,11 +13,22 @@
 - **Safe by default** — Destructive or state-changing actions require your approval.
 - **Session-aware** — Resume after interrupt; cost and usage visible when you care.
 
-Planned capabilities include: core agent loop with tools, sessions, context and permissions (V1); JSON output and operator tooling (V1.5); multi-provider, sandboxing, packaging (V2); memory, MCP, semantic search (V3); optional task-graph planner (V4).
+Planned capabilities include: core agent loop with tools, sessions, context and permissions (V1); JSON output and operator tooling (V1.5); multi-provider, sandboxing, packaging (V2); memory, MCP, semantic search, declarative workflows (V3); optional task-graph planner (V4).
+
+## Build
+
+**Prerequisites:** [Rust](https://rustup.rs) (install via `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
+
+- `cargo build --release` — binary at `target/release/clido`
+- `cargo run --release -- "your prompt"` — run with a one-off prompt
+- `cargo run --release` — interactive (REPL when TTY)
+- `cargo test --workspace` — run tests
+
+See [Local development and testing](devdocs/guides/local-development-testing.md) for environment setup (API keys, config) and [Implementation bootstrap](devdocs/guides/implementation-bootstrap.md) for contributor workflow.
 
 ## Status
 
-**V1 implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes and ExitPlanMode, `clido doctor` and `clido init`, and hardening (retries, SIGINT, tests) are implemented. See [V1 gap analysis](devdocs/plans/releases/v1-gap-analysis.md) for current status and remaining gaps (e.g. interactive REPL, streaming UX). Build and test: `cargo build --workspace` and `cargo test --workspace`.
+**V1 implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes and ExitPlanMode, `clido doctor` and `clido init`, and hardening (retries, SIGINT, tests) are implemented. See [V1 gap analysis](devdocs/plans/releases/v1-gap-analysis.md) for current status and remaining gaps (e.g. interactive REPL, streaming UX). Build and test: see **Build** above.
 
 ## Documentation
 
