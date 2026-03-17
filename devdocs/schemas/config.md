@@ -1,6 +1,12 @@
-# config.toml specification
+# Config and pricing reference
 
-This document defines every valid key in the global and project-level Clido config, with types, defaults, env overrides, and validation rules.
+This document is the **field-by-field reference** for all Clido configuration files: `config.toml`, `.clido/config.toml`, and `pricing.toml`. Every key is documented with type, default, env override (if any), and validation.
+
+**Canonical env and flag names:** Config path is overridden by `CLIDO_CONFIG` (not `CLIDO_CONFIG_FILE`). Budget flag is `--max-budget-usd` (not `--max-budget`). Log level is `CLIDO_LOG` (not `RUST_LOG`). See [cli-interface-specification.md](../plans/cli-interface-specification.md) for the full list.
+
+---
+
+## 1. config.toml (and .clido/config.toml)
 
 **Config load order:** (1) Built-in defaults, (2) Global config file, (3) Project config file (`.clido/config.toml` in cwd or nearest ancestor), (4) CLI flags. Later steps override earlier for overlapping keys.
 
@@ -94,3 +100,25 @@ Same schema as above. Only the keys present are merged; absent keys inherit from
 - Invalid compaction_threshold: "Invalid value for context.compaction_threshold: expected number in (0, 1]."
 
 All config errors are reported at startup before any API or tool execution.
+
+---
+
+## 2. pricing.toml
+
+**File location:** User override: `{config_dir}/clido/pricing.toml` (e.g. `~/.config/clido/pricing.toml`). If absent, the shipped default (embedded or `clido-providers/data/pricing.toml`) is used.
+
+**Per-model table** (e.g. `[model.claude-sonnet-4-5]`):
+
+| Key | Type | Required | Default / notes |
+|-----|------|----------|-----------------|
+| `name` | string | yes | Display name (e.g. `claude-sonnet-4-5`). |
+| `provider` | string | yes | `anthropic`, `openai`, `openrouter`, `alibaba`, `local`. |
+| `input_per_mtok` | float | yes | USD per million input tokens. |
+| `output_per_mtok` | float | yes | USD per million output tokens. |
+| `cache_creation_per_mtok` | float | no | Default 1.25 × input_per_mtok. |
+| `cache_read_per_mtok` | float | no | Default 0.10 × input_per_mtok. |
+| `context_window` | integer | no | Model context size in tokens. |
+
+If a requested model is missing from the table, Clido logs a warning and uses a configurable default pricing entry. Staleness: if the file is older than 90 days, a startup warning is emitted; `clido doctor` reports it as a warning.
+
+Full schema, `update-pricing` source of truth, and examples: [pricing-and-offline.md](../guides/pricing-and-offline.md).

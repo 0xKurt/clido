@@ -784,17 +784,19 @@ Man page sections: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMEN
 
 ## 18. Validation Checklist (Spec Completeness)
 
+**Spec status:** This spec is the single source of truth for the CLI. The per-flag reference table below satisfies the requirement that every global flag has type, default, env var (if any), and conflict rules. The roadmap and release docs reference this spec; CONTRIBUTING.md and the development plan state that the CLI spec wins on conflicts. Remaining checklist items are validated as the spec is maintained; new commands, flags, or UX must be added here and to the testing strategy before implementation.
+
 Before considering the spec complete for a release:
 
-- [ ] Every command has exact syntax.
-- [ ] Every global flag has type, default, env var (if any), and conflict rules.
-- [ ] Every release has a complete CLI surface entry in the surface map.
-- [ ] Every interactive surface has both rich and ASCII behavior defined.
-- [ ] Every machine mode has exit code and JSON schema (where applicable).
-- [ ] Every empty state has defined copy.
-- [ ] Every error category has a message template and hint.
-- [ ] Roadmap and release docs reference this spec.
-- [ ] New UX behaviors have corresponding tests in the testing strategy.
+- [x] Every command has exact syntax (surface map §2; subcommand sections).
+- [x] Every global flag has type, default, env var (if any), and conflict rules (per-flag table below).
+- [x] Every release has a complete CLI surface entry in the surface map (§2).
+- [x] Every interactive surface has both rich and ASCII behavior defined (§5 terminal matrix, §5 output elements).
+- [x] Every machine mode has exit code and JSON schema (exit codes §6; json/stream-json §10; schemas in devdocs/schemas/output-and-session.md).
+- [ ] Every empty state has defined copy (to be filled as UX is implemented).
+- [x] Every error category has a message template and hint (§6).
+- [x] Roadmap and release docs reference this spec (releases/README.md, CONTRIBUTING.md, development-plan).
+- [x] New UX behaviors have corresponding tests in the testing strategy (testing-strategy-and-master-test-plan.md; contributor-test-matrix.md for operational commands).
 
 ### Per-flag reference (global flags, V1 surface)
 

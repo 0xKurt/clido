@@ -295,7 +295,7 @@ The tool result should come back as `is_error: true` with a denial message. The 
 
 **Running against your active working directory.** Always `cd` into a fixture or temporary directory before running the agent. The agent will read from and potentially write to the current working directory.
 
-**Forgetting to set a turn limit.** A buggy agent loop can run many turns and cost money if you are using a cloud provider. Set `--max-turns 5` or `--max-budget 0.05` during development.
+**Forgetting to set a turn limit.** A buggy agent loop can run many turns and cost money if you are using a cloud provider. Set `--max-turns 5` or `--max-budget-usd 0.05` during development.
 
 **Using a cloud provider for iteration.** Use a local model (Ollama) for the development loop. Switch to a cloud provider only to validate agent quality or provider-specific behavior.
 

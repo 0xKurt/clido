@@ -373,9 +373,9 @@ clido/
        .init();
    ```
 
-2. Add `RUST_LOG=clido=debug` guidance in README.
+2. Add `CLIDO_LOG=debug` guidance in README (canonical env: `CLIDO_LOG`, not `RUST_LOG`).
 3. Add `tracing::info!`, `tracing::debug!` stubs in `clido-agent` crate.
-4. Test: run `RUST_LOG=debug cargo run -p clido-cli` and confirm tracing output.
+4. Test: run `CLIDO_LOG=debug cargo run -p clido-cli` and confirm tracing output.
 
 ---
 
