@@ -8,6 +8,12 @@ use crate::{Tool, ToolOutput};
 /// Execute shell commands via sh -c.
 pub struct BashTool;
 
+impl Default for BashTool {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl BashTool {
     pub fn new() -> Self {
         Self

@@ -430,12 +430,10 @@ async fn run(cli: cli::Cli) -> Result<(), anyhow::Error> {
         Err(_) => "error".to_string(),
     };
 
-    if let Err(ref e) = result {
-        if let ClidoError::Interrupted = e {
-            let _ = writer.flush();
-            eprintln!("Interrupted.");
-            return Err(CliError::Interrupted("Interrupted by user.".into()).into());
-        }
+    if let Err(ClidoError::Interrupted) = &result {
+        let _ = writer.flush();
+        eprintln!("Interrupted.");
+        return Err(CliError::Interrupted("Interrupted by user.".into()).into());
     }
 
     writer.write_line(&SessionLine::Result {

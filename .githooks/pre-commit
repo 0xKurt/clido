@@ -1,10 +1,22 @@
 #!/bin/sh
-# Pre-commit hook: run checks that also run in CI.
+# Pre-commit hook: run the same checks as CI (fmt + clippy).
 # Enable for this repo: git config core.hooksPath .githooks
+# Uses only rustup's cargo (PATH) and one toolchain to avoid E0514.
 
 set -e
 
+# Prefer rustup's cargo so one toolchain is used (avoids E0514 with Homebrew rust).
+export PATH="${HOME}/.cargo/bin:${PATH}"
+if ! command -v rustup >/dev/null 2>&1; then
+    echo "Pre-commit: rustup not found. Install from https://rustup.rs and use it as your only Rust."
+    exit 1
+fi
+
 echo "Running cargo fmt --check..."
 cargo fmt --all -- --check
+
+echo "Running cargo clippy..."
+rm -rf target
+cargo clippy --workspace -- -D warnings
 
 echo "Pre-commit checks passed."

@@ -143,17 +143,14 @@ impl SessionReader {
             }
             let line: SessionLine = serde_json::from_str(line_str)
                 .map_err(|e| anyhow::anyhow!("line {}: {}", i + 1, e))?;
-            match &line {
-                SessionLine::Meta { schema_version, .. } => {
-                    if *schema_version > SCHEMA_VERSION {
-                        anyhow::bail!(
-                            "Session schema version {} is newer than supported {}",
-                            schema_version,
-                            SCHEMA_VERSION
-                        );
-                    }
+            if let SessionLine::Meta { schema_version, .. } = &line {
+                if *schema_version > SCHEMA_VERSION {
+                    anyhow::bail!(
+                        "Session schema version {} is newer than supported {}",
+                        schema_version,
+                        SCHEMA_VERSION
+                    );
                 }
-                _ => {}
             }
             lines.push(line);
         }
@@ -223,7 +220,10 @@ pub fn list_sessions(project_path: &Path) -> anyhow::Result<Vec<SessionSummary>>
         let path = entry.path();
         if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(lines) = SessionReader::load(project_path, stem) {
+                let load_result: Result<Vec<SessionLine>, anyhow::Error> =
+                    SessionReader::load(project_path, stem);
+                if let Ok(ref lines) = load_result {
+                    let lines: &[SessionLine] = lines;
                     if let Some(SessionLine::Meta {
                         session_id,
                         start_time,
@@ -231,7 +231,7 @@ pub fn list_sessions(project_path: &Path) -> anyhow::Result<Vec<SessionSummary>>
                         ..
                     }) = lines.first()
                     {
-                        let (num_turns, total_cost_usd, preview) = summarize_lines(&lines);
+                        let (num_turns, total_cost_usd, preview) = summarize_lines(lines);
                         summaries.push(SessionSummary {
                             session_id: session_id.clone(),
                             project_path: proj.clone(),
@@ -256,12 +256,13 @@ fn summarize_lines(lines: &[SessionLine]) -> (u32, f64, String) {
     for line in lines {
         match line {
             SessionLine::UserMessage { content, .. } => {
-                if let Some(first) = content.first().and_then(|c| c.get("text")) {
-                    if let Some(s) = first.as_str() {
-                        preview = s.chars().take(50).collect();
-                        if s.len() > 50 {
-                            preview.push('…');
-                        }
+                let first_text = content
+                    .first()
+                    .and_then(|c: &serde_json::Value| c.get("text"));
+                if let Some(s) = first_text.and_then(|v: &serde_json::Value| v.as_str()) {
+                    preview = s.chars().take(50).collect::<String>();
+                    if s.len() > 50 {
+                        preview.push('…');
                     }
                 }
             }

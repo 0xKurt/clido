@@ -32,13 +32,13 @@ cargo nextest run --workspace
 
 Use the [local development testing](devdocs/guides/local-development-testing.md) guide to run and test the agent without risking your own repositories.
 
-**Pre-commit hook (optional):** To run `cargo fmt --check` before each commit (so CI does not fail on formatting):
+**Pre-commit hook (recommended):** To run the same checks as CI before each commit (`cargo fmt --check` and `cargo clippy --workspace -- -D warnings`):
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook lives in `.githooks/pre-commit`. CI also runs clippy and tests; run `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` (or `cargo nextest run --workspace`) before pushing.
+The hook lives in `.githooks/pre-commit`. CI also runs tests; run `cargo test --workspace` (or `cargo nextest run --workspace`) before pushing.
 
 ## What V1 means operationally
 

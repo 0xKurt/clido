@@ -15,7 +15,7 @@ const COMPACTED_PLACEHOLDER: &str =
 /// Estimate token count for a string (chars/4 heuristic).
 #[inline]
 pub fn estimate_tokens_str(s: &str) -> u32 {
-    (s.chars().count() as u32 + 3) / 4
+    (s.chars().count() as u32).div_ceil(4)
 }
 
 /// Estimate token count for a single message.
