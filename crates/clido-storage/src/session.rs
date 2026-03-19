@@ -223,12 +223,13 @@ pub fn list_sessions(project_path: &Path) -> anyhow::Result<Vec<SessionSummary>>
                 let load_result: Result<Vec<SessionLine>, anyhow::Error> =
                     SessionReader::load(project_path, stem);
                 if let Ok(lines) = load_result {
+                    let first: Option<&SessionLine> = lines.first();
                     if let Some(SessionLine::Meta {
                         session_id,
                         start_time,
                         project_path: proj,
                         ..
-                    }) = lines.first()
+                    }) = first
                     {
                         let (num_turns, total_cost_usd, preview) = summarize_lines(&lines);
                         summaries.push(SessionSummary {
@@ -259,6 +260,7 @@ fn summarize_lines(lines: &[SessionLine]) -> (u32, f64, String) {
                     .first()
                     .and_then(|c: &serde_json::Value| c.get("text"));
                 if let Some(s) = first_text.and_then(|v: &serde_json::Value| v.as_str()) {
+                    let s: &str = s;
                     preview = s.chars().take(50).collect::<String>();
                     if s.len() > 50 {
                         preview.push('…');

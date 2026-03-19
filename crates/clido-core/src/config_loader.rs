@@ -156,7 +156,8 @@ pub fn global_config_path() -> Option<PathBuf> {
             std::env::current_dir().ok()?.join(path_str)
         });
     }
-    directories::ProjectDirs::from("", "", "clido").map(|d| d.config_dir().join("config.toml"))
+    directories::ProjectDirs::from("", "", "clido")
+        .map(|d: directories::ProjectDirs| d.config_dir().join("config.toml"))
 }
 
 /// True if any config file exists (global or project). Used to decide first-run vs normal run.

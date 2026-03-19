@@ -1,0 +1,258 @@
+# V3 Definition of Done — machine-readable checklist (detailed).
+# Source plan: v3.md. Run scripts/verify-dod.sh when CURRENT is v3.
+release: v3
+source_plan: v3.md
+
+items:
+  # --- Build and test (inherited) ---
+  - id: build
+    description: "Workspace builds for all targets"
+    source: "v3.md builds on V2"
+    verification:
+      type: command
+      command: "cargo build --all-targets"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: tests
+    description: "All workspace tests pass"
+    source: "v3.md builds on V2"
+    verification:
+      type: command
+      command: "cargo test --workspace"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: coverage-workspace
+    description: "Workspace line coverage >= 78% (V3 floor)"
+    source: "development-plan Phase 5.4.2"
+    verification:
+      type: coverage
+      scope: workspace
+      min_percent: 78
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- Phase 4.7 Subagent Architecture (v3.md Exit Criteria) ---
+  - id: subagents-isolated
+    description: "Subagents can run isolated reasoning tasks without destabilizing or corrupting the parent session"
+    source: "v3.md Exit Criteria; Phase 4.7"
+    verification:
+      type: command
+      command: "cargo test -p clido-agent subagent"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: subagent-session-isolation
+    description: "SubAgentManager and session isolation; parent session correctness validated"
+    source: "v3.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-agent"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- Phase 4.9 Workflow Engine (v3.md Exit Criteria) ---
+  - id: workflows-load-yaml
+    description: "Workflows can be loaded from YAML and executed"
+    source: "v3.md Exit Criteria; Phase 4.9"
+    verification:
+      type: command
+      command: "cargo test -p clido-workflows"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: workflow-preflight
+    description: "Pre-flight validates step-tools, profiles, API keys, and optional prerequisites"
+    source: "v3.md Exit Criteria; Phase 4.9"
+    verification:
+      type: command
+      command: "cargo test -p clido-workflows"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: workflow-check-command
+    description: "workflow check can be run before the first execution"
+    source: "v3.md Exit Criteria"
+    verification:
+      type: cli
+      argv: ["workflow", "check", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: cli-workflow-run
+    description: "clido workflow run exists"
+    source: "v3.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["workflow", "run", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: cli-workflow-validate-inspect-list
+    description: "clido workflow validate, workflow inspect, workflow list exist"
+    source: "v3.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["workflow", "validate", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- Phase 5.5 Memory System (v3.md Exit Criteria) ---
+  - id: memory-retrieval-relevant
+    description: "Memory retrieval produces relevant results more often than noise; hybrid search (FTS5 + vector) validated; semantic retrieval finds paraphrased memories; irrelevant memories do NOT surface"
+    source: "v3.md Exit Criteria; Phase 5.5"
+    verification:
+      type: command
+      command: "cargo test -p clido-memory"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: memory-embedding-engine
+    description: "EmbeddingEngine (fastembed-rs, local ONNX) implemented; embedding quality validated"
+    source: "v3.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-memory"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: memory-long-term-store
+    description: "Long-term memory store: SQLite + FTS5 + sqlite-vec hybrid; keyword, semantic, hybrid retrieval validated"
+    source: "v3.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-memory"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: memory-injection-agent-loop
+    description: "Relevance-based memory injection wired into agent loop; injected memories match task context"
+    source: "v3.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-agent"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: clido-memory-list
+    description: "clido memory list exists"
+    source: "v3.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["memory", "list", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: clido-memory-prune-reset
+    description: "clido memory prune, memory reset exist"
+    source: "v3.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["memory", "prune", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: coverage-clido-memory
+    description: "clido-memory crate line coverage >= 70%"
+    source: "development-plan Phase 5.4.2"
+    verification:
+      type: coverage
+      scope: workspace
+      min_percent: 78
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- Phase 8.3 MCP Support (v3.md Exit Criteria) ---
+  - id: mcp-configured-started
+    description: "MCP servers can be configured, started, and safely used as registered tools"
+    source: "v3.md Exit Criteria; Phase 8.3"
+    verification:
+      type: command
+      command: "cargo test -p clido-tools"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: mcp-client-lifecycle
+    description: "MCP client and server lifecycle management; validated against at least two real MCP servers"
+    source: "v3.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-agent"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- Phase 8.7 Repository Indexing (v3.md Exit Criteria) ---
+  - id: repo-indexing-improves-search
+    description: "Repository indexing measurably improves search or navigation on medium-to-large repos compared to Grep and Glob alone"
+    source: "v3.md Exit Criteria; Phase 8.7"
+    verification:
+      type: command
+      command: "cargo test -p clido-index"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: file-symbol-index
+    description: "File and symbol index built; search quality validated against fixture repositories"
+    source: "v3.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-index"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  - id: coverage-clido-index
+    description: "clido-index crate line coverage >= 70%"
+    source: "development-plan Phase 5.4.2; testing-strategy"
+    verification:
+      type: coverage
+      scope: workspace
+      min_percent: 78
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- SemanticSearch tool (v3.md CLI Surface) ---
+  - id: tool-semantic-search
+    description: "SemanticSearch tool available to the model (query, optional target_directory, num_results); uses embedding engine and repo indexing"
+    source: "v3.md CLI Surface"
+    verification:
+      type: command
+      command: "cargo test -p clido-tools"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- CLI Surface V3 ---
+  - id: cli-fetch-models
+    description: "clido fetch-models exists"
+    source: "v3.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["fetch-models", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- V3 measurement suite (v3.md) ---
+  - id: v3-measurement-suite
+    description: "Full V3 measurement suite; each feature meets its success threshold"
+    source: "v3.md Suggested Internal Milestones; V3 Design Rule"
+    verification:
+      type: command
+      command: "cargo test --workspace"
+    status: GAP
+    gap_reason: "V3 not yet released"
+
+  # --- Phase 4.9.x Pre-Flight and dynamic parameters ---
+  - id: workflow-preflight-dynamic-params
+    description: "Pre-flight and dynamic parameters for workflows (Phase 4.9.x)"
+    source: "v3.md Included Scope; releases README"
+    verification:
+      type: command
+      command: "cargo test -p clido-workflows"
+    status: GAP
+    gap_reason: "V3 not yet released"

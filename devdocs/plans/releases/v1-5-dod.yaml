@@ -1,0 +1,208 @@
+# V1.5 Definition of Done — machine-readable checklist (detailed).
+# Source plan: v1-5.md. Run scripts/verify-dod.sh to verify (set CURRENT to v1-5).
+release: v1-5
+source_plan: v1-5.md
+
+items:
+  # --- Build and test (inherited from V1) ---
+  - id: build
+    description: "Workspace builds for all targets"
+    source: "v1-5.md builds on V1"
+    verification:
+      type: command
+      command: "cargo build --all-targets"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: tests
+    description: "All workspace tests pass"
+    source: "v1-5.md builds on V1"
+    verification:
+      type: command
+      command: "cargo test --workspace"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: coverage-workspace
+    description: "Workspace line coverage >= 75% (V1.5 floor)"
+    source: "development-plan Phase 5.4.2; testing-strategy"
+    verification:
+      type: coverage
+      scope: workspace
+      min_percent: 75
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Phase 4.4 Cost Tracking (v1-5.md Exit Criteria) ---
+  - id: cost-tracking-session-footer
+    description: "Clido reports cumulative token cost at the end of every session"
+    source: "v1-5.md Exit Criteria; Phase 4.4"
+    verification:
+      type: command
+      command: "cargo test -p clido-core pricing"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: cost-tracking-displayed
+    description: "Cost displayed in session footer"
+    source: "v1-5.md UX outcomes"
+    verification:
+      type: cli
+      argv: ["--help"]
+      expect_exit: 0
+      expect_stdout_contains: "max-budget"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Phase 4.6 Parallel Tool Execution (v1-5.md Exit Criteria) ---
+  - id: concurrent-tool-execution
+    description: "Batches of read-only tool calls execute concurrently under a configurable semaphore cap"
+    source: "v1-5.md Exit Criteria; Phase 4.6"
+    verification:
+      type: command
+      command: "cargo test -p clido-agent"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: bounded-concurrency-config
+    description: "Bounded concurrency is configurable (config or flag)"
+    source: "v1-5.md Included Scope Phase 4.6"
+    verification:
+      type: cli
+      argv: ["--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Phase 6.2 Context Efficiency (v1-5.md Exit Criteria) ---
+  - id: context-dedup-repeated-reads
+    description: "Repeated reads of unchanged files do not add duplicate content to context"
+    source: "v1-5.md Exit Criteria; Phase 6.2"
+    verification:
+      type: command
+      command: "cargo test -p clido-context"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Phase 7.2 Secret Detection (v1-5.md Exit Criteria) ---
+  - id: secret-detection-warning
+    description: "Secret-like patterns in Write or Edit content produce a clear warning before the write proceeds"
+    source: "v1-5.md Exit Criteria; Phase 7.2"
+    verification:
+      type: command
+      command: "cargo test -p clido-tools"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Phase 8.2 JSON and Stream-JSON (v1-5.md Exit Criteria) ---
+  - id: output-format-json
+    description: "--output-format json produces a stable, well-defined JSON result on completion"
+    source: "v1-5.md Exit Criteria; Phase 8.2"
+    verification:
+      type: cli
+      argv: ["--help"]
+      expect_exit: 0
+      expect_stdout_contains: "output-format"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: output-format-json-schema
+    description: "JSON output has stable schema and exit_status"
+    source: "v1-5.md UX outcomes"
+    verification:
+      type: command
+      command: "cargo test -p clido-cli"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: output-format-stream-json
+    description: "--output-format stream-json produces valid newline-delimited JSON for every event"
+    source: "v1-5.md Exit Criteria; Phase 8.2"
+    verification:
+      type: command
+      command: "cargo test -p clido-cli"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Phase 8.4 Expanded doctor (v1-5.md Exit Criteria) ---
+  - id: doctor-expanded
+    description: "clido doctor expands past V1 basic checks and detects the most common local setup problems clearly"
+    source: "v1-5.md Exit Criteria; Phase 8.4"
+    verification:
+      type: cli
+      argv: ["doctor"]
+      expect_exit: [0, 1, 2]
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: doctor-exit-codes
+    description: "Doctor exit codes 0 (all pass), 1 (mandatory fail), 2 (warnings only)"
+    source: "v1-5.md UX outcomes"
+    verification:
+      type: command
+      command: "cargo test -p clido-cli doctor"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- CLI Surface V1.5 (v1-5.md CLI Surface) ---
+  - id: cli-quiet
+    description: "clido --quiet / -q suppresses spinner, tool lifecycle, cost footer"
+    source: "v1-5.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["--help"]
+      expect_exit: 0
+      expect_stdout_contains: "--quiet"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: cli-mcp-config
+    description: "clido --mcp-config <file> is accepted (path to MCP config)"
+    source: "v1-5.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["--help"]
+      expect_exit: 0
+      expect_stdout_contains: "mcp-config"
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: cli-sessions-fork
+    description: "clido sessions fork <id> exists"
+    source: "v1-5.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["sessions", "fork", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: cli-list-models
+    description: "clido list-models exists; list-models --provider <name> and --json"
+    source: "v1-5.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["list-models", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  - id: cli-update-pricing
+    description: "clido update-pricing exists"
+    source: "v1-5.md CLI Surface"
+    verification:
+      type: cli
+      argv: ["update-pricing", "--help"]
+      expect_exit: 0
+    status: GAP
+    gap_reason: "V1.5 not yet released"
+
+  # --- Integration tests V1.5 ---
+  - id: integration-tests-v15
+    description: "Integration tests cover JSON output and cost footer"
+    source: "v1-5.md Suggested Internal Milestones"
+    verification:
+      type: command
+      command: "cargo test -p clido-cli --test integration"
+    status: GAP
+    gap_reason: "V1.5 not yet released"

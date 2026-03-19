@@ -1781,7 +1781,7 @@ Coverage is measured with `cargo-tarpaulin --all-features`. CI fails if overall 
 | `clido-providers` (all providers) | **75 %** | 80 % | 85 % | 85 % |
 | `clido-context` (context engine, compaction) | **70 %** | 75 % | 80 % | 80 % |
 | `clido-tools` (all built-in tools) | **80 %** | 85 % | 85 % | 85 % |
-| `clido-session` (JSONL persistence) | **75 %** | 80 % | 80 % | 80 % |
+| `clido-storage` (JSONL persistence) | **75 %** | 80 % | 80 % | 80 % |
 | `clido-memory` *(V3+)* | — | — | **70 %** | 80 % |
 | Workspace overall | **70 %** | 75 %  | 78 % | 82 % |
 

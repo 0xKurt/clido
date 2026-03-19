@@ -37,7 +37,8 @@ pub struct PricingTable {
 const STALENESS_DAYS: u64 = 90;
 
 fn pricing_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "clido").map(|d| d.config_dir().join("pricing.toml"))
+    directories::ProjectDirs::from("", "", "clido")
+        .map(|d: directories::ProjectDirs| d.config_dir().join("pricing.toml"))
 }
 
 /// Load pricing from config dir. If file is older than 90 days, log a warning.

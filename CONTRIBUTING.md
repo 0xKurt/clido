@@ -32,6 +32,8 @@ cargo nextest run --workspace
 
 Use the [local development testing](devdocs/guides/local-development-testing.md) guide to run and test the agent without risking your own repositories.
 
+**Toolchain consistency:** Use a single Rust toolchain for build, test, and clippy. If you see `E0514: found crate X compiled by an incompatible version of rustc`, run `cargo clean` and then use rustup’s cargo (e.g. `rustup run stable cargo build` / `cargo test` / `cargo clippy`). The pre-commit hook sets `PATH` to prefer `~/.cargo/bin` so one toolchain is used.
+
 **Pre-commit hook (recommended):** To run the same checks as CI before each commit (`cargo fmt --check` and `cargo clippy --workspace -- -D warnings`):
 
 ```bash
@@ -51,6 +53,8 @@ V1 is the **first shippable release** (version 0.1.0). Operationally it means:
 - **No sandboxing, no audit log, no telemetry, no packaging:** Those are V2 or later.
 
 The exact V1 boundary is defined in [releases/v1.md](devdocs/plans/releases/v1.md) and the roadmap table in [releases/README.md](devdocs/plans/releases/README.md). When in doubt, the CLI spec and release docs override the development plan for *what* ships in which release; the development plan is the authority for *how* to implement it.
+
+**Definition of Done (DoD):** Each release has a machine-readable checklist in `devdocs/plans/releases/<release>-dod.yaml`. Run `scripts/verify-dod.sh` from the repo root to verify the active release (see `devdocs/plans/releases/CURRENT`). The script requires [yq](https://github.com/mikefarah/yq) (e.g. `brew install yq`). Regenerate human-readable `*-dod.md` with `scripts/generate-dod-md.sh [release]`.
 
 ## What is intentionally not implemented in V1
 
