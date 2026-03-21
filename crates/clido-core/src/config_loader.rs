@@ -297,6 +297,7 @@ pub fn load_config(cwd: &Path) -> Result<LoadedConfig> {
 }
 
 /// Build AgentConfig from LoadedConfig, profile name, and CLI overrides.
+#[allow(clippy::too_many_arguments)]
 pub fn agent_config_from_loaded(
     loaded: &LoadedConfig,
     profile_name: &str,
@@ -305,10 +306,15 @@ pub fn agent_config_from_loaded(
     cli_model: Option<String>,
     cli_system_prompt: Option<String>,
     cli_permission_mode: Option<PermissionMode>,
+    cli_quiet: bool,
+    cli_max_parallel_tools: Option<u32>,
 ) -> Result<AgentConfig> {
     let profile = loaded.get_profile(profile_name)?;
     LoadedConfig::validate_provider(&profile.provider)?;
     let model = cli_model.clone().unwrap_or_else(|| profile.model.clone());
+    let max_parallel_tools = cli_max_parallel_tools
+        .or(loaded.agent.max_concurrent_tools)
+        .unwrap_or(4);
     Ok(AgentConfig {
         max_turns: cli_max_turns.unwrap_or(loaded.agent.max_turns),
         max_budget_usd: cli_max_budget_usd.or(loaded.agent.max_budget_usd),
@@ -319,6 +325,8 @@ pub fn agent_config_from_loaded(
         use_index: false,
         max_context_tokens: loaded.context.max_context_tokens,
         compaction_threshold: Some(loaded.context.compaction_threshold),
+        quiet: cli_quiet,
+        max_parallel_tools,
     })
 }
 

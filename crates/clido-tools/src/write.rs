@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::path_guard::PathGuard;
+use crate::secrets::scan_for_secrets;
 use crate::{Tool, ToolOutput};
 
 pub struct WriteTool {
@@ -60,6 +61,15 @@ impl Tool for WriteTool {
             return ToolOutput::err("Missing required field: file_path or path".to_string());
         }
 
+        // Secret detection: warn but do not block
+        let findings = scan_for_secrets(content);
+        for finding in &findings {
+            eprintln!(
+                "Warning: potential secret detected in write content: {}",
+                finding
+            );
+        }
+
         let path = match self.guard.resolve_for_write(path_str) {
             Ok(p) => p,
             Err(e) => return ToolOutput::err(e),
@@ -90,5 +100,74 @@ impl Tool for WriteTool {
             }
             Err(e) => ToolOutput::err(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "file_path": "new.txt", "content": "hello" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "old").unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "file_path": "f.txt", "content": "new" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn write_missing_path_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        let out = tool.execute(serde_json::json!({ "content": "data" })).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("Missing"));
+    }
+
+    #[tokio::test]
+    async fn write_path_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "path": "alias.txt", "content": "via alias" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("alias.txt")).unwrap(),
+            "via alias"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "file_path": "sub/dir/file.txt", "content": "deep" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sub/dir/file.txt")).unwrap(),
+            "deep"
+        );
     }
 }

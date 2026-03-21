@@ -116,4 +116,37 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("Exit code 1"));
     }
+
+    #[tokio::test]
+    async fn missing_command_returns_error() {
+        let tool = BashTool::new();
+        let out = tool.execute(serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("Missing"));
+    }
+
+    #[tokio::test]
+    async fn blocked_path_in_command_denied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("secrets.txt");
+        std::fs::write(&blocked, "secret").unwrap();
+        let tool = BashTool::new_with_blocked(vec![blocked.clone()]);
+        let out = tool
+            .execute(serde_json::json!({
+                "command": format!("cat {}", blocked.display())
+            }))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("protected"));
+    }
+
+    #[tokio::test]
+    async fn stderr_on_error_included() {
+        let tool = BashTool::new();
+        let out = tool
+            .execute(serde_json::json!({ "command": "echo errout >&2; exit 2" }))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("errout") || out.content.contains("Exit code 2"));
+    }
 }

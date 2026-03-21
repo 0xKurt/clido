@@ -8,6 +8,7 @@ mod grep_tool;
 mod path_guard;
 mod read;
 mod registry;
+pub mod secrets;
 mod write;
 
 use std::path::PathBuf;

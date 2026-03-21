@@ -230,6 +230,125 @@ fn init_stores_api_key_directly_in_config() {
     let _ = std::fs::remove_dir(&tmp);
 }
 
+// ─── V1.5 integration tests ───────────────────────────────────────────────────
+
+#[test]
+fn cli_quiet_flag_in_help() {
+    let out = clido_bin().arg("--help").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--quiet") || stdout.contains("-q"),
+        "expected --quiet / -q in help; stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_output_format_json_in_help() {
+    let out = clido_bin().arg("--help").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("output-format"),
+        "expected --output-format in help; stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_list_models_exits_zero() {
+    let out = clido_bin().arg("list-models").output().unwrap();
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.is_empty(),
+        "expected non-empty model list; stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_list_models_json_is_valid_json() {
+    let out = clido_bin()
+        .args(["list-models", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("list-models --json output is not valid JSON");
+    assert!(
+        parsed.is_array() || parsed.is_object(),
+        "expected JSON array or object; got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_list_models_provider_filter() {
+    let out = clido_bin()
+        .args(["list-models", "--provider", "anthropic"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.to_lowercase().contains("claude") || stdout.to_lowercase().contains("anthropic"),
+        "expected anthropic models in output; stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cli_update_pricing_exits_zero() {
+    let out = clido_bin().arg("update-pricing").output().unwrap();
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_sessions_fork_help_exits_zero() {
+    let out = clido_bin()
+        .args(["sessions", "fork", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "expected exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_mcp_config_flag_in_help() {
+    let out = clido_bin().arg("--help").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("mcp-config"),
+        "expected --mcp-config in help; stdout: {}",
+        stdout
+    );
+}
+
+// ─── UX requirements ──────────────────────────────────────────────────────────
+
 /// UX requirements: init prompts must state what to type and press Enter (ux-requirements §2.3).
 #[test]
 fn init_prompts_contain_ux_copy() {

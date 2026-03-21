@@ -80,3 +80,89 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Tool, ToolOutput};
+    use async_trait::async_trait;
+
+    struct FakeTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "fake"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
+        async fn execute(&self, _input: serde_json::Value) -> ToolOutput {
+            ToolOutput::ok("ok".to_string())
+        }
+    }
+
+    #[test]
+    fn register_and_get() {
+        let mut reg = ToolRegistry::new();
+        reg.register(FakeTool { name: "Foo" });
+        assert!(reg.get("Foo").is_some());
+        assert!(reg.get("Bar").is_none());
+    }
+
+    #[test]
+    fn schemas_returns_all() {
+        let mut reg = ToolRegistry::new();
+        reg.register(FakeTool { name: "A" });
+        reg.register(FakeTool { name: "B" });
+        let schemas = reg.schemas();
+        assert_eq!(schemas.len(), 2);
+    }
+
+    #[test]
+    fn with_filters_allowed() {
+        let mut reg = ToolRegistry::new();
+        reg.register(FakeTool { name: "Read" });
+        reg.register(FakeTool { name: "Write" });
+        let filtered = reg.with_filters(Some(vec!["Read".to_string()]), None);
+        assert!(filtered.get("Read").is_some());
+        assert!(filtered.get("Write").is_none());
+    }
+
+    #[test]
+    fn with_filters_disallowed_overrides_allowed() {
+        let mut reg = ToolRegistry::new();
+        reg.register(FakeTool { name: "Read" });
+        reg.register(FakeTool { name: "Write" });
+        let filtered = reg.with_filters(
+            Some(vec!["Read".to_string(), "Write".to_string()]),
+            Some(vec!["Write".to_string()]),
+        );
+        assert!(filtered.get("Read").is_some());
+        assert!(filtered.get("Write").is_none());
+    }
+
+    #[test]
+    fn with_filters_no_allowed_keeps_all_minus_disallowed() {
+        let mut reg = ToolRegistry::new();
+        reg.register(FakeTool { name: "Read" });
+        reg.register(FakeTool { name: "Bash" });
+        let filtered = reg.with_filters(None, Some(vec!["Bash".to_string()]));
+        assert!(filtered.get("Read").is_some());
+        assert!(filtered.get("Bash").is_none());
+    }
+
+    #[test]
+    fn default_is_empty() {
+        let reg = ToolRegistry::default();
+        assert!(reg.schemas().is_empty());
+    }
+}

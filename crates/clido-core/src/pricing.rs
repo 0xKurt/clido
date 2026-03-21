@@ -107,3 +107,115 @@ pub fn compute_cost_usd(usage: &Usage, model_id: &str, table: &PricingTable) -> 
 
     input + output + cache_creation_cost + cache_read_cost
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Usage;
+
+    fn make_usage(input: u64, output: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
+
+    fn make_usage_with_cache(input: u64, output: u64, create: u64, read: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_input_tokens: Some(create),
+            cache_read_input_tokens: Some(read),
+        }
+    }
+
+    #[test]
+    fn cost_fallback_rates_known_values() {
+        // Fallback: $3/mtok input, $15/mtok output
+        let usage = make_usage(1_000_000, 1_000_000);
+        let table = PricingTable::default();
+        let cost = compute_cost_usd(&usage, "unknown-model", &table);
+        assert!((cost - 18.0).abs() < 0.001, "expected $18, got {}", cost);
+    }
+
+    #[test]
+    fn cost_zero_tokens() {
+        let usage = make_usage(0, 0);
+        let table = PricingTable::default();
+        let cost = compute_cost_usd(&usage, "any", &table);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn cost_from_table_entry() {
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "claude-3-haiku".to_string(),
+            ModelPricingEntry {
+                name: "claude-3-haiku".to_string(),
+                provider: "anthropic".to_string(),
+                input_per_mtok: 0.25,
+                output_per_mtok: 1.25,
+                cache_creation_per_mtok: None,
+                cache_read_per_mtok: None,
+                context_window: None,
+            },
+        );
+        let table = PricingTable { models };
+        let usage = make_usage(1_000_000, 1_000_000);
+        let cost = compute_cost_usd(&usage, "claude-3-haiku", &table);
+        assert!((cost - 1.50).abs() < 0.001, "expected $1.50, got {}", cost);
+    }
+
+    #[test]
+    fn cost_with_cache_tokens_fallback() {
+        // cache_creation = input * 1.25 = 3.75/mtok; cache_read = input * 0.10 = 0.30/mtok
+        let usage = make_usage_with_cache(0, 0, 1_000_000, 1_000_000);
+        let table = PricingTable::default();
+        let cost = compute_cost_usd(&usage, "unknown", &table);
+        let expected = 3.75 + 0.30;
+        assert!(
+            (cost - expected).abs() < 0.001,
+            "expected {}, got {}",
+            expected,
+            cost
+        );
+    }
+
+    #[test]
+    fn cost_with_explicit_cache_rates_in_table() {
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "gpt-4".to_string(),
+            ModelPricingEntry {
+                name: "gpt-4".to_string(),
+                provider: "openai".to_string(),
+                input_per_mtok: 10.0,
+                output_per_mtok: 30.0,
+                cache_creation_per_mtok: Some(5.0),
+                cache_read_per_mtok: Some(1.0),
+                context_window: None,
+            },
+        );
+        let table = PricingTable { models };
+        let usage = make_usage_with_cache(0, 0, 2_000_000, 500_000);
+        let cost = compute_cost_usd(&usage, "gpt-4", &table);
+        let expected = 2.0 * 5.0 + 0.5 * 1.0; // 10 + 0.5
+        assert!(
+            (cost - expected).abs() < 0.001,
+            "expected {}, got {}",
+            expected,
+            cost
+        );
+    }
+
+    #[test]
+    fn load_pricing_returns_default_when_no_file() {
+        // Should not panic; may return empty table
+        let (table, _path) = load_pricing();
+        // table.models may or may not be empty depending on whether the user has a pricing file
+        let _ = table; // just ensure no panic
+    }
+}

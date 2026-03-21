@@ -77,6 +77,8 @@ impl WorkflowStepRunner for CliWorkflowRunner {
             Some(model),
             Some(system_prompt),
             Some(PermissionMode::Default),
+            false,
+            None,
         )
         .map_err(|e| ClidoError::Workflow(e.to_string()))?;
         if config.max_context_tokens.is_none() {

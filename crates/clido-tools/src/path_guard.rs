@@ -161,4 +161,69 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("protected"));
     }
+
+    #[test]
+    fn resolve_for_write_existing_file() {
+        let tmp = std::env::temp_dir().join("clido_pfwrite_1");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("out.txt");
+        std::fs::write(&f, "content").unwrap();
+        let guard = PathGuard::new(tmp.clone());
+        let res = guard.resolve_for_write("out.txt");
+        assert!(res.is_ok(), "err: {:?}", res);
+    }
+
+    #[test]
+    fn resolve_for_write_new_file_in_root() {
+        let tmp = std::env::temp_dir().join("clido_pfwrite_2");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let guard = PathGuard::new(tmp.clone());
+        let res = guard.resolve_for_write("new_file.txt");
+        assert!(res.is_ok(), "err: {:?}", res);
+    }
+
+    #[test]
+    fn resolve_for_write_blocked_existing_file() {
+        let tmp = std::env::temp_dir().join("clido_pfwrite_blocked");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let secret = tmp.join("secret.toml");
+        std::fs::write(&secret, "secret").unwrap();
+        let guard = PathGuard::new(tmp.clone()).with_blocked(vec![secret.clone()]);
+        let res = guard.resolve_for_write("secret.toml");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("protected"));
+    }
+
+    #[test]
+    fn resolve_for_write_outside_root_denied() {
+        let tmp = std::env::temp_dir().join("clido_pfwrite_outside");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let guard = PathGuard::new(tmp.clone());
+        // Use an absolute path that definitely exists and is outside any tempdir.
+        let res = guard.resolve_for_write("/etc/hosts");
+        assert!(
+            res.is_err(),
+            "expected Err for /etc/hosts outside root, got Ok"
+        );
+        assert!(res.unwrap_err().contains("Access denied"));
+    }
+
+    #[test]
+    fn workspace_root_accessor() {
+        let tmp = std::env::temp_dir();
+        let guard = PathGuard::new(tmp.clone());
+        assert_eq!(guard.workspace_root(), tmp.as_path());
+    }
+
+    #[test]
+    fn normalize_dotdot() {
+        let p = super::normalize_path(std::path::Path::new("/a/b/../c"));
+        assert_eq!(p, std::path::PathBuf::from("/a/c"));
+    }
+
+    #[test]
+    fn normalize_curdot() {
+        let p = super::normalize_path(std::path::Path::new("/a/./b/./c"));
+        assert_eq!(p, std::path::PathBuf::from("/a/b/c"));
+    }
 }

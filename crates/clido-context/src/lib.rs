@@ -49,6 +49,85 @@ pub fn estimate_tokens_messages(messages: &[Message]) -> u32 {
     messages.iter().map(estimate_tokens_message).sum()
 }
 
+/// Deduplicate repeated file reads in context.
+///
+/// Scans ToolResult blocks for file-path reads (content that looks like a Read tool result
+/// with the same path and content). If the same path appears multiple times with identical
+/// content, only the most recent occurrence is kept.
+pub fn dedup_file_reads(messages: &[Message]) -> Vec<Message> {
+    use std::collections::HashMap;
+
+    // First pass: for each tool_use_id in ToolResult blocks, check if it's a read result
+    // We track (tool_use_id → content) for ToolResult blocks, then find duplicates.
+    // Strategy: collect all (index, tool_use_id, content) for ToolResult blocks in User messages.
+    // If content is identical to a later occurrence, remove the earlier one.
+
+    // Collect ToolResult positions: (msg_index, block_index, tool_use_id, content)
+    let mut result_positions: Vec<(usize, usize, String, String)> = Vec::new();
+    for (mi, msg) in messages.iter().enumerate() {
+        for (bi, block) in msg.content.iter().enumerate() {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            {
+                result_positions.push((mi, bi, tool_use_id.clone(), content.clone()));
+            }
+        }
+    }
+
+    // Find duplicate content: same content appearing in multiple ToolResult blocks.
+    // Keep only the last occurrence of each content value.
+    // Use a map from content → last position index.
+    let mut content_last_seen: HashMap<String, usize> = HashMap::new();
+    for (pos_idx, (_, _, _, content)) in result_positions.iter().enumerate() {
+        content_last_seen.insert(content.clone(), pos_idx);
+    }
+
+    // Build set of (msg_index, block_index) to remove (earlier duplicates)
+    let mut to_remove: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut content_seen_at: HashMap<String, usize> = HashMap::new();
+    for (pos_idx, (mi, bi, _, content)) in result_positions.iter().enumerate() {
+        let last = content_last_seen[content];
+        if last != pos_idx {
+            // This is not the last occurrence — remove it
+            to_remove.insert((*mi, *bi));
+        } else if content_seen_at.contains_key(content) {
+            // This is the last occurrence but we've seen it before — remove earlier ones
+            // (already handled above)
+            let _ = content_seen_at.insert(content.clone(), pos_idx);
+        } else {
+            content_seen_at.insert(content.clone(), pos_idx);
+        }
+    }
+
+    if to_remove.is_empty() {
+        return messages.to_vec();
+    }
+
+    // Rebuild messages without removed blocks; drop empty user messages
+    let mut out = Vec::new();
+    for (mi, msg) in messages.iter().enumerate() {
+        let new_content: Vec<ContentBlock> = msg
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(bi, _)| !to_remove.contains(&(mi, *bi)))
+            .map(|(_, b)| b.clone())
+            .collect();
+        if new_content.is_empty() && msg.role == clido_core::Role::User {
+            // Drop empty user messages (they only contained deduplicated ToolResult blocks)
+            continue;
+        }
+        out.push(Message {
+            role: msg.role,
+            content: new_content,
+        });
+    }
+    out
+}
+
 /// Assemble context: return messages that fit within the token budget.
 /// If over threshold * max_context_tokens, compact by keeping the last N messages
 /// and prepending a system message that earlier messages were omitted.
@@ -59,6 +138,17 @@ pub fn assemble(
     max_context_tokens: u32,
     compaction_threshold: f64,
 ) -> Result<Vec<Message>> {
+    // Deduplicate repeated file reads before computing token budget
+    let messages_cow: std::borrow::Cow<[Message]> = {
+        let deduped = dedup_file_reads(messages);
+        if deduped.len() != messages.len() {
+            std::borrow::Cow::Owned(deduped)
+        } else {
+            std::borrow::Cow::Borrowed(messages)
+        }
+    };
+    let messages = messages_cow.as_ref();
+
     let threshold_limit = ((max_context_tokens as f64) * compaction_threshold) as u32;
     let placeholder_tokens = estimate_tokens_str(COMPACTED_PLACEHOLDER) + 4;
     let total = system_prompt_tokens + estimate_tokens_messages(messages);
@@ -120,6 +210,73 @@ mod tests {
     fn estimate_tokens_str_basic() {
         assert!(estimate_tokens_str("hello") >= 1);
         assert!(estimate_tokens_str("") == 0);
+    }
+
+    #[test]
+    fn dedup_file_reads_removes_older_duplicates() {
+        // Two user messages with ToolResult blocks having identical content
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "id1".to_string(),
+                    content: "file content here".to_string(),
+                    is_error: false,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "id2".to_string(),
+                    content: "file content here".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let deduped = dedup_file_reads(&messages);
+        // The first ToolResult (id1) should be removed; the last (id2) kept
+        let tool_result_count: usize = deduped
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    .count()
+            })
+            .sum();
+        assert_eq!(tool_result_count, 1, "Should only keep the last duplicate");
+        // The assistant message should still be present
+        assert!(deduped.iter().any(|m| m.role == Role::Assistant));
+    }
+
+    #[test]
+    fn dedup_file_reads_keeps_unique_content() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "id1".to_string(),
+                    content: "content A".to_string(),
+                    is_error: false,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "id2".to_string(),
+                    content: "content B".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let deduped = dedup_file_reads(&messages);
+        assert_eq!(deduped.len(), 2, "Unique content should not be removed");
     }
 
     #[test]

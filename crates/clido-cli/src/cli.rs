@@ -85,6 +85,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Suppress spinner, tool lifecycle output, and cost footer.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// MCP config file path (Model Context Protocol).
+    #[arg(long)]
+    pub mcp_config: Option<std::path::PathBuf>,
+
+    /// Max parallel tool calls for read-only tools.
+    #[arg(long, env = "CLIDO_MAX_PARALLEL_TOOLS")]
+    pub max_parallel_tools: Option<u32>,
+
     /// Ignore stale-file check when resuming.
     #[arg(long)]
     pub resume_ignore_stale: bool,
@@ -122,6 +134,19 @@ pub enum Subcommand {
         #[command(subcommand)]
         cmd: WorkflowCmd,
     },
+
+    /// List available models (per provider or all).
+    ListModels {
+        /// Provider filter (anthropic, openrouter, local).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Update pricing data (bundled; shows current file path and age).
+    UpdatePricing,
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -164,7 +189,13 @@ pub enum WorkflowCmd {
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum SessionsCmd {
     List,
-    Show { id: String },
+    Show {
+        id: String,
+    },
+    /// Fork a session: copy it to a new session ID.
+    Fork {
+        id: String,
+    },
 }
 
 impl Cli {
@@ -184,6 +215,8 @@ impl Cli {
             Some(Subcommand::Doctor) => false,
             Some(Subcommand::Config { .. }) => false,
             Some(Subcommand::Workflow { .. }) => false,
+            Some(Subcommand::ListModels { .. }) => false,
+            Some(Subcommand::UpdatePricing) => false,
         }
     }
 }

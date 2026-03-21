@@ -952,15 +952,25 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
     // Install a panic hook so the terminal is always restored even on crash.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Best-effort: spawn stty sane so the shell the user returns to is in cooked mode.
-        let _ = std::process::Command::new("stty")
-            .arg("sane")
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
+        // Belt-and-suspenders: restore termios directly in case crossterm's
+        // disable_raw_mode() couldn't recover the pre-raw settings.
+        #[cfg(unix)]
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) == 0 && t.c_lflag & libc::ICANON == 0 {
+                t.c_iflag |= (libc::ICRNL | libc::IXON) as libc::tcflag_t;
+                t.c_oflag |= (libc::OPOST | libc::ONLCR) as libc::tcflag_t;
+                t.c_lflag |= (libc::ICANON
+                    | libc::ECHO
+                    | libc::ECHOE
+                    | libc::ECHOK
+                    | libc::ISIG
+                    | libc::IEXTEN) as libc::tcflag_t;
+                libc::tcsetattr(0, libc::TCSAFLUSH, &t);
+            }
+        }
         original_hook(info);
     }));
 

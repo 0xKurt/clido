@@ -5,6 +5,8 @@ mod cli;
 mod config;
 mod doctor;
 mod errors;
+mod models;
+mod pricing_cmd;
 mod provider;
 mod repl;
 mod run;
@@ -26,20 +28,39 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Restore terminal to cooked mode before printing anything.
 ///
-/// `crossterm::terminal::is_raw_mode_enabled()` only tracks the current process — it returns
-/// false even when a previous crashed process left the terminal in raw mode. So we can't rely
-/// on it for detection. Instead we always run `stty sane` when stdin is a TTY: it is
-/// idempotent (no-op when already in cooked mode) and takes ~1 ms.
+/// crossterm's `is_raw_mode_enabled()` only tracks the *current process* — it returns false
+/// even when a previous crashed process left the terminal in raw mode. We use libc directly
+/// to inspect and fix the real termios state on the stdin fd.
+///
+/// If ICANON is disabled (raw mode), we re-enable it plus ECHO, OPOST/ONLCR (LF→CRLF
+/// translation) and ISIG so that normal CLI output is formatted correctly.
 fn restore_terminal_if_needed() {
-    if !std::io::stdin().is_terminal() {
-        return;
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        use std::os::unix::io::AsRawFd;
+        if !std::io::stdin().is_terminal() {
+            return;
+        }
+        let fd = std::io::stdin().as_raw_fd();
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut t) != 0 {
+                return;
+            }
+            // ICANON not set → raw mode active from a previous process.
+            if t.c_lflag & libc::ICANON != 0 {
+                return;
+            }
+            // Restore the flags that raw mode strips away.
+            t.c_iflag |= (libc::ICRNL | libc::IXON) as libc::tcflag_t;
+            t.c_oflag |= (libc::OPOST | libc::ONLCR) as libc::tcflag_t;
+            t.c_lflag |=
+                (libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ISIG | libc::IEXTEN)
+                    as libc::tcflag_t;
+            libc::tcsetattr(fd, libc::TCSAFLUSH, &t);
+        }
     }
-    let _ = std::process::Command::new("stty")
-        .arg("sane")
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
 }
 
 #[tokio::main]
@@ -100,11 +121,20 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
         Some(cli::Subcommand::Sessions { cmd }) => match cmd {
             cli::SessionsCmd::List => return sessions::run_sessions_list().await,
             cli::SessionsCmd::Show { id } => return sessions::run_sessions_show(id).await,
+            cli::SessionsCmd::Fork { id } => return sessions::run_sessions_fork(id).await,
         },
         Some(cli::Subcommand::Init) => return setup::run_init().await,
         Some(cli::Subcommand::Doctor) => return doctor::run_doctor().await,
         Some(cli::Subcommand::Config { cmd }) => return config::run_config(cmd).await,
         Some(cli::Subcommand::Workflow { cmd }) => return workflow::run_workflow(cmd).await,
+        Some(cli::Subcommand::ListModels { provider, json }) => {
+            models::run_list_models(provider.as_deref(), *json);
+            return Ok(());
+        }
+        Some(cli::Subcommand::UpdatePricing) => {
+            pricing_cmd::run_update_pricing();
+            return Ok(());
+        }
         None => {}
     }
 

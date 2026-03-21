@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::path_guard::PathGuard;
+use crate::secrets::scan_for_secrets;
 use crate::{Tool, ToolOutput};
 
 pub struct EditTool {
@@ -86,6 +87,15 @@ impl Tool for EditTool {
             Err(e) => return ToolOutput::err(e.to_string()),
         };
 
+        // Secret detection: warn on new_string content, but do not block
+        let findings = scan_for_secrets(new_string);
+        for finding in &findings {
+            eprintln!(
+                "Warning: potential secret detected in edit content: {}",
+                finding
+            );
+        }
+
         let new_content = if replace_all {
             content.replace(old_string, new_string)
         } else {
@@ -119,5 +129,100 @@ impl Tool for EditTool {
             hash,
             mtime_nanos,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn edit_basic_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "world",
+                "new_string": "rust"
+            }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello rust");
+    }
+
+    #[tokio::test]
+    async fn edit_replace_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a a a").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "a",
+                "new_string": "b",
+                "replace_all": true
+            }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "b b b");
+    }
+
+    #[tokio::test]
+    async fn edit_string_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "f.txt",
+                "old_string": "not_there",
+                "new_string": "x"
+            }))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn edit_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "old_string": "x", "new_string": "y" }))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("Missing"));
+    }
+
+    #[tokio::test]
+    async fn edit_missing_old_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "file_path": "f.txt", "new_string": "y" }))
+            .await;
+        assert!(out.is_error);
+    }
+
+    #[tokio::test]
+    async fn edit_path_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.txt");
+        std::fs::write(&path, "foo bar").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "path": "g.txt",
+                "old_string": "foo",
+                "new_string": "baz"
+            }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "baz bar");
     }
 }

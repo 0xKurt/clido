@@ -1,6 +1,6 @@
 //! Session list and show commands.
 
-use clido_storage::{list_sessions, SessionReader};
+use clido_storage::{list_sessions, SessionReader, SessionWriter};
 use std::env;
 use std::io::{self, IsTerminal};
 
@@ -36,5 +36,17 @@ pub async fn run_sessions_show(id: &str) -> anyhow::Result<()> {
     for line in lines {
         println!("{}", serde_json::to_string(&line)?);
     }
+    Ok(())
+}
+
+pub async fn run_sessions_fork(id: &str) -> anyhow::Result<()> {
+    let cwd = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let lines = SessionReader::load(&cwd, id)?;
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let mut writer = SessionWriter::create(&cwd, &new_id)?;
+    for line in &lines {
+        writer.write_line(line)?;
+    }
+    println!("{}", new_id);
     Ok(())
 }

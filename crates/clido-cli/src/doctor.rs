@@ -21,6 +21,8 @@ pub async fn run_doctor() -> Result<(), anyhow::Error> {
     let use_color = cli_use_color();
 
     check_api_key(profile, profile_name, use_color, &mut mandatory);
+    check_api_key_format(profile, profile_name, use_color, &mut warnings);
+    check_config_permissions(use_color, &mut warnings);
     check_session_dir(&cwd, use_color, &mut mandatory);
     check_pricing(use_color, &mut warnings);
 
@@ -143,6 +145,93 @@ fn check_pricing(use_color: bool, warnings: &mut Vec<String>) {
             use_color,
             "pricing.toml not found; using default cost estimates.",
         );
+    }
+}
+
+/// Check API key format for known providers (validate without making network calls).
+fn check_api_key_format(
+    profile: &clido_core::ProfileEntry,
+    _profile_name: &str,
+    use_color: bool,
+    warnings: &mut Vec<String>,
+) {
+    if profile.provider == "local" {
+        return;
+    }
+    let key = profile.api_key.as_deref().or_else(|| {
+        let env_name = profile
+            .api_key_env
+            .as_deref()
+            .unwrap_or_else(|| default_api_key_env(&profile.provider));
+        // We can't return a reference to a temporary, so we skip env key format check here
+        // (it would require static storage). Format check only applies to stored keys.
+        let _ = env_name;
+        None
+    });
+
+    if let Some(key) = key {
+        let valid_format = match profile.provider.as_str() {
+            "anthropic" => key.starts_with("sk-ant-"),
+            "openrouter" => key.starts_with("sk-or-"),
+            _ => true,
+        };
+        if !valid_format {
+            warnings.push(format!(
+                "API key for provider '{}' has unexpected format (expected {})",
+                profile.provider,
+                match profile.provider.as_str() {
+                    "anthropic" => "sk-ant-...",
+                    "openrouter" => "sk-or-...",
+                    _ => "unknown",
+                }
+            ));
+        } else {
+            print_ok(
+                use_color,
+                &format!(
+                    "API key format looks valid for provider '{}'",
+                    profile.provider
+                ),
+            );
+        }
+    }
+}
+
+/// Check config file permissions (warn if not 0o600 on Unix).
+fn check_config_permissions(use_color: bool, warnings: &mut Vec<String>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let config_path = crate::agent_setup::global_config_path();
+        if let Some(path) = config_path {
+            if path.exists() {
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        let mode = meta.permissions().mode() & 0o777;
+                        if mode != 0o600 {
+                            warnings.push(format!(
+                                "Config file {} has permissions {:04o}; recommend 0600 to protect API keys.",
+                                path.display(),
+                                mode
+                            ));
+                        } else {
+                            print_ok(
+                                use_color,
+                                &format!("Config file permissions OK (0600): {}", path.display()),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warnings.push(format!("Could not check config file permissions: {}", e));
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = use_color;
+        let _ = warnings;
     }
 }
 

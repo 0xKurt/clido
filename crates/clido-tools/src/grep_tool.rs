@@ -170,3 +170,98 @@ impl Tool for GrepTool {
         ToolOutput::ok(content)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo bar\nbaz qux\nfoo again").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "hello world").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn grep_files_with_matches() {
+        let dir = setup_dir();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool.execute(serde_json::json!({ "pattern": "foo" })).await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert!(out.content.contains("a.txt"), "content: {}", out.content);
+        assert!(!out.content.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_content_mode() {
+        let dir = setup_dir();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "pattern": "foo", "output_mode": "content" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert!(out.content.contains("foo"), "content: {}", out.content);
+    }
+
+    #[tokio::test]
+    async fn grep_count_mode() {
+        let dir = setup_dir();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "pattern": "foo", "output_mode": "count" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        let count: u64 = out.content.trim().parse().unwrap();
+        assert_eq!(count, 2); // "foo bar" and "foo again"
+    }
+
+    #[tokio::test]
+    async fn grep_case_insensitive() {
+        let dir = setup_dir();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "pattern": "FOO", "i": true, "output_mode": "count" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        let count: u64 = out.content.trim().parse().unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn grep_missing_pattern() {
+        let dir = setup_dir();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool.execute(serde_json::json!({})).await;
+        assert!(out.is_error);
+    }
+
+    #[tokio::test]
+    async fn grep_unknown_param_rejected() {
+        let dir = setup_dir();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "pattern": "x", "unknown_key": true }))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("unexpected parameter"));
+    }
+
+    #[tokio::test]
+    async fn grep_head_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = (1..=10)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("f.txt"), &content).unwrap();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(
+                serde_json::json!({ "pattern": "line", "output_mode": "content", "head_limit": 3 }),
+            )
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        let lines: Vec<_> = out.content.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+}

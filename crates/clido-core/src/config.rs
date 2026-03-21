@@ -32,6 +32,16 @@ pub struct AgentConfig {
     /// Compact when context_tokens > max_context_tokens * compaction_threshold. Default 0.75.
     #[serde(default)]
     pub compaction_threshold: Option<f64>,
+    /// Suppress spinner, tool lifecycle output, and cost footer.
+    #[serde(default)]
+    pub quiet: bool,
+    /// Max parallel tool calls for read-only tools (bounded concurrency). Default 4.
+    #[serde(default = "default_max_parallel_tools")]
+    pub max_parallel_tools: u32,
+}
+
+fn default_max_parallel_tools() -> u32 {
+    4
 }
 
 impl Default for AgentConfig {
@@ -46,6 +56,8 @@ impl Default for AgentConfig {
             use_index: false,
             max_context_tokens: None,
             compaction_threshold: None,
+            quiet: false,
+            max_parallel_tools: 4,
         }
     }
 }

@@ -11,8 +11,10 @@ use clido_core::{ClidoError, PricingTable, Result};
 use clido_providers::ModelProvider;
 use clido_storage::{SessionLine, SessionWriter};
 use clido_tools::{ToolOutput, ToolRegistry};
+use futures::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::debug;
 
 /// Callback for asking the user to approve a state-changing tool call (Default permission mode).
@@ -249,16 +251,51 @@ impl AgentLoop {
                     return Ok(text.trim().to_string());
                 }
                 StopReason::ToolUse => {
-                    let mut tool_results = Vec::new();
-                    for block in &response.content {
-                        if let ContentBlock::ToolUse { id, name, input } = block {
-                            if let Some(ref mut w) = session {
-                                let _ = w.write_line(&SessionLine::ToolCall {
-                                    tool_use_id: id.clone(),
-                                    tool_name: name.clone(),
-                                    input: input.clone(),
-                                });
+                    let tool_uses: Vec<(String, String, serde_json::Value)> = response
+                        .content
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::ToolUse { id, name, input } = b {
+                                Some((id.clone(), name.clone(), input.clone()))
+                            } else {
+                                None
                             }
+                        })
+                        .collect();
+
+                    if let Some(ref mut w) = session {
+                        for (id, name, input) in &tool_uses {
+                            let _ = w.write_line(&SessionLine::ToolCall {
+                                tool_use_id: id.clone(),
+                                tool_name: name.clone(),
+                                input: input.clone(),
+                            });
+                        }
+                    }
+
+                    let all_read_only = tool_uses.iter().all(|(_, name, _)| {
+                        self.tools
+                            .get(name)
+                            .map(|t| t.is_read_only())
+                            .unwrap_or(false)
+                    });
+
+                    let outputs: Vec<ToolOutput> = if all_read_only && tool_uses.len() > 1 {
+                        if let Some(ref e) = self.emit {
+                            for (_, name, input) in &tool_uses {
+                                e.on_tool_start(name, input).await;
+                            }
+                        }
+                        let results = self.execute_tool_batch(&tool_uses).await;
+                        if let Some(ref e) = self.emit {
+                            for ((_, name, _), output) in tool_uses.iter().zip(results.iter()) {
+                                e.on_tool_done(name, output.is_error).await;
+                            }
+                        }
+                        results
+                    } else {
+                        let mut outputs = Vec::new();
+                        for (_, name, input) in &tool_uses {
                             if let Some(ref e) = self.emit {
                                 e.on_tool_start(name, input).await;
                             }
@@ -266,23 +303,29 @@ impl AgentLoop {
                             if let Some(ref e) = self.emit {
                                 e.on_tool_done(name, output.is_error).await;
                             }
-                            if let Some(ref mut w) = session {
-                                let _ = w.write_line(&SessionLine::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: output.content.clone(),
-                                    is_error: output.is_error,
-                                    duration_ms: None,
-                                    path: output.path.clone(),
-                                    content_hash: output.content_hash.clone(),
-                                    mtime_nanos: output.mtime_nanos,
-                                });
-                            }
-                            tool_results.push(ContentBlock::ToolResult {
+                            outputs.push(output);
+                        }
+                        outputs
+                    };
+
+                    let mut tool_results = Vec::new();
+                    for ((id, _, _), output) in tool_uses.iter().zip(outputs.iter()) {
+                        if let Some(ref mut w) = session {
+                            let _ = w.write_line(&SessionLine::ToolResult {
                                 tool_use_id: id.clone(),
-                                content: output.content,
+                                content: output.content.clone(),
                                 is_error: output.is_error,
+                                duration_ms: None,
+                                path: output.path.clone(),
+                                content_hash: output.content_hash.clone(),
+                                mtime_nanos: output.mtime_nanos,
                             });
                         }
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: output.content.clone(),
+                            is_error: output.is_error,
+                        });
                     }
                     self.history.push(Message {
                         role: Role::User,
@@ -475,16 +518,51 @@ impl AgentLoop {
                 }
                 StopReason::ToolUse => {
                     // Execute each tool use and push results as user message
-                    let mut tool_results = Vec::new();
-                    for block in &response.content {
-                        if let ContentBlock::ToolUse { id, name, input } = block {
-                            if let Some(ref mut w) = session {
-                                let _ = w.write_line(&SessionLine::ToolCall {
-                                    tool_use_id: id.clone(),
-                                    tool_name: name.clone(),
-                                    input: input.clone(),
-                                });
+                    let tool_uses: Vec<(String, String, serde_json::Value)> = response
+                        .content
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::ToolUse { id, name, input } = b {
+                                Some((id.clone(), name.clone(), input.clone()))
+                            } else {
+                                None
                             }
+                        })
+                        .collect();
+
+                    if let Some(ref mut w) = session {
+                        for (id, name, input) in &tool_uses {
+                            let _ = w.write_line(&SessionLine::ToolCall {
+                                tool_use_id: id.clone(),
+                                tool_name: name.clone(),
+                                input: input.clone(),
+                            });
+                        }
+                    }
+
+                    let all_read_only = tool_uses.iter().all(|(_, name, _)| {
+                        self.tools
+                            .get(name)
+                            .map(|t| t.is_read_only())
+                            .unwrap_or(false)
+                    });
+
+                    let outputs: Vec<ToolOutput> = if all_read_only && tool_uses.len() > 1 {
+                        if let Some(ref e) = self.emit {
+                            for (_, name, input) in &tool_uses {
+                                e.on_tool_start(name, input).await;
+                            }
+                        }
+                        let results = self.execute_tool_batch(&tool_uses).await;
+                        if let Some(ref e) = self.emit {
+                            for ((_, name, _), output) in tool_uses.iter().zip(results.iter()) {
+                                e.on_tool_done(name, output.is_error).await;
+                            }
+                        }
+                        results
+                    } else {
+                        let mut outputs = Vec::new();
+                        for (_, name, input) in &tool_uses {
                             if let Some(ref e) = self.emit {
                                 e.on_tool_start(name, input).await;
                             }
@@ -492,23 +570,29 @@ impl AgentLoop {
                             if let Some(ref e) = self.emit {
                                 e.on_tool_done(name, output.is_error).await;
                             }
-                            if let Some(ref mut w) = session {
-                                let _ = w.write_line(&SessionLine::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: output.content.clone(),
-                                    is_error: output.is_error,
-                                    duration_ms: None,
-                                    path: output.path.clone(),
-                                    content_hash: output.content_hash.clone(),
-                                    mtime_nanos: output.mtime_nanos,
-                                });
-                            }
-                            tool_results.push(ContentBlock::ToolResult {
+                            outputs.push(output);
+                        }
+                        outputs
+                    };
+
+                    let mut tool_results = Vec::new();
+                    for ((id, _, _), output) in tool_uses.iter().zip(outputs.iter()) {
+                        if let Some(ref mut w) = session {
+                            let _ = w.write_line(&SessionLine::ToolResult {
                                 tool_use_id: id.clone(),
-                                content: output.content,
+                                content: output.content.clone(),
                                 is_error: output.is_error,
+                                duration_ms: None,
+                                path: output.path.clone(),
+                                content_hash: output.content_hash.clone(),
+                                mtime_nanos: output.mtime_nanos,
                             });
                         }
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: output.content.clone(),
+                            is_error: output.is_error,
+                        });
                     }
                     self.history.push(Message {
                         role: Role::User,
@@ -575,6 +659,51 @@ impl AgentLoop {
         match self.tools.get(name) {
             Some(tool) => tool.execute(input.clone()).await,
             None => ToolOutput::err(format!("Tool not found: {}", name)),
+        }
+    }
+
+    /// Execute a batch of tool calls, using parallel execution if all are read-only.
+    /// Returns results in the same order as the input tool_uses slice.
+    async fn execute_tool_batch(
+        &self,
+        tool_uses: &[(String, String, serde_json::Value)],
+    ) -> Vec<ToolOutput> {
+        let all_read_only = tool_uses.iter().all(|(_, name, _)| {
+            self.tools
+                .get(name)
+                .map(|t| t.is_read_only())
+                .unwrap_or(false)
+        });
+
+        if all_read_only && tool_uses.len() > 1 {
+            // Parallel execution with bounded concurrency
+            let max_parallel = self.config.max_parallel_tools.max(1) as usize;
+            let semaphore = Arc::new(Semaphore::new(max_parallel));
+            let tools = &self.tools;
+            let futures: Vec<_> = tool_uses
+                .iter()
+                .map(|(_, name, input)| {
+                    let sem = semaphore.clone();
+                    let name = name.clone();
+                    let input = input.clone();
+                    async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        match tools.get(&name) {
+                            Some(tool) => tool.execute(input).await,
+                            None => ToolOutput::err(format!("Tool not found: {}", name)),
+                        }
+                    }
+                })
+                .collect();
+            join_all(futures).await
+        } else {
+            // Sequential execution (state-changing or single tool)
+            let mut results = Vec::with_capacity(tool_uses.len());
+            for (_, name, input) in tool_uses {
+                let output = self.execute_tool(name, input).await;
+                results.push(output);
+            }
+            results
         }
     }
 }

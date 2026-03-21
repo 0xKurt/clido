@@ -59,6 +59,8 @@ impl AgentSetup {
             cli.model.clone(),
             Some(system_prompt),
             Some(permission_mode),
+            cli.quiet,
+            cli.max_parallel_tools,
         )
         .map_err(|e| CliError::Usage(e.to_string()))?;
 

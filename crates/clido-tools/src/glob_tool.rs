@@ -104,3 +104,55 @@ impl Tool for GlobTool {
         ToolOutput::ok(matched.join("\n"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn glob_finds_rs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn foo() {}").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[package]").unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        let out = tool.execute(serde_json::json!({ "pattern": "*.rs" })).await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert!(out.content.contains("main.rs"), "content: {}", out.content);
+        assert!(out.content.contains("lib.rs"), "content: {}", out.content);
+        assert!(!out.content.contains("config.toml"));
+    }
+
+    #[tokio::test]
+    async fn glob_missing_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        let out = tool.execute(serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("pattern"));
+    }
+
+    #[tokio::test]
+    async fn glob_no_matches_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "").unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        let out = tool.execute(serde_json::json!({ "pattern": "*.py" })).await;
+        assert!(!out.is_error);
+        assert!(out.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn glob_nested_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("lib.rs"), "").unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "pattern": "**/*.rs" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert!(out.content.contains("lib.rs"), "content: {}", out.content);
+    }
+}
