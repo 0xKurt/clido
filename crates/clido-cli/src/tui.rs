@@ -18,7 +18,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use pulldown_cmark::{Parser, Tag};
+use pulldown_cmark::Parser;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -638,22 +638,49 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     if app.busy || app.pending_perm.is_some() {
         let spinner = SPINNER[app.spinner_tick];
-        let title = if app.pending_perm.is_some() {
-            " ⏸ waiting for permission… ".to_string()
+        let title_line = if app.pending_perm.is_some() {
+            Line::from(vec![
+                Span::styled("⏸", Style::default().fg(Color::LightMagenta)),
+                Span::styled(" waiting for permission… ", Style::default().fg(Color::LightMagenta)),
+            ])
         } else if app.queued.is_some() {
-            format!(" {} queued — Ctrl+Enter to interrupt ", spinner)
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", spinner),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+                Span::styled(
+                    "queued — Ctrl+Enter to interrupt".to_string(),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+            ])
         } else if app.input.is_empty() {
-            format!(
-                " {} thinking…  (type to queue, Ctrl+Enter to interrupt) ",
-                spinner
-            )
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", spinner),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+                Span::styled(
+                    "thinking…  (type to queue, Ctrl+Enter to interrupt)".to_string(),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+            ])
         } else {
-            format!(" {} thinking…  Enter=queue  Ctrl+Enter=interrupt ", spinner)
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", spinner),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+                Span::styled(
+                    "thinking…  Enter=queue  Ctrl+Enter=interrupt".to_string(),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+            ])
         };
         let block = Block::default()
-            .title(title)
+            .title(title_line)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(Color::LightMagenta));
         let para = Paragraph::new(format!(" {}", input_display)).block(block);
         frame.render_widget(para, input_area);
         if app.pending_perm.is_none() {
@@ -1720,7 +1747,7 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         (_, Up) if app.pending_perm.is_none() && slash_completions(&app.input).is_empty() => {
             if app.input.is_empty() && app.history_idx.is_none() {
                 // Scroll chat up.
-                scroll_up(app, 1);
+                scroll_up(app, 2);
             } else {
                 // Input history navigation.
                 if app.input_history.is_empty() {
@@ -1743,7 +1770,7 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         // ── Down: scroll chat (empty input, not in history) or history nav ───
         (_, Down) if app.pending_perm.is_none() && slash_completions(&app.input).is_empty() => {
             if app.input.is_empty() && app.history_idx.is_none() {
-                scroll_down(app, 1);
+                scroll_down(app, 2);
             } else {
                 match app.history_idx {
                     None => {}
@@ -2120,8 +2147,8 @@ async fn event_loop(
                 match maybe {
                     Some(Ok(Event::Key(key))) => handle_key(app, key),
                     Some(Ok(Event::Mouse(m))) => match m.kind {
-                        MouseEventKind::ScrollUp => scroll_up(app, 3),
-                        MouseEventKind::ScrollDown => scroll_down(app, 3),
+                        MouseEventKind::ScrollUp => scroll_up(app, 1),
+                        MouseEventKind::ScrollDown => scroll_down(app, 1),
                         _ => {}
                     },
                     Some(Ok(Event::Resize(_, _))) => {}
@@ -2153,7 +2180,7 @@ async fn event_loop(
                         }
                     }
                     Some(AgentEvent::Thinking(text)) => {
-                        app.push(ChatLine::Assistant(text));
+                        app.push(ChatLine::Thinking(text));
                         // Don't call on_agent_done — the agent is still running.
                     }
                     Some(AgentEvent::Response(text)) => {
