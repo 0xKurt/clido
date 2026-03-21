@@ -234,8 +234,10 @@ pub enum IndexCmd {
         /// Directory to index (default: current directory).
         #[arg(long, short = 'd')]
         dir: Option<PathBuf>,
-        /// File extensions to index, comma-separated (default: rs,py,js,ts,go).
-        #[arg(long, default_value = "rs,py,js,ts,go")]
+        /// File extensions to index, comma-separated.
+        /// Default includes Web3/smart-contract languages (sol,move,vy,fe,yul,cairo)
+        /// plus common general-purpose languages.
+        #[arg(long, default_value = "sol,move,vy,fe,yul,rell,cairo,rs,py,js,ts,go,java,c,cpp,h,md")]
         ext: String,
     },
     /// Show index statistics.

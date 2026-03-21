@@ -1,11 +1,34 @@
-//! SemanticSearch tool: query repo index + memory store for relevant content.
+//! SemanticSearch tool: auto-builds/refreshes the repo index, then queries it.
+//!
+//! The index is stored at `<workspace>/.clido/index.db`. On first use it is built
+//! automatically. If it is older than INDEX_MAX_AGE_SECS it is rebuilt in-place
+//! before querying so results are always fresh without any manual step.
+
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{Tool, ToolOutput};
 
-/// SemanticSearch tool for the agent: queries the repo index and memory store.
+/// Rebuild the index if it is older than 1 hour.
+const INDEX_MAX_AGE_SECS: u64 = 3600;
+
+/// File extensions indexed by default.
+/// Web3/smart-contract languages are listed first so they get priority in results.
+const DEFAULT_EXTENSIONS: &[&str] = &[
+    // Web3 / smart contracts
+    "sol",  // Solidity (Ethereum, EVM)
+    "move", // Move (Aptos, Sui)
+    "vy",   // Vyper
+    "fe",   // Fe (Ethereum)
+    "yul",  // Yul / Yul+ (EVM assembly IR)
+    "rell", // Rell (Chromia)
+    "cairo", // Cairo (StarkNet)
+    // General-purpose
+    "rs", "py", "js", "ts", "go", "java", "c", "cpp", "h", "md",
+];
+
 pub struct SemanticSearchTool {
     workspace_root: std::path::PathBuf,
 }
@@ -13,6 +36,52 @@ pub struct SemanticSearchTool {
 impl SemanticSearchTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
         Self { workspace_root }
+    }
+
+    /// Return the index DB path, creating the .clido dir if needed.
+    fn index_path(&self) -> std::path::PathBuf {
+        self.workspace_root.join(".clido").join("index.db")
+    }
+
+    /// Age of the index in seconds. Returns None if no index exists yet.
+    fn index_age_secs(index_path: &std::path::Path) -> Option<u64> {
+        let meta = std::fs::metadata(index_path).ok()?;
+        let modified = meta.modified().ok()?;
+        let age = SystemTime::now().duration_since(modified).unwrap_or(Duration::ZERO);
+        Some(age.as_secs())
+    }
+
+    /// Build (or rebuild) the index, returning a human-readable status note.
+    fn ensure_index(&self) -> String {
+        let db_path = self.index_path();
+        let age = Self::index_age_secs(&db_path);
+
+        let needs_build = match age {
+            None => true,                          // doesn't exist yet
+            Some(s) => s > INDEX_MAX_AGE_SECS,     // stale
+        };
+
+        if !needs_build {
+            return String::new();
+        }
+
+        // Create .clido dir if needed.
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let label = if age.is_none() { "Building" } else { "Refreshing" };
+
+        match clido_index::RepoIndex::open(&db_path) {
+            Err(e) => format!("(Index unavailable: {})\n", e),
+            Ok(mut idx) => match idx.build(&self.workspace_root, DEFAULT_EXTENSIONS) {
+                Ok(n) => {
+                    let (_, sym_count) = idx.stats().unwrap_or((0, 0));
+                    format!("({} repo index: {} files, {} symbols)\n", label, n, sym_count)
+                }
+                Err(e) => format!("(Index build failed: {})\n", e),
+            },
+        }
     }
 }
 
@@ -23,9 +92,10 @@ impl Tool for SemanticSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the repository index and long-term memory for content relevant to a query. \
-         Returns matching files, symbols, and memories. Use for navigating large codebases \
-         or recalling past context."
+        "Search the repository for files, symbols, and long-term memories relevant to a query. \
+         The index is built and kept fresh automatically — no manual setup needed. \
+         Use for navigating large codebases, finding where a function is defined, or \
+         recalling past context."
     }
 
     fn schema(&self) -> Value {
@@ -34,15 +104,15 @@ impl Tool for SemanticSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query string."
+                    "description": "The search query (function name, concept, file pattern, etc.)"
                 },
                 "target_directory": {
                     "type": "string",
-                    "description": "Optional subdirectory to limit file/symbol search."
+                    "description": "Limit search to this subdirectory (optional)."
                 },
                 "num_results": {
                     "type": "integer",
-                    "description": "Maximum number of results per source (default: 5)."
+                    "description": "Max results per source (default: 5, max: 20)."
                 }
             },
             "required": ["query"]
@@ -55,69 +125,70 @@ impl Tool for SemanticSearchTool {
 
     async fn execute(&self, input: Value) -> ToolOutput {
         let query = match input.get("query").and_then(|v| v.as_str()) {
-            Some(q) => q.to_string(),
-            None => return ToolOutput::err("Missing required field: query".to_string()),
+            Some(q) if !q.trim().is_empty() => q.to_string(),
+            _ => return ToolOutput::err("Missing required field: query".to_string()),
         };
         let num_results = input
             .get("num_results")
             .and_then(|v| v.as_u64())
-            .unwrap_or(5) as usize;
-        let target_dir = input
-            .get("target_directory")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .unwrap_or(5)
+            .min(20) as usize;
+
+        // Auto-build/refresh index (no-op when fresh, fast when up-to-date).
+        let index_note = self.ensure_index();
 
         let mut output_parts = Vec::new();
+        if !index_note.is_empty() {
+            output_parts.push(index_note);
+        }
 
-        // Search repo index
-        let _root = if let Some(ref sub) = target_dir {
-            self.workspace_root.join(sub)
-        } else {
-            self.workspace_root.clone()
-        };
-
-        // Try opening index DB
-        let index_db = self.workspace_root.join(".clido").join("index.db");
+        // ── Repo index search ──────────────────────────────────────────────
+        let index_db = self.index_path();
         if index_db.exists() {
             match clido_index::RepoIndex::open(&index_db) {
                 Ok(idx) => {
-                    // Search symbols
+                    // Symbols
                     if let Ok(syms) = idx.search_symbols(&query) {
                         if !syms.is_empty() {
                             let mut part = format!("## Symbols matching '{}'\n", query);
                             for s in syms.iter().take(num_results) {
                                 part.push_str(&format!(
-                                    "  {} {} in {} (line {})\n",
+                                    "  {} {} — {} line {}\n",
                                     s.kind, s.name, s.path, s.line
                                 ));
                             }
                             output_parts.push(part);
                         }
                     }
-                    // Search files
+                    // Files
                     if let Ok(files) = idx.search_files(&query) {
+                        let files: Vec<_> = match input
+                            .get("target_directory")
+                            .and_then(|v| v.as_str())
+                        {
+                            Some(dir) => files
+                                .into_iter()
+                                .filter(|f| f.path.contains(dir))
+                                .collect(),
+                            None => files,
+                        };
                         if !files.is_empty() {
                             let mut part = format!("## Files matching '{}'\n", query);
                             for f in files.iter().take(num_results) {
-                                part.push_str(&format!("  {} ({} bytes)\n", f.path, f.size_bytes));
+                                part.push_str(&format!("  {}\n", f.path));
                             }
                             output_parts.push(part);
                         }
                     }
                 }
                 Err(e) => {
-                    output_parts.push(format!("(Index unavailable: {})\n", e));
+                    output_parts.push(format!("(Index error: {})\n", e));
                 }
             }
-        } else {
-            output_parts.push(format!(
-                "(No repo index found at {}. Run `clido index build` to create one.)\n",
-                index_db.display()
-            ));
         }
 
-        // Search memory store
-        if let Some(dirs) = directories::ProjectDirs::from("", "", "clido") as Option<directories::ProjectDirs> {
+        // ── Memory search ──────────────────────────────────────────────────
+        if let Some(dirs) = directories::ProjectDirs::from("", "", "clido") {
             let memory_db = dirs.data_dir().join("memory.db");
             if memory_db.exists() {
                 if let Ok(store) = clido_memory::MemoryStore::open(&memory_db) {
@@ -130,7 +201,10 @@ impl Tool for SemanticSearchTool {
                                 } else {
                                     format!(" [{}]", m.tags.join(", "))
                                 };
-                                part.push_str(&format!("  [{}]{} {}\n", m.created_at, tags, m.content));
+                                part.push_str(&format!(
+                                    "  {}{} {}\n",
+                                    m.created_at, tags, m.content
+                                ));
                             }
                             output_parts.push(part);
                         }
@@ -140,7 +214,7 @@ impl Tool for SemanticSearchTool {
         }
 
         if output_parts.is_empty() {
-            ToolOutput::ok(format!("No results found for query: '{}'", query))
+            ToolOutput::ok(format!("No results found for '{}'.", query))
         } else {
             ToolOutput::ok(output_parts.join("\n"))
         }
