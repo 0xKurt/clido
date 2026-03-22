@@ -55,6 +55,9 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plan edit", "open plan editor for the current plan"),
     ("/plan save", "save current plan to .clido/plans/"),
     ("/plan list", "list all saved plans"),
+    ("/branch", "create + switch to a new branch. Usage: /branch <name>"),
+    ("/sync", "pull --rebase from upstream, resolve conflicts if needed"),
+    ("/pr", "create a pull request. Usage: /pr [title]"),
     ("/ship", "stage → commit (auto message) → push. Usage: /ship [message]"),
     ("/save", "stage → commit (auto message), no push. Usage: /save [message]"),
     ("/check", "run diagnostics on current project"),
@@ -1441,6 +1444,9 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("  /plan edit         open plan editor for active plan".into()));
             app.push(ChatLine::Info("  /plan save         save current plan to .clido/plans/".into()));
             app.push(ChatLine::Info("  /plan list         list all saved plans".into()));
+            app.push(ChatLine::Info("  /branch <name>     create + switch to new branch, push upstream".into()));
+            app.push(ChatLine::Info("  /sync              pull --rebase from upstream, resolve conflicts".into()));
+            app.push(ChatLine::Info("  /pr [title]        create pull request (auto title+body or custom)".into()));
             app.push(ChatLine::Info("  /ship [msg]        stage → commit → push (auto message or custom)".into()));
             app.push(ChatLine::Info("  /save [msg]        stage → commit locally, no push".into()));
             app.push(ChatLine::Info("  /check             run diagnostics on current project".into()));
@@ -1611,6 +1617,78 @@ fn execute_slash(app: &mut App, cmd: &str) {
                     app.pending_error = Some(format!("list plans: {}", e));
                 }
             }
+        }
+        _ if cmd.starts_with("/branch") => {
+            let name = cmd.trim_start_matches("/branch").trim().to_string();
+            if name.is_empty() {
+                app.push(ChatLine::Info("  usage: /branch <name>".into()));
+                app.push(ChatLine::Info("  creates a new branch and switches to it".into()));
+            } else {
+                app.send_now(format!(
+                    "Create and switch to a new git branch named `{name}`.\n\
+                    \n\
+                    Steps:\n\
+                    1. Verify this is a git repo. Stop if not.\n\
+                    2. Check for uncommitted changes with `git status`. If there are any, \
+                       stash them first (`git stash`) so the branch switch is clean.\n\
+                    3. Create and switch: `git checkout -b {name}`.\n\
+                    4. If the stash was created, pop it: `git stash pop`. \
+                       If the pop causes conflicts, show them clearly and stop.\n\
+                    5. Push the branch and set upstream: `git push -u origin {name}`.\n\
+                    6. Report the new branch name and current status."
+                ));
+            }
+        }
+        "/sync" => {
+            app.send_now(
+                "Sync the current branch with its upstream.\n\
+                \n\
+                Steps:\n\
+                1. Verify this is a git repo. Stop if not.\n\
+                2. Run `git status` — if there are uncommitted changes, stash them first \
+                   (`git stash`).\n\
+                3. Run `git fetch origin`.\n\
+                4. Run `git rebase origin/<current-branch>` (use `git rev-parse \
+                   --abbrev-ref HEAD` to get the branch name).\n\
+                5. If rebase has conflicts: show which files conflict, attempt to resolve \
+                   straightforward ones (whitespace, formatting), then `git rebase --continue`. \
+                   If conflicts are non-trivial, stop and explain what needs manual resolution.\n\
+                6. If a stash was created, pop it: `git stash pop`.\n\
+                7. Report how many commits were rebased and the current HEAD."
+                .to_string(),
+            );
+        }
+        _ if cmd.starts_with("/pr") => {
+            let title_arg = cmd.trim_start_matches("/pr").trim().to_string();
+            let title_instruction = if title_arg.is_empty() {
+                "Generate a PR title (≤70 chars, imperative mood) and body from the branch diff.".to_string()
+            } else {
+                format!("Use this as the PR title: {title_arg}")
+            };
+            app.send_now(format!(
+                "Create a pull request for the current branch.\n\
+                \n\
+                Steps:\n\
+                1. Verify this is a git repo with a remote. Stop if not.\n\
+                2. Check `git status` — if there are uncommitted changes, ask whether to \
+                   ship them first (run /ship) or proceed with existing commits.\n\
+                3. Get the current branch: `git rev-parse --abbrev-ref HEAD`. \
+                   If it's main or master, warn and stop — PRs should come from a feature branch.\n\
+                4. Get the default base branch (try `git symbolic-ref refs/remotes/origin/HEAD` \
+                   or fall back to `main`).\n\
+                5. Run `git log <base>..<current> --oneline` and \
+                   `git diff <base>..<current> --stat` to understand the changes.\n\
+                6. {title_instruction}\n\
+                   For the body, write:\n\
+                   - ## Summary — 2–4 bullet points of what changed and why\n\
+                   - ## Test plan — what to verify\n\
+                7. Make sure the branch is pushed: `git push -u origin <branch>` if needed.\n\
+                8. Create the PR: `gh pr create --title \"<title>\" --body \"<body>\" \
+                   --base <base>`.\n\
+                   If `gh` is not available, print the title and body and tell the user \
+                   to create the PR manually.\n\
+                9. Print the PR URL."
+            ));
         }
         _ if cmd.starts_with("/ship") => {
             let custom_msg = cmd.trim_start_matches("/ship").trim();

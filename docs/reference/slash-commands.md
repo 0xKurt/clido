@@ -21,6 +21,9 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/plan save` | Save the current plan to `.clido/plans/` | `/plan save` | Saved plans can be resumed with `clido plan run` |
 | `/plan list` | List all saved plans | `/plan list` | Shows id, task count, done count, and goal |
 | `/memory <query>` | Search long-term memory | `/memory error handling` | The agent also uses memory automatically |
+| `/branch <name>` | Create a new branch and switch to it | `/branch feature/auth` | Stashes uncommitted changes, creates branch, pushes with upstream |
+| `/sync` | Pull and rebase from upstream | `/sync` | Stashes if needed, fetches, rebases, resolves simple conflicts |
+| `/pr [title]` | Create a pull request | `/pr add login rate limiting` | Auto-generates title and body from diff; requires `gh` or prints for manual creation |
 | `/ship [msg]` | Stage all changes, commit, and push | `/ship fix login bug` | Auto-generates message if none given; repair cycle on hook/push failures |
 | `/save [msg]` | Stage all changes and commit locally (no push) | `/save wip checkpoint` | Auto-generates message if none given; repair cycle on hook failures |
 | `/check` | Run diagnostics on the current project | `/check` | Invokes the DiagnosticsTool |
