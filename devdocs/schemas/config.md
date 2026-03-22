@@ -83,6 +83,32 @@ Global provider-related options (not per-profile).
 
 ---
 
+## [roles]
+
+Maps role names to model IDs. Built-in roles: `fast`, `reasoning`, `critic`, `planner`. Arbitrary user-defined roles can be added freely.
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `fast` | string | — | Used by `/fast` command; falls back to `claude-haiku-4-5-20251001` |
+| `reasoning` | string | — | Used by `/smart` command; falls back to `claude-opus-4-6` |
+| `critic` | string | — | Available via `/role critic` |
+| `planner` | string | — | Available via `/role planner` |
+| *(any name)* | string | — | Arbitrary user-defined roles, accessible via `/role <name>` |
+
+**Example:**
+
+```toml
+[roles]
+fast      = "claude-haiku-4-5-20251001"
+reasoning = "claude-opus-4-6"
+critic    = "claude-opus-4-6"
+planner   = "claude-sonnet-4-6"
+```
+
+Role assignments can also be overridden per-user in `~/.config/clido/model_prefs.json` (managed via the `/role` command in the TUI). User-level overrides take precedence over config-level assignments.
+
+---
+
 ## Project-level config (`.clido/config.toml`)
 
 Same schema as above. Only the keys present are merged; absent keys inherit from the global config. Merge is shallow: a full `[profile.xyz]` table in project config replaces the global `[profile.xyz]` for that profile, not field-by-field merge (unless the implementation chooses field-level merge for profiles; the spec allows either as long as it is documented).

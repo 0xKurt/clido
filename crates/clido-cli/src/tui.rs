@@ -49,9 +49,12 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("/quit", "exit clido"),
     ]),
     ("Model", &[
+        ("/models", "open interactive model picker (search, filter, favorites)"),
         ("/model", "show or switch model. Usage: /model [model-name]"),
         ("/fast", "switch to fast (cheap) model for this session"),
         ("/smart", "switch to smart (powerful) model for this session"),
+        ("/role", "switch to model assigned to a role. Usage: /role <name>"),
+        ("/fav", "toggle favorite on current model"),
     ]),
     ("Context", &[
         ("/cost", "show session cost so far"),
@@ -90,9 +93,12 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "show current session ID"),
     ("/help", "show key bindings and all slash commands"),
     ("/quit", "exit clido"),
+    ("/models", "open interactive model picker (search, filter, favorites)"),
     ("/model", "show or switch model. Usage: /model [model-name]"),
     ("/fast", "switch to fast (cheap) model for this session"),
     ("/smart", "switch to smart (powerful) model for this session"),
+    ("/role", "switch to model assigned to a role. Usage: /role <name>"),
+    ("/fav", "toggle favorite on current model"),
     ("/cost", "show session cost so far"),
     ("/tokens", "show token usage so far"),
     ("/compact", "compact context window now (summarise history)"),
@@ -209,6 +215,63 @@ struct SessionPickerState {
     sessions: Vec<clido_storage::SessionSummary>,
     selected: usize,
     scroll_offset: usize,
+}
+
+// ── Model picker popup state ──────────────────────────────────────────────────
+
+/// One row in the model picker.
+#[derive(Clone)]
+struct ModelEntry {
+    id: String,
+    provider: String,
+    /// Cost per million input tokens (USD).
+    input_mtok: f64,
+    /// Cost per million output tokens (USD).
+    output_mtok: f64,
+    /// Context window in thousands of tokens.
+    context_k: Option<u32>,
+    /// Role name assigned to this model (e.g. "fast", "reasoning").
+    role: Option<String>,
+    /// Whether the user has starred this model.
+    is_favorite: bool,
+}
+
+struct ModelPickerState {
+    /// Full sorted model list (favorites → recent → rest).
+    models: Vec<ModelEntry>,
+    /// Live filter string.
+    filter: String,
+    /// Selected index within the *filtered* view.
+    selected: usize,
+    scroll_offset: usize,
+}
+
+impl ModelPickerState {
+    fn filtered(&self) -> Vec<&ModelEntry> {
+        if self.filter.is_empty() {
+            return self.models.iter().collect();
+        }
+        let f = self.filter.to_lowercase();
+        self.models
+            .iter()
+            .filter(|m| {
+                m.id.to_lowercase().contains(&f)
+                    || m.provider.to_lowercase().contains(&f)
+                    || m.role.as_deref().map(|r| r.contains(&f)).unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn clamp(&mut self) {
+        let n = self.filtered().len();
+        if n == 0 {
+            self.selected = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.selected = self.selected.min(n - 1);
+            self.scroll_offset = self.scroll_offset.min(self.selected);
+        }
+    }
 }
 
 // ── Permission request (agent → TUI, reply via oneshot) ───────────────────────
@@ -394,6 +457,14 @@ struct App {
     queued: Option<String>,
     /// Session picker popup state (Some = popup visible).
     session_picker: Option<SessionPickerState>,
+    /// Model picker popup state (Some = popup visible).
+    model_picker: Option<ModelPickerState>,
+    /// All known models (built at startup from pricing table + profiles).
+    known_models: Vec<ModelEntry>,
+    /// User model preferences: favorites, recency, role assignments.
+    model_prefs: clido_core::ModelPrefs,
+    /// Role map from config (name → model ID). Merged with model_prefs.roles at use time.
+    config_roles: std::collections::HashMap<String, String>,
     /// Signal to cancel the current agent run (force send).
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Selected option in the permission popup (0=once, 1=session, 2=workdir, 3=deny).
@@ -463,6 +534,9 @@ impl App {
         notify_enabled: bool,
         image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
         plan_dry_run: bool,
+        known_models: Vec<ModelEntry>,
+        model_prefs: clido_core::ModelPrefs,
+        config_roles: std::collections::HashMap<String, String>,
     ) -> Self {
         let mut app = Self {
             messages: Vec::new(),
@@ -481,6 +555,10 @@ impl App {
             model_switch_tx,
             queued: None,
             session_picker: None,
+            model_picker: None,
+            known_models,
+            model_prefs,
+            config_roles,
             cancel,
             perm_selected: 0,
             selected_cmd: None,
@@ -1054,6 +1132,68 @@ fn render(frame: &mut Frame, app: &mut App) {
         );
     }
 
+    // ── Model picker popup ────────────────────────────────────────────────────
+    if let Some(ref picker) = app.model_picker {
+        const VISIBLE: usize = 14;
+        let filtered = picker.filtered();
+        let n_rows = filtered.len().min(VISIBLE) as u16;
+        let popup_h = (n_rows + 5).min(area.height.saturating_sub(4)).max(6);
+        let popup_rect = popup_above_input(input_area, popup_h, input_area.width);
+
+        let mut content: Vec<Line<'static>> = vec![
+            Line::from(vec![Span::styled(
+                format!("  Filter: {}_", picker.filter),
+                Style::default().fg(Color::White),
+            )]),
+            Line::from(vec![Span::styled(
+                format!("  {:<2} {:<32}  {:<12}  {:>8}  {:>8}  {:>6}  {}", "  ", "model", "provider", "in/mtok", "out/mtok", "ctx", "role"),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            )]),
+            Line::raw(""),
+        ];
+
+        let end = (picker.scroll_offset + VISIBLE).min(filtered.len());
+        for (di, m) in filtered[picker.scroll_offset..end].iter().enumerate() {
+            let selected = picker.scroll_offset + di == picker.selected;
+            let bg = if selected { Color::Blue } else { Color::Reset };
+            let fg = if selected { Color::White } else { Color::Gray };
+            let fav = if m.is_favorite { "★" } else { "  " };
+            let ctx = m.context_k.map(|k| format!("{:>4}k", k)).unwrap_or_else(|| "    ?".into());
+            let role = m.role.as_deref().unwrap_or("");
+            let id_display: String = m.id.chars().take(32).collect();
+            let prov_display: String = m.provider.chars().take(12).collect();
+            content.push(Line::from(vec![Span::styled(
+                format!(
+                    "  {} {:<32}  {:<12}  {:>8.2}  {:>8.2}  {}  {}",
+                    fav, id_display, prov_display,
+                    m.input_mtok, m.output_mtok,
+                    ctx, role
+                ),
+                Style::default().fg(fg).bg(bg),
+            )]));
+        }
+
+        let above = picker.scroll_offset;
+        let below = filtered.len().saturating_sub(picker.scroll_offset + VISIBLE);
+        if above > 0 || below > 0 {
+            let mut parts = Vec::new();
+            if above > 0 { parts.push(format!("↑↑ {} more", above)); }
+            if below > 0 { parts.push(format!("↓↓ {} more", below)); }
+            content.push(Line::from(vec![Span::styled(
+                format!("  {}", parts.join("  ")),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            )]));
+        }
+
+        let total = filtered.len();
+        let title = format!(" Models — {} found  (↑↓  Enter=use  f=fav  Esc=close  type to filter) ", total);
+        frame.render_widget(Clear, popup_rect);
+        frame.render_widget(
+            Paragraph::new(content).block(modal_block(&title, Color::Magenta)),
+            popup_rect,
+        );
+    }
+
     // ── Permission popup ─────────────────────────────────────────────────────
     if let Some(perm) = &app.pending_perm {
         // 1 preview + 1 blank + 4 options + 2 borders = 8
@@ -1506,42 +1646,123 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("".into()));
         }
         "/fast" => {
-            let new_model = "claude-haiku-4-5-20251001".to_string();
+            let new_model = app.config_roles.get("fast")
+                .cloned()
+                .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
             app.model = new_model.clone();
             let _ = app.model_switch_tx.send(new_model.clone());
-            app.push(ChatLine::Info(format!(
-                "  model switched to {} (fast)",
-                new_model
-            )));
+            app.model_prefs.push_recent(&new_model);
+            app.model_prefs.save();
+            app.push(ChatLine::Info(format!("  model switched to {} (fast)", new_model)));
         }
         "/smart" => {
-            let new_model = "claude-opus-4-6".to_string();
+            let new_model = app.config_roles.get("reasoning")
+                .cloned()
+                .unwrap_or_else(|| "claude-opus-4-6".to_string());
             app.model = new_model.clone();
             let _ = app.model_switch_tx.send(new_model.clone());
-            app.push(ChatLine::Info(format!(
-                "  model switched to {} (smart)",
-                new_model
-            )));
+            app.model_prefs.push_recent(&new_model);
+            app.model_prefs.save();
+            app.push(ChatLine::Info(format!("  model switched to {} (smart)", new_model)));
         }
-        _ if cmd.starts_with("/model") => {
+        _ if cmd.starts_with("/model") && !cmd.starts_with("/models") => {
             let arg = cmd.trim_start_matches("/model").trim();
             if arg.is_empty() {
+                let fav = if app.model_prefs.is_favorite(&app.model) { " ★" } else { "" };
                 app.push(ChatLine::Info(format!(
-                    "  provider: {}   model: {}",
-                    app.provider, app.model
+                    "  provider: {}   model: {}{}",
+                    app.provider, app.model, fav
                 )));
                 app.push(ChatLine::Info(
-                    "  tip: use /model <name> to switch, /fast for cheap, /smart for powerful".into(),
+                    "  tip: /models picker  /fast  /smart  /role <name>  /fav".into(),
                 ));
             } else {
                 let new_model = arg.to_string();
                 app.model = new_model.clone();
                 let _ = app.model_switch_tx.send(new_model.clone());
-                app.push(ChatLine::Info(format!(
-                    "  model switched to {}",
-                    new_model
-                )));
+                app.model_prefs.push_recent(&new_model);
+                app.model_prefs.save();
+                app.push(ChatLine::Info(format!("  model switched to {}", new_model)));
             }
+        }
+        "/models" => {
+            let models = app.known_models.clone();
+            if models.is_empty() {
+                app.push(ChatLine::Info(
+                    "  no models in pricing table — run `clido update-pricing` to populate".into(),
+                ));
+            } else {
+                app.model_picker = Some(ModelPickerState {
+                    models,
+                    filter: String::new(),
+                    selected: 0,
+                    scroll_offset: 0,
+                });
+            }
+        }
+        _ if cmd.starts_with("/role") => {
+            let role = cmd.trim_start_matches("/role").trim();
+            if role.is_empty() {
+                // Show all configured roles — clone first to avoid borrow conflict.
+                let mut roles: Vec<(String, String)> = app.config_roles
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                roles.sort_by(|a, b| a.0.cmp(&b.0));
+                let has_roles = !roles.is_empty() || !app.model_prefs.roles.is_empty();
+                if !has_roles {
+                    app.push(ChatLine::Info(
+                        "  no roles configured — add a [roles] section to config.toml".into(),
+                    ));
+                    app.push(ChatLine::Info(
+                        "  example:  fast = \"claude-haiku-4-5-20251001\"".into(),
+                    ));
+                } else {
+                    app.push(ChatLine::Info("  configured roles:".into()));
+                    for (name, model) in &roles {
+                        app.push(ChatLine::Info(format!("    {:12} → {}", name, model)));
+                    }
+                }
+            } else {
+                // Resolve: prefs override config.
+                let model_id = app.model_prefs.resolve_role(role)
+                    .map(|s| s.to_string())
+                    .or_else(|| app.config_roles.get(role).cloned());
+                match model_id {
+                    Some(id) => {
+                        app.model = id.clone();
+                        let _ = app.model_switch_tx.send(id.clone());
+                        app.model_prefs.push_recent(&id);
+                        app.model_prefs.save();
+                        app.push(ChatLine::Info(format!(
+                            "  role '{}' → model switched to {}",
+                            role, id
+                        )));
+                    }
+                    None => {
+                        app.push(ChatLine::Info(format!(
+                            "  role '{}' not found — use /role to list all configured roles",
+                            role
+                        )));
+                    }
+                }
+            }
+        }
+        "/fav" => {
+            let model_id = app.model.clone();
+            app.model_prefs.toggle_favorite(&model_id);
+            app.model_prefs.save();
+            // Rebuild model list with updated favorites.
+            let (pricing, _) = clido_core::load_pricing();
+            app.known_models = build_model_list(&pricing, &app.config_roles, &app.model_prefs);
+            let is_fav = app.model_prefs.is_favorite(&model_id);
+            let icon = if is_fav { "★" } else { "☆" };
+            app.push(ChatLine::Info(format!(
+                "  {} {} {}",
+                icon,
+                model_id,
+                if is_fav { "added to favorites" } else { "removed from favorites" }
+            )));
         }
         "/session" => {
             match &app.current_session_id {
@@ -2520,6 +2741,84 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         return;
     }
 
+    // ── Model picker (modal) ─────────────────────────────────────────────────
+    if app.model_picker.is_some() {
+        const VISIBLE: usize = 14;
+        match event.code {
+            Up => {
+                if let Some(picker) = &mut app.model_picker {
+                    let n = picker.filtered().len();
+                    if n > 0 && picker.selected > 0 {
+                        picker.selected -= 1;
+                        if picker.selected < picker.scroll_offset {
+                            picker.scroll_offset = picker.selected;
+                        }
+                    }
+                }
+            }
+            Down => {
+                if let Some(picker) = &mut app.model_picker {
+                    let n = picker.filtered().len();
+                    if n > 0 && picker.selected + 1 < n {
+                        picker.selected += 1;
+                        if picker.selected >= picker.scroll_offset + VISIBLE {
+                            picker.scroll_offset = picker.selected - VISIBLE + 1;
+                        }
+                    }
+                }
+            }
+            Enter => {
+                if let Some(picker) = app.model_picker.take() {
+                    let filtered = picker.filtered();
+                    if !filtered.is_empty() {
+                        let entry = filtered[picker.selected].clone();
+                        // Switch model.
+                        app.model = entry.id.clone();
+                        let _ = app.model_switch_tx.send(entry.id.clone());
+                        // Update recency.
+                        app.model_prefs.push_recent(&entry.id);
+                        app.model_prefs.save();
+                        app.push(ChatLine::Info(format!("  model switched to {}", entry.id)));
+                    }
+                }
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                if let Some(picker) = &mut app.model_picker {
+                    let filtered = picker.filtered();
+                    if !filtered.is_empty() {
+                        let model_id = filtered[picker.selected].id.clone();
+                        drop(filtered);
+                        app.model_prefs.toggle_favorite(&model_id);
+                        app.model_prefs.save();
+                        // Rebuild known_models with updated favorites.
+                        let (pricing, _) = clido_core::load_pricing();
+                        app.known_models = build_model_list(&pricing, &app.config_roles, &app.model_prefs);
+                        picker.models = app.known_models.clone();
+                        picker.clamp();
+                    }
+                }
+            }
+            Esc => {
+                app.model_picker = None;
+            }
+            KeyCode::Backspace => {
+                if let Some(picker) = &mut app.model_picker {
+                    picker.filter.pop();
+                    picker.clamp();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(picker) = &mut app.model_picker {
+                    picker.filter.push(c);
+                    picker.selected = 0;
+                    picker.scroll_offset = 0;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // ── Session picker (modal) ────────────────────────────────────────────────
     if app.session_picker.is_some() {
         const VISIBLE: usize = 12;
@@ -3137,6 +3436,71 @@ fn read_provider_model(cli: &Cli, workspace_root: &std::path::Path) -> (String, 
     (provider, model)
 }
 
+// ── Model list builder ────────────────────────────────────────────────────────
+
+/// Build the full sorted model list from the pricing table, roles config, and user prefs.
+/// Order: favorites → recent → rest (alphabetical by id within each group).
+fn build_model_list(
+    pricing: &clido_core::PricingTable,
+    roles: &std::collections::HashMap<String, String>,
+    prefs: &clido_core::ModelPrefs,
+) -> Vec<ModelEntry> {
+    use std::collections::HashMap;
+
+    // Invert roles map: model_id → role name (use first role found if multiple).
+    let mut model_to_role: HashMap<String, String> = HashMap::new();
+    for (role, model_id) in roles {
+        model_to_role.entry(model_id.clone()).or_insert_with(|| role.clone());
+    }
+    for (role, model_id) in &prefs.roles {
+        model_to_role.entry(model_id.clone()).or_insert_with(|| role.clone());
+    }
+
+    // Build all entries from the pricing table.
+    let mut all: Vec<ModelEntry> = pricing
+        .models
+        .values()
+        .map(|e| ModelEntry {
+            id: e.name.clone(),
+            provider: e.provider.clone(),
+            input_mtok: e.input_per_mtok,
+            output_mtok: e.output_per_mtok,
+            context_k: e.context_window.map(|w| w / 1000),
+            role: model_to_role.get(&e.name).cloned(),
+            is_favorite: prefs.is_favorite(&e.name),
+        })
+        .collect();
+
+    all.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Partition into three groups.
+    let mut favorites: Vec<ModelEntry> = all.iter().filter(|m| m.is_favorite).cloned().collect();
+    let recent_ids: Vec<&str> = prefs.recent.iter().map(|s| s.as_str()).collect();
+    let mut recent: Vec<ModelEntry> = recent_ids
+        .iter()
+        .filter_map(|id| all.iter().find(|m| m.id == *id && !m.is_favorite))
+        .cloned()
+        .collect();
+    let fav_or_recent: std::collections::HashSet<&str> = favorites
+        .iter()
+        .chain(recent.iter())
+        .map(|m| m.id.as_str())
+        .collect();
+    let mut rest: Vec<ModelEntry> = all
+        .iter()
+        .filter(|m| !fav_or_recent.contains(m.id.as_str()))
+        .cloned()
+        .collect();
+
+    favorites.sort_by(|a, b| a.id.cmp(&b.id));
+    rest.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut out = favorites;
+    out.append(&mut recent);
+    out.append(&mut rest);
+    out
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
@@ -3214,7 +3578,23 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
     let mut terminal = Terminal::new(backend)?;
 
     let plan_dry_run = cli.plan_dry_run;
-    let mut app = App::new(prompt_tx, resume_tx, model_switch_tx, compact_now_tx, cancel, provider, model, workspace_root.clone(), notify_enabled, image_state, plan_dry_run);
+
+    // Build model list from pricing table + loaded config (for the /models picker).
+    let (pricing_table, _) = clido_core::load_pricing();
+    let model_prefs = clido_core::ModelPrefs::load();
+    let (config_roles, known_models) = {
+        let roles = clido_core::load_config(&workspace_root)
+            .map(|c| c.roles.as_map())
+            .unwrap_or_default();
+        let models = build_model_list(&pricing_table, &roles, &model_prefs);
+        (roles, models)
+    };
+
+    let mut app = App::new(
+        prompt_tx, resume_tx, model_switch_tx, compact_now_tx, cancel,
+        provider, model, workspace_root.clone(), notify_enabled, image_state, plan_dry_run,
+        known_models, model_prefs, config_roles,
+    );
     let result = event_loop(&mut app, &mut terminal, &mut event_rx, &mut perm_rx).await;
 
     let _ = disable_raw_mode();

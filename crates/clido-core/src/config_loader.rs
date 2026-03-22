@@ -121,6 +121,49 @@ pub struct WorkflowsSection {
     pub directory: String,
 }
 
+/// Maps role names to model IDs. Built-in roles: fast, reasoning, critic, planner.
+/// Arbitrary extra roles can be added freely.
+///
+/// Example in config.toml:
+/// ```toml
+/// [roles]
+/// fast      = "claude-haiku-4-5-20251001"
+/// reasoning = "claude-opus-4-6"
+/// critic    = "claude-opus-4-6"
+/// planner   = "claude-sonnet-4-6"
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RolesSection {
+    /// Fast, cheap model for quick tasks.
+    #[serde(default)]
+    pub fast: Option<String>,
+    /// High-quality reasoning model.
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// Evaluation / critique model.
+    #[serde(default)]
+    pub critic: Option<String>,
+    /// Task decomposition / planning model.
+    #[serde(default)]
+    pub planner: Option<String>,
+    /// Arbitrary user-defined roles.
+    #[serde(flatten)]
+    pub extra: HashMap<String, String>,
+}
+
+impl RolesSection {
+    /// Return all roles as a flat map of name → model ID.
+    pub fn as_map(&self) -> HashMap<String, String> {
+        let mut map = self.extra.clone();
+        if let Some(m) = &self.fast { map.insert("fast".into(), m.clone()); }
+        if let Some(m) = &self.reasoning { map.insert("reasoning".into(), m.clone()); }
+        if let Some(m) = &self.critic { map.insert("critic".into(), m.clone()); }
+        if let Some(m) = &self.planner { map.insert("planner".into(), m.clone()); }
+        map
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct IndexSection {
@@ -155,6 +198,8 @@ pub struct ConfigFile {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub index: IndexSection,
+    #[serde(default)]
+    pub roles: RolesSection,
 }
 
 fn default_default_profile() -> String {
@@ -172,6 +217,7 @@ pub struct LoadedConfig {
     pub workflows: WorkflowsSection,
     pub hooks: HooksConfig,
     pub index: IndexSection,
+    pub roles: RolesSection,
 }
 
 impl LoadedConfig {
@@ -322,6 +368,7 @@ fn merge(base: ConfigFile, later: ConfigFile) -> ConfigFile {
         workflows,
         hooks,
         index,
+        roles: later.roles,
     }
 }
 
@@ -336,6 +383,7 @@ pub fn load_config(cwd: &Path) -> Result<LoadedConfig> {
         workflows: WorkflowsSection::default(),
         hooks: HooksConfig::default(),
         index: IndexSection::default(),
+        roles: RolesSection::default(),
     };
 
     if let Some(path) = global_config_path() {
@@ -372,6 +420,7 @@ pub fn load_config(cwd: &Path) -> Result<LoadedConfig> {
         workflows: merged.workflows,
         hooks: merged.hooks,
         index: merged.index,
+        roles: merged.roles,
     })
 }
 

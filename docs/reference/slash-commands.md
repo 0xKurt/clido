@@ -19,8 +19,11 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | Command | Description | Example | Notes |
 |---------|-------------|---------|-------|
 | `/model [name]` | Show or switch the active model | `/model claude-opus-4-6` | Switches immediately; reverts after session ends |
-| `/fast` | Switch to the fast (cheap) model | `/fast` | `claude-haiku-4-5-20251001` |
-| `/smart` | Switch to the smart (powerful) model | `/smart` | `claude-opus-4-6` |
+| `/models` | Open the interactive model picker overlay | `/models` | Live type-to-filter; shows pricing, context window, and role assignments |
+| `/fast` | Switch to the fast (cheap) model | `/fast` | Uses `[roles] fast` from config, falls back to `claude-haiku-4-5-20251001` |
+| `/smart` | Switch to the smart (powerful) model | `/smart` | Uses `[roles] reasoning` from config, falls back to `claude-opus-4-6` |
+| `/role <name>` | Switch to the model assigned to a role | `/role critic` | Roles defined in `[roles]` config or user model prefs |
+| `/fav` | Toggle current model in/out of favorites | `/fav` | Favorites shown with ★ in the model picker and `/model` output |
 
 ### Context
 
@@ -86,6 +89,36 @@ Press Enter to execute. Commands that produce output render it as a system messa
   • Auth module was refactored to use tower-service (2026-03-10)
   • AuthError variants: Expired, Invalid, MissingToken (2026-03-08)
 ```
+
+## Model picker
+
+`/models` opens a searchable overlay listing all models known to clido:
+
+```
+╭─ Models ─────────────────────────────────────────────────────────────────────╮
+│  Filter: _                                                                     │
+│                                                                                │
+│  ★  claude-haiku-4-5-20251001      anthropic   0.80   4.00  200k  fast        │
+│  ★  claude-opus-4-6                anthropic  15.00  75.00  200k  reasoning   │
+│  >  claude-sonnet-4-6              anthropic   3.00  15.00  200k              │
+│     gpt-4o                         openai      2.50  10.00  128k              │
+│     mistralai/mistral-large        openrouter  2.00   6.00   32k              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  ↑/↓ navigate  Enter select  f favorite  Escape cancel  Type to filter
+```
+
+Columns: ★ (favorited), model ID, provider, in$/mtok, out$/mtok, context window, role.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move selection |
+| `Enter` | Switch to the selected model |
+| `f` | Toggle favorite on the highlighted model |
+| `Escape` | Close the picker without switching |
+| Any text | Live-filter models by ID or provider |
+| `Backspace` | Delete last filter character |
+
+Models are ordered: favorites (alphabetical) → recently used → rest (alphabetical).
 
 ## Session picker
 
