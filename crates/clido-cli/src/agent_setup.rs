@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::cli::Cli;
 use crate::errors::CliError;
+use crate::git_context::GitContext;
 use crate::provider::{make_provider, StdinAskUser};
 
 pub struct AgentSetup {
@@ -64,6 +65,29 @@ impl AgentSetup {
             cli.max_parallel_tools,
         )
         .map_err(|e| CliError::Usage(e.to_string()))?;
+
+        // Inject project rules into system prompt
+        let rules_file_path = cli
+            .rules_file
+            .as_deref()
+            .or_else(|| config.rules_file.as_ref().map(|s| Path::new(s.as_str())));
+        let rules = clido_context::load_and_assemble_rules(
+            workspace_root,
+            cli.no_rules || config.no_rules,
+            rules_file_path,
+        );
+        if !rules.is_empty() {
+            if let Some(ref mut sp) = config.system_prompt {
+                *sp = format!("{}\n\n{}", rules, sp);
+            }
+        }
+
+        // Inject git context into the system prompt if the working directory is a git repo.
+        if let Some(git_ctx) = GitContext::discover(workspace_root) {
+            if let Some(ref mut sp) = config.system_prompt {
+                *sp = format!("{}\n\n{}", sp, git_ctx.to_prompt_section());
+            }
+        }
 
         if config.max_context_tokens.is_none() {
             if let Some(entry) = pricing_table.models.get(&config.model) {
@@ -190,6 +214,7 @@ pub fn parse_permission_mode(s: Option<&str>) -> PermissionMode {
     match s {
         Some("plan") | Some("plan-only") => PermissionMode::PlanOnly,
         Some("accept-all") => PermissionMode::AcceptAll,
+        Some("diff-review") => PermissionMode::DiffReview,
         _ => PermissionMode::Default,
     }
 }

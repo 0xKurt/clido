@@ -3,9 +3,10 @@
 use std::path::Path;
 
 use anyhow::Context as AnyhowContext;
+use glob::Pattern;
+use ignore::WalkBuilder;
 use regex::Regex;
 use rusqlite::{Connection, params};
-use walkdir::WalkDir;
 
 /// A file entry in the index.
 #[derive(Debug, Clone)]
@@ -23,6 +24,36 @@ pub struct SymbolEntry {
     /// One of: "fn", "async_fn", "struct", "enum", "impl", "trait", "const", "mod", "type"
     pub kind: String,
     pub line: u32,
+}
+
+/// Statistics returned after a build.
+#[derive(Debug, Clone, Default)]
+pub struct BuildStats {
+    /// Number of files that were indexed (matched extension filter and not excluded).
+    pub indexed: u64,
+    /// Number of file entries skipped due to ignore rules or exclude patterns.
+    pub skipped: u64,
+}
+
+/// Options for `RepoIndex::build`.
+#[derive(Debug, Clone)]
+pub struct BuildOptions {
+    /// File extensions to include (empty = all extensions).
+    pub extensions: Vec<String>,
+    /// Glob patterns to exclude (e.g. `["*.lock", "vendor/**"]`).
+    pub exclude_patterns: Vec<String>,
+    /// When `true`, `.gitignore`, global git ignore, and `.clido-ignore` are all bypassed.
+    pub include_ignored: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            extensions: Vec::new(),
+            exclude_patterns: Vec::new(),
+            include_ignored: false,
+        }
+    }
 }
 
 /// SQLite-backed repository index for files and symbols.
@@ -60,20 +91,57 @@ impl RepoIndex {
 
     /// Walk `root`, index all files matching `extensions`, extract symbols.
     /// Returns the number of files indexed.
+    ///
+    /// This is the legacy convenience wrapper; prefer `build_with_options` for full control.
     pub fn build(&mut self, root: &Path, extensions: &[&str]) -> anyhow::Result<usize> {
+        let opts = BuildOptions {
+            extensions: extensions.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let stats = self.build_with_options(root, &opts)?;
+        Ok(stats.indexed as usize)
+    }
+
+    /// Walk `root` and index files according to `opts`. Returns `BuildStats`.
+    pub fn build_with_options(
+        &mut self,
+        root: &Path,
+        opts: &BuildOptions,
+    ) -> anyhow::Result<BuildStats> {
         // Clear existing data
         self.db.execute_batch("DELETE FROM symbols; DELETE FROM files;")?;
 
+        // Pre-compile glob exclude patterns for performance.
+        let compiled_excludes: Vec<Pattern> = opts
+            .exclude_patterns
+            .iter()
+            .filter_map(|p| Pattern::new(p).ok())
+            .collect();
+
         let symbol_re = build_symbol_regex();
-        let mut count = 0usize;
+        let mut stats = BuildStats::default();
+
+        // Build the walker. Always show hidden files so dot-directories are traversed,
+        // but apply gitignore rules unless `include_ignored` is set.
+        let mut builder = WalkBuilder::new(root);
+        builder.hidden(false);
+
+        if opts.include_ignored {
+            builder
+                .git_ignore(false)
+                .git_global(false)
+                .git_exclude(false);
+        } else {
+            builder
+                .git_ignore(true)
+                .git_global(true)
+                .git_exclude(true)
+                .add_custom_ignore_filename(".clido-ignore");
+        }
 
         let tx = self.db.transaction()?;
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
+        for entry in builder.build().filter_map(|e| e.ok()) {
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
                 continue;
             }
             let path = entry.path();
@@ -82,15 +150,29 @@ impl RepoIndex {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_string();
-            if !extensions.is_empty() && !extensions.contains(&ext.as_str()) {
+
+            // Extension filter
+            if !opts.extensions.is_empty() && !opts.extensions.iter().any(|e| e == &ext) {
+                stats.skipped += 1;
                 continue;
             }
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+
             let rel_path = path
                 .strip_prefix(root)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
+
+            // Exclude pattern filter
+            if compiled_excludes
+                .iter()
+                .any(|p| p.matches(&rel_path) || p.matches(path.to_string_lossy().as_ref()))
+            {
+                stats.skipped += 1;
+                continue;
+            }
+
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
 
             tx.execute(
                 "INSERT OR REPLACE INTO files (path, size, ext) VALUES (?1, ?2, ?3)",
@@ -126,12 +208,12 @@ impl RepoIndex {
                     )?;
                 }
             }
-            count += 1;
+            stats.indexed += 1;
         }
         // Rebuild FTS
         tx.execute_batch("INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild');")?;
         tx.commit()?;
-        Ok(count)
+        Ok(stats)
     }
 
     /// Search files by path pattern (SQL LIKE).
@@ -344,5 +426,137 @@ mod tests {
         let mut idx = RepoIndex::open(db_file.path()).unwrap();
         let count = idx.build(dir.path(), &["rs"]).unwrap();
         assert_eq!(count, 1); // Only Rust file
+    }
+
+    // -----------------------------------------------------------------------
+    // gitignore-aware tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_skips_gitignored_files() {
+        let dir = tempdir().unwrap();
+
+        // Initialize a git repository so that .gitignore is respected by the walker.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Create a .gitignore that ignores the target/ directory
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+
+        // Create a file that should be indexed
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        // Create a file inside target/ that should be skipped
+        let target_dir = dir.path().join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("output.rs"), "fn generated() {}").unwrap();
+
+        let db_file = NamedTempFile::new().unwrap();
+        let mut idx = RepoIndex::open(db_file.path()).unwrap();
+
+        let opts = BuildOptions {
+            extensions: vec!["rs".to_string()],
+            include_ignored: false,
+            ..Default::default()
+        };
+        let stats = idx.build_with_options(dir.path(), &opts).unwrap();
+
+        // Only main.rs should be indexed; target/output.rs should be skipped by gitignore
+        assert_eq!(stats.indexed, 1, "Only main.rs should be indexed");
+        let results = idx.search_files("output").unwrap();
+        assert!(results.is_empty(), "target/output.rs should not be in index");
+    }
+
+    #[test]
+    fn test_build_respects_clido_ignore() {
+        let dir = tempdir().unwrap();
+
+        // Create a .clido-ignore that ignores *.snap files
+        fs::write(dir.path().join(".clido-ignore"), "*.snap\n").unwrap();
+
+        // Create files
+        fs::write(dir.path().join("lib.rs"), "fn lib_fn() {}").unwrap();
+        fs::write(dir.path().join("snapshot.snap"), "snapshot data").unwrap();
+
+        let db_file = NamedTempFile::new().unwrap();
+        let mut idx = RepoIndex::open(db_file.path()).unwrap();
+
+        // Index both rs and snap extensions so the extension filter doesn't hide the snap file
+        let opts = BuildOptions {
+            extensions: vec!["rs".to_string(), "snap".to_string()],
+            include_ignored: false,
+            ..Default::default()
+        };
+        let stats = idx.build_with_options(dir.path(), &opts).unwrap();
+
+        // snapshot.snap should be skipped by .clido-ignore
+        assert_eq!(stats.indexed, 1, "Only lib.rs should be indexed");
+        let snap_results = idx.search_files("snapshot").unwrap();
+        assert!(snap_results.is_empty(), "snapshot.snap should be excluded by .clido-ignore");
+    }
+
+    #[test]
+    fn test_include_ignored_bypasses_gitignore() {
+        let dir = tempdir().unwrap();
+
+        // Initialize a git repository so that .gitignore would normally be respected.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Create a .gitignore that ignores target/
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+
+        // Create main.rs and a target/ file
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        let target_dir = dir.path().join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("output.rs"), "fn generated() {}").unwrap();
+
+        let db_file = NamedTempFile::new().unwrap();
+        let mut idx = RepoIndex::open(db_file.path()).unwrap();
+
+        let opts = BuildOptions {
+            extensions: vec!["rs".to_string()],
+            include_ignored: true,
+            ..Default::default()
+        };
+        let stats = idx.build_with_options(dir.path(), &opts).unwrap();
+
+        // Both files should be indexed since gitignore is bypassed
+        assert_eq!(stats.indexed, 2, "Both files should be indexed with include_ignored=true");
+        let results = idx.search_files("output").unwrap();
+        assert_eq!(results.len(), 1, "target/output.rs should be in index when include_ignored=true");
+    }
+
+    #[test]
+    fn test_exclude_patterns_applied() {
+        let dir = tempdir().unwrap();
+
+        // Create various files
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        fs::write(dir.path().join("Cargo.lock"), "# lockfile content").unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+
+        let db_file = NamedTempFile::new().unwrap();
+        let mut idx = RepoIndex::open(db_file.path()).unwrap();
+
+        let opts = BuildOptions {
+            // No extension filter — index everything
+            extensions: vec![],
+            exclude_patterns: vec!["*.lock".to_string()],
+            include_ignored: false,
+        };
+        let stats = idx.build_with_options(dir.path(), &opts).unwrap();
+
+        // Cargo.lock should be excluded; main.rs and Cargo.toml should be indexed
+        let lock_results = idx.search_files("Cargo.lock").unwrap();
+        assert!(lock_results.is_empty(), "Cargo.lock should be excluded by exclude_patterns");
+        assert!(stats.indexed >= 2, "main.rs and Cargo.toml should be indexed");
     }
 }

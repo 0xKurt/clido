@@ -11,6 +11,7 @@ members = [
   "crates/clido-agent",
   "crates/clido-workflows",
   "crates/clido-cli",
+  "crates/clido-checkpoint",
 ]
 resolver = "2"
 
@@ -45,3 +46,4 @@ libc = "0.2"
 clap_complete = "4"
 clap_mangen = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }
+base64 = "0.22"

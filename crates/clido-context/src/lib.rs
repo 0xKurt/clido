@@ -1,8 +1,20 @@
 //! Context assembly and token budget: truncate or compact history to fit model context.
 
 pub mod read_cache;
+pub mod rules;
+
+pub use rules::{assemble_rules_prompt, discover as discover_rules, RulesFile};
 
 use clido_core::{ClidoError, ContentBlock, Message, Result};
+
+/// Discover rules files, assemble them into a prompt string, and return it.
+/// This is the main entry point for the rules feature.
+///
+/// Returns an empty string if no rules files are found or `no_rules` is true.
+pub fn load_and_assemble_rules(cwd: &std::path::Path, no_rules: bool, rules_file: Option<&std::path::Path>) -> String {
+    let files = rules::discover(cwd, no_rules, rules_file);
+    rules::assemble_rules_prompt(&files)
+}
 
 /// Default max context tokens when not set in config or pricing.
 pub const DEFAULT_MAX_CONTEXT_TOKENS: u32 = 200_000;
@@ -43,6 +55,7 @@ fn estimate_tokens_block(b: &ContentBlock) -> u32 {
             ..
         } => 4 + estimate_tokens_str(tool_use_id) + estimate_tokens_str(content),
         ContentBlock::Thinking { thinking } => estimate_tokens_str(thinking),
+        ContentBlock::Image { .. } => 85, // rough token estimate for an image block
     }
 }
 

@@ -25,6 +25,7 @@ pub async fn run_doctor() -> Result<(), anyhow::Error> {
     check_config_permissions(use_color, &mut warnings);
     check_session_dir(&cwd, use_color, &mut mandatory);
     check_pricing(use_color, &mut warnings);
+    check_rules_files(&cwd, use_color, &mut warnings);
 
     if !mandatory.is_empty() {
         for m in &mandatory {
@@ -232,6 +233,35 @@ fn check_config_permissions(use_color: bool, warnings: &mut Vec<String>) {
     {
         let _ = use_color;
         let _ = warnings;
+    }
+}
+
+fn check_rules_files(cwd: &std::path::Path, use_color: bool, warnings: &mut Vec<String>) {
+    let files = clido_context::discover_rules(cwd, false, None);
+    if files.is_empty() {
+        print_info(
+            use_color,
+            "Rules files: none found (create CLIDO.md in project root)",
+        );
+    } else {
+        for f in &files {
+            let char_count = f.content.chars().count();
+            print_ok(
+                use_color,
+                &format!(
+                    "Rules files: {} ({} chars)",
+                    f.path.display(),
+                    char_count
+                ),
+            );
+            if char_count > 8000 {
+                warnings.push(format!(
+                    "Rules file is large ({} chars) — may inflate token costs: {}",
+                    char_count,
+                    f.path.display()
+                ));
+            }
+        }
     }
 }
 

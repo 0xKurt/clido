@@ -10,6 +10,8 @@ pub enum PermissionMode {
     Default,
     AcceptAll,
     PlanOnly,
+    /// Show a diff preview modal before every Write and Edit operation.
+    DiffReview,
 }
 
 /// Agent-level configuration.
@@ -38,6 +40,12 @@ pub struct AgentConfig {
     /// Max parallel tool calls for read-only tools (bounded concurrency). Default 4.
     #[serde(default = "default_max_parallel_tools")]
     pub max_parallel_tools: u32,
+    /// Skip all CLIDO.md / rules file injection.
+    #[serde(default)]
+    pub no_rules: bool,
+    /// Use a specific rules file instead of the standard hierarchical lookup.
+    #[serde(default)]
+    pub rules_file: Option<String>,
 }
 
 fn default_max_parallel_tools() -> u32 {
@@ -58,6 +66,8 @@ impl Default for AgentConfig {
             compaction_threshold: None,
             quiet: false,
             max_parallel_tools: 4,
+            no_rules: false,
+            rules_file: None,
         }
     }
 }

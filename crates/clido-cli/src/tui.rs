@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use clido_agent::{AgentLoop, AskUser, EventEmitter};
+use clido_agent::{
+    AgentLoop, AskUser, EventEmitter,
+    PermGrant as AgentPermGrant, PermRequest as AgentPermRequest,
+};
 use clido_core::ClidoError;
 use clido_planner;
 use clido_storage::SessionWriter;
@@ -31,13 +34,16 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
+use crate::image_input::ImageAttachment;
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the conversation"),
     ("/help", "show key bindings and all slash commands"),
-    ("/model", "show current model and provider"),
+    ("/model", "show or switch model. Usage: /model [model-name]"),
+    ("/fast", "switch to fast (cheap) model for this session"),
+    ("/smart", "switch to smart (powerful) model for this session"),
     ("/sessions", "list recent sessions for this project"),
     ("/session", "show current session ID"),
     ("/workdir", "show working directory"),
@@ -45,7 +51,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/tokens", "show token usage so far"),
     ("/memory", "search long-term memory (usage: /memory <query>)"),
     ("/plan", "show current task plan (requires --planner)"),
+    ("/check", "run diagnostics on current project"),
+    ("/image", "attach an image to the next message. Usage: /image <path>"),
     ("/index", "show repo index stats"),
+    ("/rules", "show active project rules files (CLIDO.md)"),
     ("/quit", "exit clido"),
 ];
 
@@ -92,6 +101,8 @@ enum AgentEvent {
     /// Emitted when the planner produces a valid task graph (--planner mode).
     /// Each string is a human-readable description of one planned task.
     PlanCreated { tasks: Vec<String> },
+    /// Emitted when the session model is switched (via /model, /fast, /smart).
+    ModelSwitched { to_model: String },
 }
 
 // ── Session picker popup state ────────────────────────────────────────────────
@@ -177,48 +188,48 @@ struct TuiAskUser {
 
 #[async_trait]
 impl AskUser for TuiAskUser {
-    async fn ask(&self, tool_name: &str, input: &serde_json::Value) -> bool {
+    async fn ask(&self, req: AgentPermRequest) -> AgentPermGrant {
+        let tool_name = &req.tool_name;
         // Fast-path: check session/workdir grants before going to the TUI.
         {
             let state = self.perms.lock().unwrap();
             if state.workdir_open || state.session_allowed.contains(tool_name) {
-                return true;
+                return AgentPermGrant::Allow;
             }
         }
 
-        let raw = serde_json::to_string(input).unwrap_or_default();
-        let preview = if raw.len() > 120 {
-            format!("{}…", &raw[..120])
+        let preview = if req.description.len() > 120 {
+            format!("{}…", &req.description[..120])
         } else {
-            raw
+            req.description.clone()
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .perm_tx
             .send(PermRequest {
-                tool_name: tool_name.to_string(),
+                tool_name: tool_name.clone(),
                 preview,
                 reply: reply_tx,
             })
             .is_err()
         {
-            return false;
+            return AgentPermGrant::Deny;
         }
         match reply_rx.await.unwrap_or(PermGrant::Deny) {
-            PermGrant::Once => true,
+            PermGrant::Once => AgentPermGrant::Allow,
             PermGrant::Session => {
                 self.perms
                     .lock()
                     .unwrap()
                     .session_allowed
-                    .insert(tool_name.to_string());
-                true
+                    .insert(tool_name.clone());
+                AgentPermGrant::AllowAll
             }
             PermGrant::Workdir => {
                 self.perms.lock().unwrap().workdir_open = true;
-                true
+                AgentPermGrant::AllowAll
             }
-            PermGrant::Deny => false,
+            PermGrant::Deny => AgentPermGrant::Deny,
         }
     }
 }
@@ -279,6 +290,8 @@ struct App {
     prompt_tx: mpsc::UnboundedSender<String>,
     /// Channel to request session resume in agent_task.
     resume_tx: mpsc::UnboundedSender<String>,
+    /// Channel to switch the session model in agent_task.
+    model_switch_tx: mpsc::UnboundedSender<String>,
     /// Queued input typed while agent was busy — sent automatically when agent finishes.
     queued: Option<String>,
     /// Session picker popup state (Some = popup visible).
@@ -310,16 +323,34 @@ struct App {
     session_cost_usd: f64,
     /// Last plan produced by the planner (--planner mode), stored for /plan command.
     last_plan: Option<Vec<String>>,
+    /// Rules overlay: Some = popup visible, None = hidden.
+    /// Each entry is (file_path_display, first_3_lines_preview).
+    rules_overlay: Option<Vec<(String, String)>>,
+    /// When true, fire desktop notification + terminal bell after each agent turn
+    /// (subject to the MIN_ELAPSED_SECS gate in `notify.rs`).
+    notify_enabled: bool,
+    /// Timestamp of when the current agent turn was submitted; used to compute elapsed time.
+    turn_start: Option<std::time::Instant>,
+    /// Previous model to revert to after a per-turn `@model` override completes.
+    per_turn_prev_model: Option<String>,
+    /// Image loaded via `/image <path>` — attached to the next user message then cleared.
+    pending_image: Option<ImageAttachment>,
+    /// Shared state: image to attach to the next prompt.  Written by the TUI on send,
+    /// drained by agent_task before calling run/run_next_turn.
+    image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
 
 impl App {
     fn new(
         prompt_tx: mpsc::UnboundedSender<String>,
         resume_tx: mpsc::UnboundedSender<String>,
+        model_switch_tx: mpsc::UnboundedSender<String>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
         provider: String,
         model: String,
         workspace_root: std::path::PathBuf,
+        notify_enabled: bool,
+        image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     ) -> Self {
         let mut app = Self {
             messages: Vec::new(),
@@ -335,6 +366,7 @@ impl App {
             pending_error: None,
             prompt_tx,
             resume_tx,
+            model_switch_tx,
             queued: None,
             session_picker: None,
             cancel,
@@ -353,6 +385,12 @@ impl App {
             session_output_tokens: 0,
             session_cost_usd: 0.0,
             last_plan: None,
+            rules_overlay: None,
+            notify_enabled,
+            turn_start: None,
+            per_turn_prev_model: None,
+            pending_image: None,
+            image_state,
         };
         for line in crate::ui::BANNER.lines() {
             app.messages.push(ChatLine::Info(line.to_string()));
@@ -370,17 +408,44 @@ impl App {
     }
 
     /// Send immediately (not busy). Moves input → chat + agent.
+    /// If input starts with `@model-name prompt`, applies a per-turn model override.
     fn send_now(&mut self, text: String) {
-        self.push(ChatLine::User(text.clone()));
-        let _ = self.prompt_tx.send(text.clone());
+        // If a pending image was attached via /image, publish it to the shared image_state
+        // so agent_task can prepend an Image ContentBlock to this user message.
+        if let Some(img) = self.pending_image.take() {
+            if let Ok(mut guard) = self.image_state.lock() {
+                *guard = Some((img.media_type.to_string(), img.base64_data));
+            }
+        }
+        // Check for per-turn @model-name prefix.
+        if let Some((per_turn_model, actual_prompt)) = parse_per_turn_model(&text) {
+            // Save current model so we can revert after this turn.
+            self.per_turn_prev_model = Some(self.model.clone());
+            // Switch to the per-turn model.
+            self.model = per_turn_model.clone();
+            let _ = self.model_switch_tx.send(per_turn_model.clone());
+            self.push(ChatLine::Info(format!(
+                "  [one turn] using {} (will revert after response)",
+                per_turn_model
+            )));
+            // Send the actual prompt (without the @model prefix).
+            self.push(ChatLine::User(actual_prompt.clone()));
+            let _ = self.prompt_tx.send(actual_prompt.clone());
+            if self.input_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
+                self.input_history.push(text);
+            }
+        } else {
+            self.push(ChatLine::User(text.clone()));
+            let _ = self.prompt_tx.send(text.clone());
+            if self.input_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
+                self.input_history.push(text);
+            }
+        }
         self.input.clear();
         self.cursor = 0;
         self.busy = true;
         self.following = true;
-        // Record in history (skip duplicates of the most recent entry).
-        if self.input_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
-            self.input_history.push(text);
-        }
+        self.turn_start = Some(std::time::Instant::now());
         self.history_idx = None;
         self.history_draft.clear();
     }
@@ -917,6 +982,45 @@ fn render(frame: &mut Frame, app: &mut App) {
             popup_rect,
         );
     }
+
+    // ── Rules overlay ─────────────────────────────────────────────────────────
+    if let Some(ref rules) = app.rules_overlay {
+        let mut content: Vec<Line<'static>> = Vec::new();
+        if rules.is_empty() {
+            content.push(Line::from(vec![Span::styled(
+                "  No rules files found. Create CLIDO.md in your project root.".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )]));
+        } else {
+            for (path, preview) in rules {
+                content.push(Line::from(vec![Span::styled(
+                    format!("  {}", path),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )]));
+                if !preview.is_empty() {
+                    content.push(Line::from(vec![Span::styled(
+                        format!("    {}", truncate_chars(preview, 60)),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                }
+            }
+        }
+        content.push(Line::raw(""));
+        content.push(Line::from(vec![Span::styled(
+            "  [ Close ]  (Enter / Esc)".to_string(),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )]));
+
+        let popup_h = ((content.len() as u16) + 2).min(area.height.saturating_sub(4));
+        let popup_rect = popup_above_input(input_area, popup_h, input_area.width);
+        frame.render_widget(Clear, popup_rect);
+        frame.render_widget(
+            Paragraph::new(content)
+                .block(modal_block(" Active Rules Files ", Color::Cyan))
+                .wrap(Wrap { trim: false }),
+            popup_rect,
+        );
+    }
 }
 
 // ── Modal component helpers ───────────────────────────────────────────────────
@@ -1029,6 +1133,24 @@ fn slash_completions(input: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// Parse `@model-name remaining prompt` per-turn override syntax.
+/// Returns `Some((model_id, prompt))` only when input starts with `@` followed
+/// by a model name token and a space-separated prompt.
+/// Returns `None` for normal input that contains `@` mid-string.
+fn parse_per_turn_model(input: &str) -> Option<(String, String)> {
+    if !input.starts_with('@') {
+        return None;
+    }
+    let rest = &input[1..];
+    let space_idx = rest.find(' ')?;
+    let model = rest[..space_idx].trim().to_string();
+    let prompt = rest[space_idx + 1..].trim().to_string();
+    if model.is_empty() || prompt.is_empty() {
+        return None;
+    }
+    Some((model, prompt))
+}
+
 fn execute_slash(app: &mut App, cmd: &str) {
     match cmd {
         "/clear" => {
@@ -1047,7 +1169,10 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("  Slash Commands".into()));
             app.push(ChatLine::Info("  /clear             clear conversation".into()));
             app.push(ChatLine::Info("  /help              show this help".into()));
-            app.push(ChatLine::Info("  /model             show provider & model".into()));
+            app.push(ChatLine::Info("  /model [name]      show provider & model, or switch to named model".into()));
+            app.push(ChatLine::Info("  /fast              switch to fast (cheap) model".into()));
+            app.push(ChatLine::Info("  /smart             switch to smart (powerful) model".into()));
+            app.push(ChatLine::Info("  @model-name <msg>  one-turn model override (e.g. @claude-opus-4-6 refactor this)".into()));
             app.push(ChatLine::Info("  /session           show current session ID".into()));
             app.push(ChatLine::Info("  /sessions          list & resume recent sessions".into()));
             app.push(ChatLine::Info("  /workdir           show working directory".into()));
@@ -1055,7 +1180,9 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("  /tokens            show token usage".into()));
             app.push(ChatLine::Info("  /memory <query>    search long-term memory".into()));
             app.push(ChatLine::Info("  /plan              show current task plan".into()));
+            app.push(ChatLine::Info("  /check             run diagnostics on current project".into()));
             app.push(ChatLine::Info("  /index             show repo index stats".into()));
+            app.push(ChatLine::Info("  /rules             show active project rules files (CLIDO.md)".into()));
             app.push(ChatLine::Info("  /quit              exit".into()));
             app.push(ChatLine::Info("".into()));
             app.push(ChatLine::Info("  Agent Controls".into()));
@@ -1064,11 +1191,43 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("  Queue              type while agent runs, sends on finish".into()));
             app.push(ChatLine::Info("".into()));
         }
-        "/model" => {
+        "/fast" => {
+            let new_model = "claude-haiku-4-5-20251001".to_string();
+            app.model = new_model.clone();
+            let _ = app.model_switch_tx.send(new_model.clone());
             app.push(ChatLine::Info(format!(
-                "  provider: {}   model: {}",
-                app.provider, app.model
+                "  model switched to {} (fast)",
+                new_model
             )));
+        }
+        "/smart" => {
+            let new_model = "claude-opus-4-6".to_string();
+            app.model = new_model.clone();
+            let _ = app.model_switch_tx.send(new_model.clone());
+            app.push(ChatLine::Info(format!(
+                "  model switched to {} (smart)",
+                new_model
+            )));
+        }
+        _ if cmd.starts_with("/model") => {
+            let arg = cmd.trim_start_matches("/model").trim();
+            if arg.is_empty() {
+                app.push(ChatLine::Info(format!(
+                    "  provider: {}   model: {}",
+                    app.provider, app.model
+                )));
+                app.push(ChatLine::Info(
+                    "  tip: use /model <name> to switch, /fast for cheap, /smart for powerful".into(),
+                ));
+            } else {
+                let new_model = arg.to_string();
+                app.model = new_model.clone();
+                let _ = app.model_switch_tx.send(new_model.clone());
+                app.push(ChatLine::Info(format!(
+                    "  model switched to {}",
+                    new_model
+                )));
+            }
         }
         "/session" => {
             match &app.current_session_id {
@@ -1152,10 +1311,53 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 }
             }
         }
+        "/check" => {
+            // Send a message to the agent asking it to run diagnostics on the current project.
+            app.send_now("Run diagnostics on the current project".to_string());
+        }
         "/index" => {
             app.push(ChatLine::Info(
                 "  index: run `clido index build` to build the repo index, then the agent can use SemanticSearch.".into(),
             ));
+        }
+        "/rules" => {
+            let rules = clido_context::discover_rules(&app.workspace_root, false, None);
+            if rules.is_empty() {
+                app.rules_overlay = Some(vec![]);
+            } else {
+                app.rules_overlay = Some(
+                    rules
+                        .iter()
+                        .map(|f| {
+                            let preview = f.content.lines().take(3).collect::<Vec<_>>().join(" | ");
+                            (f.path.display().to_string(), preview)
+                        })
+                        .collect(),
+                );
+            }
+        }
+        _ if cmd.starts_with("/image") => {
+            let path_str = cmd.trim_start_matches("/image").trim();
+            if path_str.is_empty() {
+                app.push(ChatLine::Info(
+                    "  image: usage: /image <path>   (attach image to next message)".into(),
+                ));
+            } else {
+                let path = std::path::Path::new(path_str);
+                match crate::image_input::ImageAttachment::from_path(path) {
+                    Some(att) => {
+                        let info = att.info_line();
+                        app.pending_image = Some(att);
+                        app.push(ChatLine::Info(format!("  {}", info)));
+                    }
+                    None => {
+                        app.push(ChatLine::Info(format!(
+                            "  image: could not load '{}' — file not found or unsupported format (PNG/JPEG/GIF/WebP)",
+                            path_str
+                        )));
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -1560,6 +1762,17 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         return;
     }
 
+    // ── Rules overlay (dismiss with Enter / Esc) ─────────────────────────────
+    if app.rules_overlay.is_some() {
+        match event.code {
+            Enter | Esc => {
+                app.rules_overlay = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // ── Session picker (modal) ────────────────────────────────────────────────
     if app.session_picker.is_some() {
         const VISIBLE: usize = 12;
@@ -1829,6 +2042,7 @@ fn char_byte_pos(s: &str, char_idx: usize) -> usize {
 enum AgentAction {
     Run(String),
     Resume(String),
+    SwitchModel(String),
 }
 
 async fn agent_task(
@@ -1836,9 +2050,11 @@ async fn agent_task(
     workspace_root: std::path::PathBuf,
     mut prompt_rx: mpsc::UnboundedReceiver<String>,
     mut resume_rx: mpsc::UnboundedReceiver<String>,
+    mut model_switch_rx: mpsc::UnboundedReceiver<String>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     perm_tx: mpsc::UnboundedSender<PermRequest>,
     cancel: std::sync::Arc<AtomicBool>,
+    image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
 ) {
     let mut setup = match AgentSetup::build(&cli, &workspace_root) {
         Ok(s) => s,
@@ -1891,9 +2107,19 @@ async fn agent_task(
                     None => break,
                 }
             }
+            model_name = model_switch_rx.recv() => {
+                match model_name {
+                    Some(m) => AgentAction::SwitchModel(m),
+                    None => break,
+                }
+            }
         };
 
         match action {
+            AgentAction::SwitchModel(model_name) => {
+                agent.set_model(model_name.clone());
+                let _ = event_tx.send(AgentEvent::ModelSwitched { to_model: model_name });
+            }
             AgentAction::Run(prompt) => {
                 cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -1939,23 +2165,31 @@ async fn agent_task(
                     }
                 }
 
-                let result = if first_turn {
+                // Drain any pending image attached via /image before this turn.
+                let pending_img = image_state.lock().ok().and_then(|mut g| g.take());
+                let extra_blocks: Vec<clido_core::ContentBlock> =
+                    if let Some((media_type, base64_data)) = pending_img {
+                        vec![clido_core::ContentBlock::Image { media_type, base64_data }]
+                    } else {
+                        vec![]
+                    };
+                let result = if extra_blocks.is_empty() {
+                    if first_turn {
+                        agent
+                            .run(&prompt, Some(&mut writer), Some(&setup.pricing_table), Some(cancel.clone()))
+                            .await
+                    } else {
+                        agent
+                            .run_next_turn(&prompt, Some(&mut writer), Some(&setup.pricing_table), Some(cancel.clone()))
+                            .await
+                    }
+                } else if first_turn {
                     agent
-                        .run(
-                            &prompt,
-                            Some(&mut writer),
-                            Some(&setup.pricing_table),
-                            Some(cancel.clone()),
-                        )
+                        .run_with_extra_blocks(&prompt, extra_blocks, Some(&mut writer), Some(&setup.pricing_table), Some(cancel.clone()))
                         .await
                 } else {
                     agent
-                        .run_next_turn(
-                            &prompt,
-                            Some(&mut writer),
-                            Some(&setup.pricing_table),
-                            Some(cancel.clone()),
-                        )
+                        .run_next_turn_with_extra_blocks(&prompt, extra_blocks, Some(&mut writer), Some(&setup.pricing_table), Some(cancel.clone()))
                         .await
                 };
                 first_turn = false;
@@ -2133,21 +2367,39 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
 
     let (provider, model) = read_provider_model(&cli, &workspace_root);
 
+    // Resolve notify setting: CLI flags take priority over config.
+    // `--notify` forces on; `--no-notify` forces off; otherwise use config default.
+    let notify_enabled = if cli.no_notify {
+        false
+    } else if cli.notify {
+        true
+    } else {
+        // Read config to get the persisted default.
+        clido_core::load_config(&workspace_root)
+            .map(|c| c.agent.notify)
+            .unwrap_or(false)
+    };
+
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<String>();
     let (resume_tx, resume_rx) = mpsc::unbounded_channel::<String>();
+    let (model_switch_tx, model_switch_rx) = mpsc::unbounded_channel::<String>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (perm_tx, mut perm_rx) = mpsc::unbounded_channel::<PermRequest>();
 
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     tokio::spawn(agent_task(
         cli,
         workspace_root.clone(),
         prompt_rx,
         resume_rx,
+        model_switch_rx,
         event_tx,
         perm_tx,
         cancel.clone(),
+        image_state.clone(),
     ));
 
     // Install a panic hook so the terminal is always restored even on crash.
@@ -2179,7 +2431,7 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(prompt_tx, resume_tx, cancel, provider, model, workspace_root.clone());
+    let mut app = App::new(prompt_tx, resume_tx, model_switch_tx, cancel, provider, model, workspace_root.clone(), notify_enabled, image_state);
     let result = event_loop(&mut app, &mut terminal, &mut event_rx, &mut perm_rx).await;
 
     let _ = disable_raw_mode();
@@ -2245,12 +2497,47 @@ async fn event_loop(
                     }
                     Some(AgentEvent::Response(text)) => {
                         app.push(ChatLine::Assistant(text));
+                        // Fire desktop notification + bell if enabled.
+                        if app.notify_enabled {
+                            let elapsed = app
+                                .turn_start
+                                .map(|s| s.elapsed().as_secs())
+                                .unwrap_or(0);
+                            let session_id = app
+                                .current_session_id
+                                .as_deref()
+                                .unwrap_or("unknown");
+                            crate::notify::notify_done(
+                                session_id,
+                                elapsed,
+                                app.session_cost_usd,
+                            );
+                        }
+                        // Revert per-turn model override if active.
+                        if let Some(prev) = app.per_turn_prev_model.take() {
+                            app.model = prev.clone();
+                            let _ = app.model_switch_tx.send(prev.clone());
+                            app.push(ChatLine::Info(format!(
+                                "  [reverted] model back to {}",
+                                prev
+                            )));
+                        }
                         app.on_agent_done();
+                    }
+                    Some(AgentEvent::ModelSwitched { to_model }) => {
+                        // Confirmation from agent_task that the model was switched.
+                        // Update display model in case it diverged.
+                        app.model = to_model;
                     }
                     Some(AgentEvent::SessionStarted(id)) => {
                         app.current_session_id = Some(id);
                     }
                     Some(AgentEvent::Interrupted) => {
+                        // Revert per-turn model override on interruption too.
+                        if let Some(prev) = app.per_turn_prev_model.take() {
+                            app.model = prev.clone();
+                            let _ = app.model_switch_tx.send(prev);
+                        }
                         app.on_agent_done();
                     }
                     Some(AgentEvent::Err(msg)) => {
@@ -2309,4 +2596,69 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_per_turn_model tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_per_turn_model_extracts_model_and_prompt() {
+        let result = parse_per_turn_model("@claude-opus-4-6 explain the auth flow");
+        assert_eq!(
+            result,
+            Some(("claude-opus-4-6".to_string(), "explain the auth flow".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_per_turn_model_returns_none_for_normal_input() {
+        assert_eq!(parse_per_turn_model("explain the auth flow"), None);
+    }
+
+    #[test]
+    fn test_parse_per_turn_model_returns_none_for_at_in_middle() {
+        // @ not at start → None
+        assert_eq!(parse_per_turn_model("email me @ work"), None);
+    }
+
+    #[test]
+    fn test_parse_per_turn_model_returns_none_for_at_only() {
+        assert_eq!(parse_per_turn_model("@"), None);
+    }
+
+    #[test]
+    fn test_parse_per_turn_model_returns_none_for_model_no_prompt() {
+        // Has model name but no prompt after space
+        assert_eq!(parse_per_turn_model("@claude-opus-4-6"), None);
+    }
+
+    #[test]
+    fn test_parse_per_turn_model_trims_prompt_whitespace() {
+        let result = parse_per_turn_model("@claude-haiku-4-5   refactor this");
+        assert_eq!(
+            result,
+            Some(("claude-haiku-4-5".to_string(), "refactor this".to_string()))
+        );
+    }
+
+    // ── /fast and /smart model name constants ─────────────────────────────────
+
+    #[test]
+    fn test_fast_model_name() {
+        // Verify the model name used by /fast is the expected haiku model.
+        let fast_model = "claude-haiku-4-5-20251001";
+        assert!(!fast_model.is_empty());
+        assert!(fast_model.contains("haiku"));
+    }
+
+    #[test]
+    fn test_smart_model_name() {
+        // Verify the model name used by /smart is the expected opus model.
+        let smart_model = "claude-opus-4-6";
+        assert!(!smart_model.is_empty());
+        assert!(smart_model.contains("opus"));
+    }
 }

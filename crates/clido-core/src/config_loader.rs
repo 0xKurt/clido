@@ -35,6 +35,23 @@ pub struct AgentSection {
     /// Can be set persistently here; `--quiet` / `-q` CLI flag also sets this.
     #[serde(default)]
     pub quiet: bool,
+    /// Skip all CLIDO.md / rules file injection.
+    #[serde(default)]
+    pub no_rules: bool,
+    /// Use a specific rules file instead of the standard hierarchical lookup.
+    #[serde(default)]
+    pub rules_file: Option<String>,
+    /// Send desktop notification + terminal bell when a task completes (requires
+    /// the `desktop-notify` feature to be compiled in for the OS notification;
+    /// the terminal bell fires regardless).
+    #[serde(default)]
+    pub notify: bool,
+    /// Enable automatic checkpoint before file-mutating agent turns. Default: true.
+    #[serde(default = "default_true")]
+    pub auto_checkpoint: bool,
+    /// Maximum number of checkpoints retained per session (0 = unlimited). Default: 50.
+    #[serde(default = "default_max_checkpoints")]
+    pub max_checkpoints_per_session: usize,
 }
 
 impl Default for AgentSection {
@@ -44,6 +61,11 @@ impl Default for AgentSection {
             max_budget_usd: default_max_budget(),
             max_concurrent_tools: None,
             quiet: false,
+            no_rules: false,
+            rules_file: None,
+            notify: false,
+            auto_checkpoint: true,
+            max_checkpoints_per_session: 50,
         }
     }
 }
@@ -53,6 +75,12 @@ fn default_max_turns() -> u32 {
 }
 fn default_max_budget() -> Option<f64> {
     Some(5.0)
+}
+fn default_true() -> bool {
+    true
+}
+fn default_max_checkpoints() -> usize {
+    50
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -93,6 +121,17 @@ pub struct WorkflowsSection {
     pub directory: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct IndexSection {
+    /// Glob patterns to exclude when building the index (e.g. `["*.lock", "vendor/**"]`).
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+    /// When true, bypass .gitignore rules and index all files including build artifacts.
+    #[serde(default)]
+    pub include_ignored: bool,
+}
+
 fn default_workflows_directory() -> String {
     ".clido/workflows".to_string()
 }
@@ -114,6 +153,8 @@ pub struct ConfigFile {
     pub workflows: WorkflowsSection,
     #[serde(default)]
     pub hooks: HooksConfig,
+    #[serde(default)]
+    pub index: IndexSection,
 }
 
 fn default_default_profile() -> String {
@@ -130,6 +171,7 @@ pub struct LoadedConfig {
     pub context: ContextSection,
     pub workflows: WorkflowsSection,
     pub hooks: HooksConfig,
+    pub index: IndexSection,
 }
 
 impl LoadedConfig {
@@ -223,6 +265,15 @@ fn merge(base: ConfigFile, later: ConfigFile) -> ConfigFile {
             .max_concurrent_tools
             .or(base.agent.max_concurrent_tools),
         quiet: later.agent.quiet || base.agent.quiet,
+        no_rules: later.agent.no_rules || base.agent.no_rules,
+        rules_file: later.agent.rules_file.or(base.agent.rules_file),
+        notify: later.agent.notify || base.agent.notify,
+        auto_checkpoint: later.agent.auto_checkpoint,
+        max_checkpoints_per_session: if later.agent.max_checkpoints_per_session != 50 {
+            later.agent.max_checkpoints_per_session
+        } else {
+            base.agent.max_checkpoints_per_session
+        },
     };
     let tools = ToolsSection {
         allowed: if later.tools.allowed.is_empty() {
@@ -254,6 +305,14 @@ fn merge(base: ConfigFile, later: ConfigFile) -> ConfigFile {
         pre_tool_use: later.hooks.pre_tool_use.or(base.hooks.pre_tool_use),
         post_tool_use: later.hooks.post_tool_use.or(base.hooks.post_tool_use),
     };
+    let index = IndexSection {
+        exclude_patterns: if later.index.exclude_patterns.is_empty() {
+            base.index.exclude_patterns
+        } else {
+            later.index.exclude_patterns
+        },
+        include_ignored: later.index.include_ignored || base.index.include_ignored,
+    };
     ConfigFile {
         default_profile,
         profile,
@@ -262,6 +321,7 @@ fn merge(base: ConfigFile, later: ConfigFile) -> ConfigFile {
         context,
         workflows,
         hooks,
+        index,
     }
 }
 
@@ -275,6 +335,7 @@ pub fn load_config(cwd: &Path) -> Result<LoadedConfig> {
         context: ContextSection::default(),
         workflows: WorkflowsSection::default(),
         hooks: HooksConfig::default(),
+        index: IndexSection::default(),
     };
 
     if let Some(path) = global_config_path() {
@@ -310,6 +371,7 @@ pub fn load_config(cwd: &Path) -> Result<LoadedConfig> {
         context: merged.context,
         workflows: merged.workflows,
         hooks: merged.hooks,
+        index: merged.index,
     })
 }
 
@@ -346,6 +408,8 @@ pub fn agent_config_from_loaded(
         compaction_threshold: Some(loaded.context.compaction_threshold),
         quiet: cli_quiet || loaded.agent.quiet,
         max_parallel_tools,
+        no_rules: loaded.agent.no_rules,
+        rules_file: loaded.agent.rules_file.clone(),
     })
 }
 

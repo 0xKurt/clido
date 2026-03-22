@@ -275,6 +275,14 @@ fn content_block_to_anthropic(b: &ContentBlock) -> Result<serde_json::Value> {
             "type": "thinking",
             "thinking": thinking
         })),
+        ContentBlock::Image { media_type, base64_data } => Ok(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64_data
+            }
+        })),
     }
 }
 
@@ -332,6 +340,10 @@ fn parse_content_block(v: &serde_json::Value) -> Result<ContentBlock> {
             let thinking = v["thinking"].as_str().unwrap_or("").to_string();
             Ok(ContentBlock::Thinking { thinking })
         }
+        // The API never returns image blocks; fall back to empty text so we don't error.
+        "image" => Ok(ContentBlock::Text {
+            text: String::new(),
+        }),
         _ => Err(ClidoError::Provider(format!(
             "unknown content type: {}",
             typ

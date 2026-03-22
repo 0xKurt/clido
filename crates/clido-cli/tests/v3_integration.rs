@@ -216,6 +216,8 @@ async fn sub_agent_isolation_from_cli_crate() {
         max_parallel_tools: 1,
         use_planner: false,
         use_index: false,
+        no_rules: false,
+        rules_file: None,
     };
 
     let tmp = std::env::temp_dir();

@@ -70,6 +70,8 @@ fn test_config() -> AgentConfig {
         max_parallel_tools: 4,
         use_planner: false,
         use_index: false,
+        no_rules: false,
+        rules_file: None,
     }
 }
 

@@ -31,6 +31,11 @@ pub enum ContentBlock {
     Thinking {
         thinking: String,
     },
+    /// Base64-encoded image block (sent to vision-capable models).
+    Image {
+        media_type: String,
+        base64_data: String,
+    },
 }
 
 /// Single message in the conversation.

@@ -13,17 +13,44 @@ use clido_memory::MemoryStore;
 use clido_providers::ModelProvider;
 use clido_storage::{AuditEntry, AuditLog, SessionLine, SessionWriter};
 use clido_tools::{ToolOutput, ToolRegistry};
+use similar::TextDiff;
 use futures::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
-/// Callback for asking the user to approve a state-changing tool call (Default permission mode).
+/// The result of a permission request — what the user decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermGrant {
+    /// Allow this single invocation.
+    Allow,
+    /// Deny this invocation.
+    Deny,
+    /// Open proposed content in `$EDITOR` and use whatever the user saves.
+    EditInEditor,
+    /// Allow all remaining Write/Edit operations in this session without asking again.
+    AllowAll,
+}
+
+/// A request for permission before a state-changing operation.
+#[derive(Debug, Default)]
+pub struct PermRequest {
+    pub tool_name: String,
+    pub description: String,
+    /// Pre-rendered unified diff string (populated for Write/Edit in diff-review mode).
+    pub diff: Option<String>,
+    /// Full proposed file content (used when the user presses 'e' to open in editor).
+    pub proposed_content: Option<String>,
+    /// Path of the file being written/edited (used for temp file extension in editor).
+    pub file_path: Option<std::path::PathBuf>,
+}
+
+/// Callback for asking the user to approve a state-changing tool call.
 #[async_trait]
 pub trait AskUser: Send + Sync {
-    /// Return true to allow the tool call, false to deny.
-    async fn ask(&self, tool_name: &str, input: &serde_json::Value) -> bool;
+    /// Ask the user for permission. Returns a `PermGrant` indicating the decision.
+    async fn ask(&self, req: PermRequest) -> PermGrant;
 }
 
 /// Callback for observing tool calls in real time (used by the TUI to show progress).
@@ -206,6 +233,16 @@ impl AgentLoop {
     pub fn with_memory(mut self, store: Arc<Mutex<MemoryStore>>) -> Self {
         self.memory = Some(store);
         self
+    }
+
+    /// Switch the model used for subsequent turns. Conversation history is preserved.
+    pub fn set_model(&mut self, model: String) {
+        self.config.model = model;
+    }
+
+    /// Return the model currently active for this session.
+    pub fn current_model(&self) -> &str {
+        &self.config.model
     }
 
     /// Retrieve relevant memories for the given prompt and prepend them to
@@ -586,6 +623,78 @@ impl AgentLoop {
         self.run_completion_loop(session, pricing, cancel).await
     }
 
+    /// Like `run`, but prepends `extra_blocks` (e.g. image blocks) before the text block.
+    pub async fn run_with_extra_blocks(
+        &mut self,
+        user_input: &str,
+        extra_blocks: Vec<ContentBlock>,
+        mut session: Option<&mut SessionWriter>,
+        pricing: Option<&PricingTable>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<String> {
+        if let Some(injected) = self.inject_memories(user_input) {
+            self.config.system_prompt = Some(injected);
+        }
+
+        let mut content = extra_blocks;
+        content.push(ContentBlock::Text {
+            text: user_input.to_string(),
+        });
+        let user_msg = Message {
+            role: Role::User,
+            content,
+        };
+        self.history.push(user_msg.clone());
+
+        if let Some(ref mut w) = session {
+            let content_json: Vec<serde_json::Value> = user_msg
+                .content
+                .iter()
+                .filter_map(|b| serde_json::to_value(b).ok())
+                .collect();
+            let _ = w.write_line(&SessionLine::UserMessage {
+                role: "user".to_string(),
+                content: content_json,
+            });
+        }
+
+        self.run_completion_loop(session, pricing, cancel).await
+    }
+
+    /// Like `run_next_turn`, but prepends `extra_blocks` before the text block.
+    pub async fn run_next_turn_with_extra_blocks(
+        &mut self,
+        user_input: &str,
+        extra_blocks: Vec<ContentBlock>,
+        mut session: Option<&mut SessionWriter>,
+        pricing: Option<&PricingTable>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<String> {
+        let mut content = extra_blocks;
+        content.push(ContentBlock::Text {
+            text: user_input.to_string(),
+        });
+        let user_msg = Message {
+            role: Role::User,
+            content,
+        };
+        self.history.push(user_msg.clone());
+
+        if let Some(ref mut w) = session {
+            let content_json: Vec<serde_json::Value> = user_msg
+                .content
+                .iter()
+                .filter_map(|b| serde_json::to_value(b).ok())
+                .collect();
+            let _ = w.write_line(&SessionLine::UserMessage {
+                role: "user".to_string(),
+                content: content_json,
+            });
+        }
+
+        self.run_completion_loop(session, pricing, cancel).await
+    }
+
     async fn run_completion_loop(
         &mut self,
         mut session: Option<&mut SessionWriter>,
@@ -886,13 +995,78 @@ impl AgentLoop {
             if let Some(tool) = self.tools.get(name) {
                 if !tool.is_read_only() {
                     if let Some(ref ask) = self.ask_user {
-                        if !ask.ask(name, input).await {
-                            return ToolOutput::err("User denied the tool call.".to_string());
+                        let req = PermRequest {
+                            tool_name: name.to_string(),
+                            description: serde_json::to_string(input).unwrap_or_default(),
+                            diff: None,
+                            proposed_content: None,
+                            file_path: None,
+                        };
+                        match ask.ask(req).await {
+                            PermGrant::Allow | PermGrant::AllowAll => {}
+                            PermGrant::Deny | PermGrant::EditInEditor => {
+                                return ToolOutput::err("User denied the tool call.".to_string());
+                            }
                         }
                     }
                 }
             }
         }
+
+        if effective == PermissionMode::DiffReview {
+            if let Some(tool) = self.tools.get(name) {
+                if !tool.is_read_only() {
+                    if let Some(ref ask) = self.ask_user {
+                        // For Write/Edit, compute diff before asking
+                        let (diff, proposed_content, file_path) =
+                            compute_diff_for_tool(name, input).await;
+                        let req = PermRequest {
+                            tool_name: name.to_string(),
+                            description: serde_json::to_string(input).unwrap_or_default(),
+                            diff,
+                            proposed_content: proposed_content.clone(),
+                            file_path: file_path.clone(),
+                        };
+                        match ask.ask(req).await {
+                            PermGrant::Allow => {}
+                            PermGrant::AllowAll => {}
+                            PermGrant::Deny => {
+                                return ToolOutput::ok(
+                                    "Write rejected by user.".to_string(),
+                                );
+                            }
+                            PermGrant::EditInEditor => {
+                                // Open editor, then re-route to write the edited content
+                                if let (Some(content), Some(path)) = (proposed_content, file_path)
+                                {
+                                    match open_in_editor_blocking(&content, &path).await {
+                                        Ok(edited) => {
+                                            // Write the edited content directly
+                                            let mut new_input = input.clone();
+                                            if let Some(obj) = new_input.as_object_mut() {
+                                                obj.insert(
+                                                    "content".to_string(),
+                                                    serde_json::Value::String(edited),
+                                                );
+                                            }
+                                            return self.execute_tool(name, &new_input).await;
+                                        }
+                                        Err(e) => {
+                                            return ToolOutput::err(format!(
+                                                "Editor failed: {}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+                                // If no proposed_content/file_path (e.g. EditTool), just proceed
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         self.execute_tool(name, input).await
     }
 
@@ -966,6 +1140,87 @@ impl AgentLoop {
             results
         }
     }
+}
+
+/// For Write/Edit tool calls in diff-review mode, extract the proposed file path
+/// and content from the input JSON, read the current on-disk content, and compute
+/// a unified diff.  Returns `(diff, proposed_content, file_path)`.
+async fn compute_diff_for_tool(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> (Option<String>, Option<String>, Option<std::path::PathBuf>) {
+    let (path_key, content_key) = match tool_name {
+        "Write" | "write" => ("file_path", "content"),
+        "Edit"  | "edit"  => ("file_path", "new_string"),
+        _ => return (None, None, None),
+    };
+
+    let path_str = match input.get(path_key).and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return (None, None, None),
+    };
+    let proposed = match input.get(content_key).and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return (None, None, None),
+    };
+
+    let file_path = std::path::PathBuf::from(&path_str);
+    let old_content = std::fs::read_to_string(&file_path).unwrap_or_default();
+
+    let diff = TextDiff::from_lines(old_content.as_str(), proposed.as_str())
+        .unified_diff()
+        .header(&format!("a/{}", path_str), &format!("b/{}", path_str))
+        .to_string();
+
+    let diff = if diff.is_empty() { None } else { Some(diff) };
+    (diff, Some(proposed), Some(file_path))
+}
+
+/// Open proposed content in `$EDITOR` (fallback `$VISUAL`, then `vi`),
+/// wait for the editor to exit, and return the saved content.
+async fn open_in_editor_blocking(
+    proposed: &str,
+    file_path: &std::path::Path,
+) -> Result<String> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let suffix = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e))
+        .unwrap_or_default();
+
+    let proposed = proposed.to_string();
+    let editor_clone = editor.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let tmp = tempfile::Builder::new()
+            .suffix(&suffix)
+            .tempfile()
+            .map_err(|e| ClidoError::Other(anyhow::anyhow!("tempfile: {}", e)))?;
+
+        std::fs::write(tmp.path(), &proposed)
+            .map_err(|e| ClidoError::Other(anyhow::anyhow!("write tempfile: {}", e)))?;
+
+        let status = std::process::Command::new(&editor_clone)
+            .arg(tmp.path())
+            .status()
+            .map_err(|e| ClidoError::Other(anyhow::anyhow!("spawn editor '{}': {}", editor_clone, e)))?;
+
+        if !status.success() {
+            return Err(ClidoError::Other(anyhow::anyhow!(
+                "editor '{}' exited with non-zero status",
+                editor_clone
+            )));
+        }
+
+        std::fs::read_to_string(tmp.path())
+            .map_err(|e| ClidoError::Other(anyhow::anyhow!("read tempfile: {}", e)))
+    })
+    .await
+    .map_err(|e| ClidoError::Other(anyhow::anyhow!("spawn_blocking: {}", e)))?
 }
 
 /// Fire-and-forget hook execution (blocking, errors silently ignored).

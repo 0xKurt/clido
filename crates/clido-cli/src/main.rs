@@ -2,13 +2,18 @@
 
 mod agent_setup;
 mod audit_cmd;
+pub(crate) mod image_input;
+mod checkpoint_cmd;
 mod cli;
+mod commit;
 mod config;
 mod doctor;
 mod errors;
+mod git_context;
 mod index_cmd;
 mod memory_cmd;
 mod models;
+mod notify;
 mod pricing_cmd;
 mod provider;
 mod repl;
@@ -190,6 +195,25 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
         }
         Some(cli::Subcommand::Index { cmd }) => {
             return index_cmd::run_index(cmd).await;
+        }
+        Some(cli::Subcommand::Checkpoint { cmd }) => {
+            return checkpoint_cmd::run_checkpoint(cmd, &cli).await;
+        }
+        Some(cli::Subcommand::Rollback { id, session, yes }) => {
+            return checkpoint_cmd::run_rollback(
+                id.as_deref(),
+                session.as_deref(),
+                *yes,
+                &cli,
+            )
+            .await;
+        }
+        Some(cli::Subcommand::Commit { yes, dry_run }) => {
+            let workspace_root = cli
+                .workdir
+                .clone()
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+            return commit::run_commit(&workspace_root, *yes, *dry_run, &cli).await;
         }
         Some(cli::Subcommand::Run { prompt }) => {
             let prompt_str = prompt.join(" ").trim().to_string();

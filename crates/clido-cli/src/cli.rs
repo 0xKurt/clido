@@ -117,6 +117,23 @@ pub struct Cli {
     /// of subtasks before executing. Falls back to the reactive loop on plan failure.
     #[arg(long)]
     pub planner: bool,
+
+    /// Skip all CLIDO.md / rules file injection for this invocation.
+    #[arg(long)]
+    pub no_rules: bool,
+
+    /// Use this specific rules file instead of the standard hierarchical lookup.
+    #[arg(long, env = "CLIDO_RULES_FILE")]
+    pub rules_file: Option<std::path::PathBuf>,
+
+    /// Force-enable desktop notification + terminal bell for this run,
+    /// overriding the config and the minimum-duration gate.
+    #[arg(long, conflicts_with = "no_notify")]
+    pub notify: bool,
+
+    /// Suppress desktop notifications and terminal bell for this run.
+    #[arg(long)]
+    pub no_notify: bool,
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -225,6 +242,35 @@ pub enum Subcommand {
         #[command(subcommand)]
         cmd: IndexCmd,
     },
+
+    /// Commit current changes with an AI-generated message.
+    Commit {
+        /// Skip confirmation (accept generated message immediately).
+        #[arg(long)]
+        yes: bool,
+
+        /// Generate and print the commit message but do not run git commit.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Checkpoint management (list, save, rollback, diff).
+    Checkpoint {
+        #[command(subcommand)]
+        cmd: CheckpointCmd,
+    },
+
+    /// Roll back to a checkpoint (shows diff and prompts for confirmation).
+    Rollback {
+        /// Checkpoint ID to restore. If omitted, lists available checkpoints.
+        id: Option<String>,
+        /// Session ID (defaults to most recent session).
+        #[arg(long)]
+        session: Option<String>,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -239,6 +285,9 @@ pub enum IndexCmd {
         /// plus common general-purpose languages.
         #[arg(long, default_value = "sol,move,vy,fe,yul,rell,cairo,rs,py,js,ts,go,java,c,cpp,h,md")]
         ext: String,
+        /// Bypass .gitignore rules and index all files including build artifacts.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Show index statistics.
     Stats,
@@ -324,6 +373,34 @@ pub enum SessionsCmd {
     },
 }
 
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum CheckpointCmd {
+    /// List checkpoints for the current (or specified) session.
+    List {
+        /// Session ID (defaults to most recent session).
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Save a named checkpoint.
+    Save {
+        /// Optional name for the checkpoint.
+        name: Option<String>,
+    },
+    /// Roll back to a checkpoint (interactive file picker).
+    Rollback {
+        /// Checkpoint ID to restore.
+        id: Option<String>,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show diff since a checkpoint.
+    Diff {
+        /// Checkpoint ID to diff against.
+        id: String,
+    },
+}
+
 impl Cli {
     /// Single prompt string from positional args.
     pub fn prompt_str(&self) -> String {
@@ -351,6 +428,9 @@ impl Cli {
             Some(Subcommand::Memory { .. }) => false,
             Some(Subcommand::FetchModels { .. }) => false,
             Some(Subcommand::Index { .. }) => false,
+            Some(Subcommand::Commit { .. }) => false,
+            Some(Subcommand::Checkpoint { .. }) => false,
+            Some(Subcommand::Rollback { .. }) => false,
         }
     }
 }

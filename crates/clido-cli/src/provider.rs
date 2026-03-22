@@ -1,7 +1,7 @@
 //! Provider construction and permission prompting.
 
 use async_trait::async_trait;
-use clido_agent::AskUser;
+use clido_agent::{AskUser, PermGrant, PermRequest};
 use clido_core::ProfileEntry;
 use clido_providers::{build_provider, ModelProvider};
 use std::env;
@@ -15,12 +15,10 @@ pub struct StdinAskUser;
 
 #[async_trait]
 impl AskUser for StdinAskUser {
-    async fn ask(&self, tool_name: &str, input: &serde_json::Value) -> bool {
-        let prompt = format!(
-            "Allow {} with input {}? [y/N] ",
-            tool_name,
-            serde_json::to_string(input).unwrap_or_else(|_| "?".into())
-        );
+    async fn ask(&self, req: PermRequest) -> PermGrant {
+        let tool_name = req.tool_name.clone();
+        let description = req.description.clone();
+        let prompt = format!("Allow {} with input {}? [y/N] ", tool_name, description);
         let result = tokio::task::spawn_blocking(move || {
             if cli_use_color() {
                 eprint!("{}{}{}", ansi::DIM, prompt, ansi::RESET);
@@ -37,7 +35,11 @@ impl AskUser for StdinAskUser {
             }
         })
         .await;
-        result.unwrap_or(false)
+        if result.unwrap_or(false) {
+            PermGrant::Allow
+        } else {
+            PermGrant::Deny
+        }
     }
 }
 

@@ -31,6 +31,22 @@ Index only specific file types (comma-separated extensions):
 clido index build --ext sol,rs,py,js,ts
 ```
 
+### Bypass ignore rules
+
+By default the index respects `.gitignore`, the global git ignore file, and `.git/info/exclude`. To include build artifacts and other ignored files:
+
+```bash
+clido index build --include-ignored
+```
+
+When `--include-ignored` is active, the output confirms it:
+
+```
+Indexed 85,559 files in /path/to/project (ignore rules bypassed).
+```
+
+This can also be set permanently in config (see [Index config section](#index-config-section)).
+
 Default extensions include **Web3 and smart-contract languages first**, then general-purpose languages:
 
 | Category | Extensions |
@@ -113,6 +129,47 @@ The agent uses these results to navigate to the right files rather than reading 
 | Markdown | `.md` | Headings (as navigation symbols) |
 
 Additional languages can be added — see [Adding Tools](/developer/adding-tools) for extension points.
+
+## Ignore file support
+
+### `.gitignore`
+
+The walker automatically honours `.gitignore` files at every directory level, the global git ignore file (`~/.config/git/ignore` or `core.excludesFile`), and `.git/info/exclude`. Files and directories matched by these rules are not indexed, which keeps build artifacts and generated files out of the index.
+
+### `.clido-ignore`
+
+You can create a `.clido-ignore` file in any directory (same syntax as `.gitignore`) to exclude project-specific paths from the index without modifying your `.gitignore`:
+
+```
+# .clido-ignore
+*.snap          # snapshot test files
+fixtures/large/ # large test fixtures
+```
+
+`.clido-ignore` files are respected at every directory level, just like `.gitignore`.
+
+## Index config section
+
+You can set index options permanently in your `.clido/config.toml`:
+
+```toml
+[index]
+# Glob patterns to exclude from the index (applied after ignore rules).
+exclude-patterns = ["*.lock", "vendor/**", "node_modules/**"]
+
+# Permanently bypass .gitignore rules (equivalent to always passing --include-ignored).
+include-ignored = false
+```
+
+### `exclude-patterns`
+
+A list of glob patterns (e.g. `["*.lock", "docs/**"]`) applied after all ignore rules. Files matching any pattern are skipped. Patterns are matched against the relative path from the indexed directory root.
+
+### `include-ignored`
+
+When `true`, `.gitignore`, global git ignore, `.git/info/exclude`, and `.clido-ignore` are all bypassed. Useful for monorepos or projects where you want to index vendored code.
+
+The CLI flag `--include-ignored` overrides this value per invocation.
 
 ## Index storage location
 

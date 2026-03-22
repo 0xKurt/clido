@@ -29,6 +29,7 @@ tokio = { workspace = true }
 [dependencies]
 async-trait = { workspace = true }
 clido-agent = { path = "../clido-agent" }
+clido-context = { path = "../clido-context" }
 clido-core = { path = "../clido-core" }
 clido-index = { path = "../clido-index" }
 clido-memory = { path = "../clido-memory" }
@@ -37,6 +38,7 @@ clido-providers = { path = "../clido-providers" }
 clido-storage = { path = "../clido-storage" }
 clido-tools = { path = "../clido-tools" }
 clido-workflows = { path = "../clido-workflows" }
+clido-checkpoint = { path = "../clido-checkpoint" }
 clap = { workspace = true, features = ["derive", "env"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -54,4 +56,8 @@ libc = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen = { workspace = true }
 pulldown-cmark = "0.9"
+notify-rust = { version = "4", optional = true }
+base64 = { workspace = true }
 
+[features]
+desktop-notify = ["dep:notify-rust"]
