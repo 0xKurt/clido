@@ -257,7 +257,7 @@ impl ModelPickerState {
             .filter(|m| {
                 m.id.to_lowercase().contains(&f)
                     || m.provider.to_lowercase().contains(&f)
-                    || m.role.as_deref().map(|r| r.contains(&f)).unwrap_or(false)
+                    || m.role.as_deref().map(|r| r.to_lowercase().contains(&f)).unwrap_or(false)
             })
             .collect()
     }
@@ -3179,6 +3179,13 @@ async fn agent_task(
                 match agent.compact_history_now().await {
                     Ok((before, after)) => {
                         let _ = event_tx.send(AgentEvent::Compacted { before, after });
+                        // Emit updated token counts so the context bar refreshes.
+                        let _ = event_tx.send(AgentEvent::TokenUsage {
+                            input_tokens: agent.cumulative_input_tokens,
+                            output_tokens: agent.cumulative_output_tokens,
+                            cost_usd: agent.cumulative_cost_usd,
+                            context_max_tokens,
+                        });
                     }
                     Err(e) => {
                         let _ = event_tx.send(AgentEvent::Err(format!("compact: {}", e)));
@@ -3704,6 +3711,11 @@ async fn event_loop(
                         app.on_agent_done();
                     }
                     Some(AgentEvent::Err(msg)) => {
+                        // Revert per-turn model override on error too.
+                        if let Some(prev) = app.per_turn_prev_model.take() {
+                            app.model = prev.clone();
+                            let _ = app.model_switch_tx.send(prev);
+                        }
                         app.pending_error = Some(msg);
                         app.on_agent_done();
                     }
