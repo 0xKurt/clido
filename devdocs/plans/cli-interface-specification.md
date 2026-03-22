@@ -125,7 +125,16 @@ This document is the canonical product specification for Clido's command-line in
 | `clido --input-format` | — | — | ✓ | ✓ | ✓ |
 | `clido --mcp-config <file>` | — | ✓ | ✓ | ✓ | ✓ |
 | `clido --sandbox` | — | — | ✓ | ✓ | ✓ |
-| `clido --planner` | — | — | — | — | ✓ |
+| `clido --planner` / `--plan` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --plan-dry-run` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --plan-no-edit` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --no-rules` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --rules-file <path>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido --notify` / `--no-notify` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido plan list` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido plan show <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido plan run <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `clido plan delete <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido sessions list` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido sessions show <id>` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `clido sessions fork <id>` | — | ✓ | ✓ | ✓ | ✓ |
@@ -156,7 +165,7 @@ This document is the canonical product specification for Clido's command-line in
 | Audit and stats commands | — | — | ✓ | ✓ | ✓ |
 | Memory commands | — | — | — | ✓ | ✓ |
 | Semantic search tool | — | — | — | ✓ | ✓ |
-| Planner mode / `--planner` | — | — | — | — | ✓ |
+| Planner mode / `--planner` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ---
 

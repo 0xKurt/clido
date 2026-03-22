@@ -406,25 +406,25 @@ fn test_plan_edit_form_saves_description()
 
 ## Definition of Done
 
-- [ ] **plan-structured-schema** — `Plan`, `TaskNode`, `PlanMeta`, `TaskStatus`, `Complexity` types defined in `clido-planner`
-- [ ] **plan-editor-ops** — `PlanEditor` supports rename, delete, add, reorder, skip, set-notes; all re-validate DAG
-- [ ] **plan-storage** — save/load/list/delete plans in `.clido/plans/`; roundtrip test passes
-- [ ] **plan-tui-editor** — full-screen plan edit overlay rendered in TUI; all keybindings work
-- [ ] **plan-tui-task-form** — inline task edit form (description, notes, complexity, skip) works
-- [ ] **plan-tui-execution-sidebar** — live checklist shown during execution with status/elapsed
-- [ ] **plan-tui-pause** — `p` key pauses execution after current task; remaining tasks editable
-- [ ] **plan-dry-run** — `--dry-run` shows plan editor but never executes; confirmed by test
-- [ ] **plan-no-edit** — `--no-edit` skips editor and executes immediately; confirmed by test
-- [ ] **plan-cmd-list-show-run-delete** — `clido plan list/show/run/delete` all work
-- [ ] **plan-resume** — `clido plan run <id>` skips already-done tasks; resumes from first pending
-- [ ] **plan-config-section** — `[plan]` config section parsed; `always_plan`, `no_edit`, `auto_save` work
-- [ ] **plan-events** — `PlanReady`, `PlanTaskStarted`, `PlanTaskDone`, `PlanPaused` events emitted correctly
-- [ ] **plan-fallback** — if LLM returns unparseable plan, falls back to single-task gracefully
-- [ ] **plan-slash-commands** — `/plan`, `/plan edit`, `/plan save`, `/plan list` work in TUI
-- [ ] **plan-tests-unit** — all unit tests in `clido-planner` pass (12+ tests)
-- [ ] **plan-tests-integration** — all integration tests pass (9+ tests)
-- [ ] **plan-docs-guide** — `docs/guide/planner.md` fully rewritten
-- [ ] **plan-docs-schema** — `docs/reference/plan-schema.md` written
-- [ ] **plan-docs-keybindings** — plan editor keybindings documented in key-bindings reference
-- [ ] **build** — workspace builds with no warnings
-- [ ] **tests** — all workspace tests pass
+- [x] **plan-structured-schema** — `Plan`, `TaskNode`, `PlanMeta`, `TaskStatus`, `Complexity` types defined in `clido-planner`
+- [x] **plan-editor-ops** — `PlanEditor` supports rename, delete, add, reorder, skip, set-notes; all re-validate DAG
+- [x] **plan-storage** — save/load/list/delete plans in `.clido/plans/`; roundtrip test passes
+- [x] **plan-tui-editor** — full-screen plan edit overlay rendered in TUI; all keybindings work
+- [x] **plan-tui-task-form** — inline task edit form (description, notes, complexity, skip) works
+- [ ] **plan-tui-execution-sidebar** — live checklist shown during execution with status/elapsed *(deferred)*
+- [ ] **plan-tui-pause** — `p` key pauses execution after current task; remaining tasks editable *(deferred)*
+- [x] **plan-dry-run** — `--plan-dry-run` shows plan editor but never executes; confirmed by test
+- [x] **plan-no-edit** — `--plan-no-edit` skips editor and executes immediately; confirmed by test
+- [x] **plan-cmd-list-show-run-delete** — `clido plan list/show/run/delete` all work
+- [x] **plan-resume** — `clido plan run <id>` skips already-done tasks; resumes from first pending
+- [ ] **plan-config-section** — `[plan]` config section parsed; `always_plan`, `no_edit`, `auto_save` work *(deferred; only `use_planner` exists in `AgentConfig`)*
+- [ ] **plan-events** — `PlanReady`, `PlanTaskStarted`, `PlanTaskDone`, `PlanPaused` events emitted correctly *(PlanPaused not yet emitted)*
+- [x] **plan-fallback** — if LLM returns unparseable plan, falls back to single-task gracefully
+- [x] **plan-slash-commands** — `/plan`, `/plan edit`, `/plan save`, `/plan list` work in TUI
+- [x] **plan-tests-unit** — all unit tests in `clido-planner` pass (54 tests across unit + integration)
+- [x] **plan-tests-integration** — all integration tests pass
+- [x] **plan-docs-guide** — `docs/guide/planner.md` fully rewritten
+- [x] **plan-docs-schema** — `docs/reference/plan-schema.md` written
+- [x] **plan-docs-keybindings** — plan editor keybindings documented in key-bindings reference
+- [x] **build** — workspace builds with no warnings
+- [x] **tests** — all workspace tests pass

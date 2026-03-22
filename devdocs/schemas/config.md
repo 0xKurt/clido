@@ -51,7 +51,7 @@ base_url = "https://api.anthropic.com"
 |-----|------|---------|--------------|------------|
 | `max_turns` | integer | 50 | `CLIDO_MAX_TURNS` | > 0, ≤ 1000. |
 | `max_budget_usd` | float | 5.0 | `CLIDO_MAX_BUDGET_USD` | ≥ 0. |
-| `max_concurrent_tools` | integer | 10 | — | > 0, ≤ 100. Semaphore cap for read-only tool concurrency. |
+| `max_concurrent_tools` | integer | 10 | — | > 0, ≤ 100. Semaphore cap for read-only tool concurrency. CLI flag: `--max-parallel-tools`; env: `CLIDO_MAX_PARALLEL_TOOLS`. Note: config key uses `concurrent`, flag/env use `parallel` — the names differ but control the same semaphore. |
 
 ---
 
