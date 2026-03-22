@@ -9,21 +9,21 @@ TUI changes, slash commands, complete test plan, docs updates, and a Definition 
 
 ## Plans
 
-| File | Feature | Priority | Effort |
-|------|---------|----------|--------|
-| [project-rules.md](project-rules.md) | Project Rules File (`CLIDO.md`) | P0 | Low |
-| [gitignore-index.md](gitignore-index.md) | `.gitignore`-aware Repository Index | P0 | Low |
-| [edit-reliability.md](edit-reliability.md) | Edit Tool Multi-Strategy Patching | P0 | Medium |
-| [diff-preview.md](diff-preview.md) | Diff Preview and Approval Before Write | P1 | Medium |
-| [plan-mode.md](plan-mode.md) | Interactive Plan Mode with TUI Editor | P1 | High |
-| [checkpoint-rollback.md](checkpoint-rollback.md) | Checkpoint and Rollback | P1 | Medium |
-| [web-tools.md](web-tools.md) | Web Fetch and Search Tools | P1 | Medium |
-| [git-awareness.md](git-awareness.md) | Native Git Awareness | P1 | Medium |
-| [notifications.md](notifications.md) | Desktop Notifications and Completion Hooks | P2 | Low |
-| [auto-test-loop.md](auto-test-loop.md) | Automatic Test Loop | P2 | High |
-| [lsp-diagnostics.md](lsp-diagnostics.md) | LSP / Compiler Diagnostics Tool | P2 | Medium |
-| [model-switching.md](model-switching.md) | Mid-Session Model Switching | P2 | Medium |
-| [image-input.md](image-input.md) | Image and Screenshot Input | P3 | Medium |
+| File | Feature | Priority | Effort | Status |
+|------|---------|----------|--------|--------|
+| [project-rules.md](project-rules.md) | Project Rules File (`CLIDO.md`) | P0 | Low | ✅ Done |
+| [gitignore-index.md](gitignore-index.md) | `.gitignore`-aware Repository Index | P0 | Low | ✅ Done |
+| [edit-reliability.md](edit-reliability.md) | Edit Tool Multi-Strategy Patching | P0 | Medium | ✅ Done |
+| [diff-preview.md](diff-preview.md) | Diff Preview and Approval Before Write | P1 | Medium | ✅ Done |
+| [plan-mode.md](plan-mode.md) | Interactive Plan Mode with TUI Editor | P1 | High | ✅ Done |
+| [checkpoint-rollback.md](checkpoint-rollback.md) | Checkpoint and Rollback | P1 | Medium | ✅ Done |
+| [web-tools.md](web-tools.md) | Web Fetch and Search Tools | P1 | Medium | ✅ Done |
+| [git-awareness.md](git-awareness.md) | Native Git Awareness | P1 | Medium | ✅ Done |
+| [notifications.md](notifications.md) | Desktop Notifications and Completion Hooks | P2 | Low | ✅ Done |
+| [auto-test-loop.md](auto-test-loop.md) | Automatic Test Loop | P2 | High | ✅ Done |
+| [lsp-diagnostics.md](lsp-diagnostics.md) | LSP / Compiler Diagnostics Tool | P2 | Medium | ✅ Done |
+| [model-switching.md](model-switching.md) | Mid-Session Model Switching | P2 | Medium | ✅ Done |
+| [image-input.md](image-input.md) | Image and Screenshot Input | P3 | Medium | ✅ Done |
 
 ## Priority rationale
 

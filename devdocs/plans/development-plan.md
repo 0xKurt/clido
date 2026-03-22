@@ -37,7 +37,9 @@ clido (workspace)
 │   ├── clido-providers/  # Model provider abstraction + implementations
 │   ├── clido-storage/    # Session persistence, project config
 │   ├── clido-memory/     # Short-term + long-term memory (sqlite/sled)
-│   ├── clido-planner/    # Task graph, planner trait, DAG executor (optional advanced)
+│   ├── clido-planner/    # Task graph, planner trait, DAG executor + interactive TUI editor
+│   ├── clido-checkpoint/ # Per-turn file snapshots and rollback (competitive feature, V1 branch)
+│   ├── clido-workflows/  # Declarative YAML workflow engine (Phase 4.9, V3)
 │   ├── clido-index/      # Repository indexing: tree-sitter, symbol index (optional)
 │   └── clido-core/       # Shared types, errors, config structs
 ```
@@ -134,9 +136,23 @@ clido/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── planner.rs      # Planner trait
-│   │       ├── task_graph.rs   # Task, TaskGraph, DAG resolution
-│   │       └── executor.rs     # TaskExecutor, dependency-ordered execution
+│   │       ├── graph.rs        # TaskNode, TaskGraph, Complexity, TaskStatus, Plan, PlanMeta
+│   │       ├── parser.rs       # parse_plan / parse_plan_with_meta / plan_to_json
+│   │       ├── editor.rs       # PlanEditor — pure in-memory CRUD + DAG validation
+│   │       └── storage.rs      # save/load/list/delete plans in .clido/plans/
+│   ├── clido-checkpoint/       # per-turn file snapshots and rollback (V1 branch, ahead of schedule)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── context.rs      # CheckpointContext — snapshot scope per turn
+│   │       └── executor.rs     # take/restore checkpoint, list checkpoints
+│   ├── clido-workflows/        # declarative YAML workflow engine (Phase 4.9, V3 scope)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── types.rs        # Workflow, Step, StepKind
+│   │       ├── loader.rs       # load workflow from YAML file
+│   │       └── template.rs     # variable substitution in step args
 │   ├── clido-index/
 │   │   ├── Cargo.toml
 │   │   └── src/

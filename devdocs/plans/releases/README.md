@@ -85,6 +85,33 @@ Every phase from `development-plan.md` is assigned to exactly one release:
 | Phase 4.9.x — Pre-Flight und dynamische Parameter | V3 |
 | Phase 4.8 — Task Graph / Planner | V4 |
 
+### Competitive Features (implemented in `feature/v1`, ahead of roadmap schedule)
+
+These features from `devdocs/plans/features/` were implemented as part of the V1 branch to
+close the gap with Cursor / Claude Code / Cline. They map loosely to later roadmap phases
+but were pulled forward because they have high standalone value and no hard architectural
+dependencies on later releases.
+
+| Feature | Crate(s) touched | Nominal roadmap home |
+|---------|-----------------|---------------------|
+| Project Rules (`CLIDO.md` hierarchy) | `clido-cli`, `clido-context` | Phase 3.4.2 |
+| `.gitignore`-aware Repository Index | `clido-index` | Phase 8.7 (V3) |
+| Edit Tool Multi-Strategy Patching | `clido-tools` | Phase 5.6 (V1) |
+| Diff Preview and Approval Before Write | `clido-tools`, `clido-cli` | — |
+| Interactive Plan Mode with TUI Editor | `clido-planner`, `clido-cli` | Phase 4.5 / 4.8 |
+| Checkpoint and Rollback | `clido-checkpoint` (new crate) | — |
+| Web Fetch and Search Tools | `clido-tools` | — |
+| Native Git Awareness | `clido-tools`, `clido-context` | — |
+| Desktop Notifications and Completion Hooks | `clido-cli` | — |
+| Automatic Test Loop | `clido-agent`, `clido-cli` | — |
+| LSP / Compiler Diagnostics Tool | `clido-tools` | — |
+| Mid-Session Model Switching | `clido-cli` | — |
+| Image and Screenshot Input | `clido-tools`, `clido-cli` | — |
+
+These features do not have dedicated DoD items in the release YAML files. They are tracked
+via the feature plan docs in `devdocs/plans/features/` and are considered complete as of
+the `feature/v1` branch.
+
 ## Planning Principles
 
 - The reactive agent loop is always the default execution model.
