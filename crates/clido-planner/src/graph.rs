@@ -5,6 +5,26 @@ use serde::{Deserialize, Serialize};
 
 pub type TaskId = String;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Complexity {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    #[default]
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Skipped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskNode {
     pub id: TaskId,
@@ -13,6 +33,36 @@ pub struct TaskNode {
     pub depends_on: Vec<TaskId>,
     /// Optional tool allowlist for this task's sub-agent.
     pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub complexity: Complexity,
+    #[serde(default)]
+    pub skip: bool,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanMeta {
+    pub id: String,
+    pub goal: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plan {
+    pub meta: PlanMeta,
+    pub tasks: Vec<TaskNode>,
+}
+
+impl Plan {
+    pub fn task_graph(&self) -> TaskGraph {
+        TaskGraph {
+            goal: self.meta.goal.clone(),
+            tasks: self.tasks.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +225,10 @@ mod tests {
             description: format!("Task {}", id),
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             tools: None,
+            complexity: Complexity::default(),
+            skip: false,
+            notes: String::new(),
+            status: TaskStatus::default(),
         }
     }
 
@@ -279,5 +333,30 @@ mod tests {
         };
         assert!(g.validate().is_ok());
         assert!(g.parallel_batches().unwrap().is_empty());
+    }
+
+    #[test]
+    fn task_node_new_fields_have_defaults() {
+        let json = r#"{"id":"t1","description":"test","depends_on":[]}"#;
+        let node: TaskNode = serde_json::from_str(json).unwrap();
+        assert_eq!(node.complexity, Complexity::Low);
+        assert!(!node.skip);
+        assert_eq!(node.notes, "");
+        assert_eq!(node.status, TaskStatus::Pending);
+    }
+
+    #[test]
+    fn plan_task_graph_returns_correct_graph() {
+        let plan = Plan {
+            meta: PlanMeta {
+                id: "plan-abc".to_string(),
+                goal: "build something".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            tasks: vec![make_node("t1", vec![])],
+        };
+        let graph = plan.task_graph();
+        assert_eq!(graph.goal, "build something");
+        assert_eq!(graph.tasks.len(), 1);
     }
 }

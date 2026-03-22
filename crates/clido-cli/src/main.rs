@@ -4,6 +4,7 @@ mod agent_setup;
 mod audit_cmd;
 pub(crate) mod image_input;
 mod checkpoint_cmd;
+mod plan_cmd;
 mod cli;
 mod commit;
 mod config;
@@ -207,6 +208,9 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
                 &cli,
             )
             .await;
+        }
+        Some(cli::Subcommand::Plan { cmd }) => {
+            return plan_cmd::run_plan(cmd, &cli).await;
         }
         Some(cli::Subcommand::Commit { yes, dry_run }) => {
             let workspace_root = cli

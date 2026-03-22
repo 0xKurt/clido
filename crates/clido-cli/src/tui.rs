@@ -35,6 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
 use crate::image_input::ImageAttachment;
+use clido_planner::{Complexity, Plan, PlanEditor, TaskStatus};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -50,7 +51,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/cost", "show session cost so far"),
     ("/tokens", "show token usage so far"),
     ("/memory", "search long-term memory (usage: /memory <query>)"),
-    ("/plan", "show current task plan (requires --planner)"),
+    ("/plan", "show current task plan (requires --planner/--plan)"),
+    ("/plan edit", "open plan editor for the current plan"),
+    ("/plan save", "save current plan to .clido/plans/"),
+    ("/plan list", "list all saved plans"),
     ("/check", "run diagnostics on current project"),
     ("/image", "attach an image to the next message. Usage: /image <path>"),
     ("/index", "show repo index stats"),
@@ -103,6 +107,45 @@ enum AgentEvent {
     PlanCreated { tasks: Vec<String> },
     /// Emitted when the session model is switched (via /model, /fast, /smart).
     ModelSwitched { to_model: String },
+    /// Plan generated and ready for user review (--plan mode).
+    PlanReady { plan: Plan },
+    /// A plan task started executing.
+    #[allow(dead_code)]
+    PlanTaskStarted { task_id: String },
+    /// A plan task completed.
+    #[allow(dead_code)]
+    PlanTaskDone { task_id: String, success: bool },
+}
+
+// ── Plan editor state ─────────────────────────────────────────────────────────
+
+/// Which field is focused in the inline task edit form.
+#[derive(Debug, Clone, PartialEq)]
+enum TaskEditField {
+    Description,
+    Notes,
+    Complexity,
+}
+
+/// State for the inline task edit form.
+struct TaskEditState {
+    task_id: String,
+    description: String,
+    notes: String,
+    complexity: Complexity,
+    focused_field: TaskEditField,
+}
+
+impl TaskEditState {
+    fn new(task_id: &str, description: &str, notes: &str, complexity: Complexity) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            description: description.to_string(),
+            notes: notes.to_string(),
+            complexity,
+            focused_field: TaskEditField::Description,
+        }
+    }
 }
 
 // ── Session picker popup state ────────────────────────────────────────────────
@@ -338,6 +381,14 @@ struct App {
     /// Shared state: image to attach to the next prompt.  Written by the TUI on send,
     /// drained by agent_task before calling run/run_next_turn.
     image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    /// When `Some`, the plan editor full-screen overlay is active.
+    plan_editor: Option<PlanEditor>,
+    /// Currently selected task index in the plan editor list.
+    plan_selected_task: usize,
+    /// When `Some`, the inline task edit form is active.
+    plan_task_editing: Option<TaskEditState>,
+    /// Whether we're in plan dry-run mode (show editor but never execute).
+    plan_dry_run: bool,
 }
 
 impl App {
@@ -351,6 +402,7 @@ impl App {
         workspace_root: std::path::PathBuf,
         notify_enabled: bool,
         image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+        plan_dry_run: bool,
     ) -> Self {
         let mut app = Self {
             messages: Vec::new(),
@@ -391,6 +443,10 @@ impl App {
             per_turn_prev_model: None,
             pending_image: None,
             image_state,
+            plan_editor: None,
+            plan_selected_task: 0,
+            plan_task_editing: None,
+            plan_dry_run,
         };
         for line in crate::ui::BANNER.lines() {
             app.messages.push(ChatLine::Info(line.to_string()));
@@ -540,6 +596,12 @@ impl App {
 
 fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+
+    // ── Plan editor full-screen overlay ─────────────────────────────────────
+    if app.plan_editor.is_some() {
+        render_plan_editor(frame, app, area);
+        return;
+    }
 
     // Layout: header | chat | status (2) | queue (1) | hint (1) | input (3)
     let [header_area, chat_area, status_area, queue_area, hint_area, input_area] =
@@ -1023,6 +1085,200 @@ fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
+// ── Plan editor overlay ───────────────────────────────────────────────────────
+
+fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
+    let editor = match &app.plan_editor {
+        Some(e) => e,
+        None => return,
+    };
+
+    frame.render_widget(Clear, area);
+
+    let plan = &editor.plan;
+    let task_count = plan.tasks.len();
+    let done_count = plan.tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+    let complexity_summary = if plan.tasks.iter().any(|t| t.complexity == Complexity::High) {
+        "high"
+    } else if plan.tasks.iter().any(|t| t.complexity == Complexity::Medium) {
+        "medium"
+    } else {
+        "low"
+    };
+
+    let title = format!(
+        " Plan: {}  ({} tasks · complexity: {}) ",
+        truncate_chars(&plan.meta.goal, 40),
+        task_count,
+        complexity_summary
+    );
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner: task list | help bar at bottom
+    let [task_area, hint_area] = ratatui::layout::Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(2),
+    ])
+    .areas(inner);
+
+    // ── Task list ──
+    let mut task_lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(ref form) = app.plan_task_editing {
+        // Inline edit form for the selected task
+        task_lines.push(Line::from(vec![Span::styled(
+            "  Edit task",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )]));
+        task_lines.push(Line::raw(""));
+
+        let desc_style = if form.focused_field == TaskEditField::Description {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let notes_style = if form.focused_field == TaskEditField::Notes {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let comp_style = if form.focused_field == TaskEditField::Complexity {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        task_lines.push(Line::from(vec![
+            Span::styled("  Description: ", desc_style),
+            Span::styled(format!("[{}]", form.description), desc_style),
+        ]));
+        task_lines.push(Line::from(vec![
+            Span::styled("  Notes:        ", notes_style),
+            Span::styled(format!("[{}]", form.notes), notes_style),
+        ]));
+
+        let (low_style, med_style, high_style) = match form.complexity {
+            Complexity::Low => (
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Complexity::Medium => (
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Complexity::High => (
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        };
+        task_lines.push(Line::from(vec![
+            Span::styled("  Complexity:  ", comp_style),
+            Span::styled(" ● low ", low_style),
+            Span::styled(" ● medium ", med_style),
+            Span::styled(" ● high ", high_style),
+        ]));
+        task_lines.push(Line::raw(""));
+        task_lines.push(Line::from(vec![Span::styled(
+            "  Tab=next field  Enter=save  Esc=cancel",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        )]));
+    } else {
+        // Task list with selection highlight
+        let scroll_start = if app.plan_selected_task >= task_area.height as usize {
+            app.plan_selected_task - task_area.height as usize + 1
+        } else {
+            0
+        };
+
+        for (i, task) in plan.tasks.iter().enumerate() {
+            if i < scroll_start {
+                continue;
+            }
+            let selected = i == app.plan_selected_task;
+            let bg = if selected { Color::Blue } else { Color::Reset };
+            let fg = if selected { Color::White } else { Color::Gray };
+
+            let status_icon = match task.status {
+                TaskStatus::Pending => "○",
+                TaskStatus::Running => "↻",
+                TaskStatus::Done => "✓",
+                TaskStatus::Failed => "✗",
+                TaskStatus::Skipped => "⊘",
+            };
+
+            let complexity_badge = match task.complexity {
+                Complexity::Low => Span::styled(" [low] ", Style::default().fg(Color::DarkGray).bg(bg)),
+                Complexity::Medium => Span::styled(" [med] ", Style::default().fg(Color::Yellow).bg(bg)),
+                Complexity::High => Span::styled(" [high]", Style::default().fg(Color::Red).bg(bg)),
+            };
+
+            let skip_str = if task.skip { "⊘ " } else { "  " };
+            let deps_str = if task.depends_on.is_empty() {
+                String::new()
+            } else {
+                format!("  →{}", task.depends_on.join(","))
+            };
+            let marker = if selected { "▶" } else { " " };
+
+            task_lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} {} {}", marker, status_icon, skip_str),
+                    Style::default().fg(fg).bg(bg),
+                ),
+                Span::styled(
+                    format!("{:<5}", task.id),
+                    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+                complexity_badge,
+                Span::styled(
+                    format!("  {}{}", task.description, deps_str),
+                    Style::default().fg(fg).bg(bg),
+                ),
+            ]));
+        }
+
+        let progress = format!("  Progress: {}/{}", done_count, task_count);
+        task_lines.push(Line::raw(""));
+        task_lines.push(Line::from(vec![Span::styled(
+            progress,
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        )]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(task_lines).wrap(Wrap { trim: false }),
+        task_area,
+    );
+
+    // ── Hint bar ──
+    let dry_run_note = if app.plan_dry_run { "  [dry-run: x will not execute]" } else { "" };
+    let hint = if app.plan_task_editing.is_some() {
+        String::new()
+    } else {
+        format!(
+            "  Enter=edit  d=delete  n=new  Space=skip  ↑↓=move  s=save  x=execute  Esc=abort{}",
+            dry_run_note
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        )])),
+        hint_area,
+    );
+}
+
 // ── Modal component helpers ───────────────────────────────────────────────────
 
 /// Rect anchored just above the input field (grows upward).
@@ -1179,7 +1435,10 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("  /cost              show session cost so far".into()));
             app.push(ChatLine::Info("  /tokens            show token usage".into()));
             app.push(ChatLine::Info("  /memory <query>    search long-term memory".into()));
-            app.push(ChatLine::Info("  /plan              show current task plan".into()));
+            app.push(ChatLine::Info("  /plan              show current task plan (--plan flag)".into()));
+            app.push(ChatLine::Info("  /plan edit         open plan editor for active plan".into()));
+            app.push(ChatLine::Info("  /plan save         save current plan to .clido/plans/".into()));
+            app.push(ChatLine::Info("  /plan list         list all saved plans".into()));
             app.push(ChatLine::Info("  /check             run diagnostics on current project".into()));
             app.push(ChatLine::Info("  /index             show repo index stats".into()));
             app.push(ChatLine::Info("  /rules             show active project rules files (CLIDO.md)".into()));
@@ -1306,8 +1565,46 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 }
                 _ => {
                     app.push(ChatLine::Info(
-                        "  no plan — run with --planner to enable task decomposition".into(),
+                        "  no active plan — run with --plan to enable task decomposition".into(),
                     ));
+                }
+            }
+        }
+        "/plan edit" => {
+            if app.plan_editor.is_none() {
+                app.push(ChatLine::Info(
+                    "  no active plan editor — start a task with --plan to generate one".into(),
+                ));
+            }
+            // If plan_editor is Some, it's already showing. Just inform.
+        }
+        "/plan save" => {
+            if let Some(ref editor) = app.plan_editor {
+                match clido_planner::save_plan(&app.workspace_root, &editor.plan) {
+                    Ok(path) => app.push(ChatLine::Info(format!("  plan saved: {}", path.display()))),
+                    Err(e) => app.pending_error = Some(format!("save plan: {}", e)),
+                }
+            } else {
+                app.push(ChatLine::Info("  no active plan to save".into()));
+            }
+        }
+        "/plan list" => {
+            match clido_planner::list_plans(&app.workspace_root) {
+                Ok(summaries) if summaries.is_empty() => {
+                    app.push(ChatLine::Info("  no saved plans found".into()));
+                }
+                Ok(summaries) => {
+                    app.push(ChatLine::Info("  saved plans:".into()));
+                    for s in &summaries {
+                        app.push(ChatLine::Info(format!(
+                            "    {}  ({} tasks, {} done)  {}",
+                            s.id, s.task_count, s.done,
+                            truncate_chars(&s.goal, 50)
+                        )));
+                    }
+                }
+                Err(e) => {
+                    app.pending_error = Some(format!("list plans: {}", e));
                 }
             }
         }
@@ -1736,6 +2033,210 @@ fn scroll_down(app: &mut App, lines: u16) {
     }
 }
 
+// ── Plan editor key handling ──────────────────────────────────────────────────
+
+fn handle_plan_editor_key(app: &mut App, event: crossterm::event::KeyEvent) {
+    use KeyCode::*;
+
+    // Ctrl+C always quits.
+    if event.modifiers == crossterm::event::KeyModifiers::CONTROL && event.code == Char('c') {
+        app.quit = true;
+        return;
+    }
+
+    // If the inline edit form is active, handle form keys.
+    if app.plan_task_editing.is_some() {
+        match event.code {
+            Tab => {
+                if let Some(ref mut form) = app.plan_task_editing {
+                    form.focused_field = match form.focused_field {
+                        TaskEditField::Description => TaskEditField::Notes,
+                        TaskEditField::Notes => TaskEditField::Complexity,
+                        TaskEditField::Complexity => TaskEditField::Description,
+                    };
+                }
+            }
+            Left | Right => {
+                if let Some(ref mut form) = app.plan_task_editing {
+                    if form.focused_field == TaskEditField::Complexity {
+                        form.complexity = match (&form.complexity, event.code) {
+                            (Complexity::Low, Right) => Complexity::Medium,
+                            (Complexity::Medium, Right) => Complexity::High,
+                            (Complexity::High, Right) => Complexity::Low,
+                            (Complexity::High, Left) => Complexity::Medium,
+                            (Complexity::Medium, Left) => Complexity::Low,
+                            (Complexity::Low, Left) => Complexity::High,
+                            _ => form.complexity.clone(),
+                        };
+                    }
+                }
+            }
+            Backspace => {
+                if let Some(ref mut form) = app.plan_task_editing {
+                    match form.focused_field {
+                        TaskEditField::Description => { form.description.pop(); }
+                        TaskEditField::Notes => { form.notes.pop(); }
+                        TaskEditField::Complexity => {}
+                    }
+                }
+            }
+            Char(c) => {
+                if let Some(ref mut form) = app.plan_task_editing {
+                    match form.focused_field {
+                        TaskEditField::Description => form.description.push(c),
+                        TaskEditField::Notes => form.notes.push(c),
+                        TaskEditField::Complexity => {}
+                    }
+                }
+            }
+            Enter => {
+                // Save the form edits back to the plan.
+                if let (Some(form), Some(ref mut editor)) =
+                    (app.plan_task_editing.take(), app.plan_editor.as_mut())
+                {
+                    let _ = editor.rename_task(&form.task_id, &form.description);
+                    let _ = editor.set_notes(&form.task_id, &form.notes);
+                    let _ = editor.set_complexity(&form.task_id, form.complexity.clone());
+                }
+            }
+            Esc => {
+                app.plan_task_editing = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Task list navigation.
+    let task_count = app.plan_editor.as_ref().map(|e| e.plan.tasks.len()).unwrap_or(0);
+
+    match event.code {
+        Up => {
+            if app.plan_selected_task > 0 {
+                app.plan_selected_task -= 1;
+            }
+        }
+        Down => {
+            if app.plan_selected_task + 1 < task_count {
+                app.plan_selected_task += 1;
+            }
+        }
+        Enter => {
+            // Open edit form for selected task.
+            if let Some(ref editor) = app.plan_editor {
+                if let Some(task) = editor.plan.tasks.get(app.plan_selected_task) {
+                    app.plan_task_editing = Some(TaskEditState::new(
+                        &task.id,
+                        &task.description,
+                        &task.notes,
+                        task.complexity.clone(),
+                    ));
+                }
+            }
+        }
+        Char('d') => {
+            // Delete selected task.
+            if let Some(ref mut editor) = app.plan_editor {
+                if let Some(task) = editor.plan.tasks.get(app.plan_selected_task) {
+                    let id = task.id.clone();
+                    if editor.delete_task(&id).is_ok() {
+                        if app.plan_selected_task >= editor.plan.tasks.len() && app.plan_selected_task > 0 {
+                            app.plan_selected_task -= 1;
+                        }
+                    }
+                }
+            }
+        }
+        Char('n') => {
+            // Add a new empty task and open edit form.
+            if let Some(ref mut editor) = app.plan_editor {
+                let new_id = format!("t{}", editor.plan.tasks.len() + 1);
+                let _ = editor.add_task(new_id.clone(), "New task".to_string(), vec![]);
+                app.plan_selected_task = editor.plan.tasks.len() - 1;
+                app.plan_task_editing = Some(TaskEditState::new(
+                    &new_id,
+                    "New task",
+                    "",
+                    Complexity::Low,
+                ));
+            }
+        }
+        Char(' ') => {
+            // Toggle skip.
+            if let Some(ref mut editor) = app.plan_editor {
+                if let Some(task) = editor.plan.tasks.get(app.plan_selected_task) {
+                    let id = task.id.clone();
+                    let _ = editor.toggle_skip(&id);
+                }
+            }
+        }
+        Char('r') => {
+            // Move selected task up (reorder).
+            if let Some(ref mut editor) = app.plan_editor {
+                if editor.move_up(app.plan_selected_task).is_ok() {
+                    app.plan_selected_task -= 1;
+                }
+            }
+        }
+        Char('s') => {
+            // Save plan to .clido/plans/.
+            if let Some(ref editor) = app.plan_editor {
+                match clido_planner::save_plan(&app.workspace_root, &editor.plan) {
+                    Ok(path) => {
+                        app.push(ChatLine::Info(format!(
+                            "  plan saved: {}",
+                            path.display()
+                        )));
+                    }
+                    Err(e) => {
+                        app.pending_error = Some(format!("save plan: {}", e));
+                    }
+                }
+            }
+        }
+        Char('x') => {
+            // Execute the plan (or just close if dry-run).
+            if let Some(editor) = app.plan_editor.take() {
+                app.plan_task_editing = None;
+                if app.plan_dry_run {
+                    app.push(ChatLine::Info(
+                        "  [dry-run] plan would execute now (--plan-dry-run active)".into(),
+                    ));
+                } else {
+                    // Build a combined prompt from non-skipped tasks.
+                    let tasks: Vec<String> = editor
+                        .plan
+                        .tasks
+                        .iter()
+                        .filter(|t| !t.skip)
+                        .map(|t| {
+                            if t.notes.is_empty() {
+                                format!("{}: {}", t.id, t.description)
+                            } else {
+                                format!("{}: {}  (note: {})", t.id, t.description, t.notes)
+                            }
+                        })
+                        .collect();
+                    let prompt = format!(
+                        "Goal: {}\n\nPlease execute the following plan in order:\n{}",
+                        editor.plan.meta.goal,
+                        tasks.join("\n")
+                    );
+                    app.send_now(prompt);
+                }
+            }
+        }
+        Esc => {
+            // Abort plan — close editor without executing.
+            app.plan_editor = None;
+            app.plan_task_editing = None;
+            app.push(ChatLine::Info("  plan aborted.".into()));
+            app.busy = false;
+        }
+        _ => {}
+    }
+}
+
 // ── Input handling ────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
@@ -1748,6 +2249,12 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         (Km::CONTROL, Char('c')) | (Km::CONTROL, Char('d'))
     ) {
         app.quit = true;
+        return;
+    }
+
+    // ── Plan editor (full-screen modal — intercepts all keys) ────────────────
+    if app.plan_editor.is_some() {
+        handle_plan_editor_key(app, event);
         return;
     }
 
@@ -2140,8 +2647,10 @@ async fn agent_task(
                         prompt
                     );
                     if let Ok(plan_text) = agent.complete_simple(&planning_prompt).await {
-                        if let Ok(graph) = clido_planner::parse_plan(&plan_text) {
-                            let task_descriptions: Vec<String> = graph
+                        // Try to parse as a full Plan with metadata first.
+                        let plan_opt = clido_planner::parse_plan_with_meta(&plan_text).ok();
+                        if let Some(plan) = plan_opt {
+                            let task_descriptions: Vec<String> = plan
                                 .tasks
                                 .iter()
                                 .map(|t| {
@@ -2157,9 +2666,19 @@ async fn agent_task(
                                     }
                                 })
                                 .collect();
-                            let _ = event_tx.send(AgentEvent::PlanCreated {
-                                tasks: task_descriptions,
-                            });
+                            // If plan_no_edit is NOT set, emit PlanReady to open the TUI editor.
+                            if !cli.plan_no_edit {
+                                let _ = event_tx.send(AgentEvent::PlanReady { plan });
+                                // Mark first_turn as consumed so the next prompt (execution)
+                                // does not try to re-plan.
+                                first_turn = false;
+                                // Do not proceed with agent execution — wait for the user to
+                                // approve/edit and press 'x' in the plan editor. The editor's
+                                // 'x' key sends a combined prompt via send_now.
+                                continue;
+                            } else {
+                                let _ = event_tx.send(AgentEvent::PlanCreated { tasks: task_descriptions });
+                            }
                         }
                         // If parse fails, silently proceed (fallback to reactive)
                     }
@@ -2391,7 +2910,7 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
         std::sync::Arc::new(std::sync::Mutex::new(None));
 
     tokio::spawn(agent_task(
-        cli,
+        cli.clone(),
         workspace_root.clone(),
         prompt_rx,
         resume_rx,
@@ -2431,7 +2950,8 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(prompt_tx, resume_tx, model_switch_tx, cancel, provider, model, workspace_root.clone(), notify_enabled, image_state);
+    let plan_dry_run = cli.plan_dry_run;
+    let mut app = App::new(prompt_tx, resume_tx, model_switch_tx, cancel, provider, model, workspace_root.clone(), notify_enabled, image_state, plan_dry_run);
     let result = event_loop(&mut app, &mut terminal, &mut event_rx, &mut perm_rx).await;
 
     let _ = disable_raw_mode();
@@ -2575,6 +3095,20 @@ async fn event_loop(
                         }
                         // Store last plan so /plan command can show it later.
                         app.last_plan = Some(tasks);
+                    }
+                    Some(AgentEvent::PlanReady { plan }) => {
+                        // Open the plan editor overlay (blocks execution until user presses x or Esc).
+                        app.plan_selected_task = 0;
+                        app.plan_task_editing = None;
+                        app.plan_editor = Some(PlanEditor::new(plan));
+                        // Mark as busy so the spinner shows — agent is paused waiting for plan approval.
+                    }
+                    Some(AgentEvent::PlanTaskStarted { task_id }) => {
+                        app.push(ChatLine::Info(format!("  ↻ plan task {} started", task_id)));
+                    }
+                    Some(AgentEvent::PlanTaskDone { task_id, success }) => {
+                        let icon = if success { "✓" } else { "✗" };
+                        app.push(ChatLine::Info(format!("  {} plan task {} done", icon, task_id)));
                     }
                     None => {}
                 }

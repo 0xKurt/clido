@@ -132,6 +132,10 @@ mod tests {
             description: format!("Task {}", id),
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             tools: None,
+            complexity: crate::graph::Complexity::default(),
+            skip: false,
+            notes: String::new(),
+            status: crate::graph::TaskStatus::default(),
         }
     }
 

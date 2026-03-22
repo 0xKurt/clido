@@ -18,6 +18,10 @@ fn node(id: &str, deps: &[&str]) -> TaskNode {
         description: format!("Task {}", id),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         tools: None,
+        complexity: clido_planner::Complexity::default(),
+        skip: false,
+        notes: String::new(),
+        status: clido_planner::TaskStatus::default(),
     }
 }
 

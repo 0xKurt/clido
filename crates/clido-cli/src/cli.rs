@@ -115,8 +115,16 @@ pub struct Cli {
 
     /// Enable task decomposition planner (experimental): decomposes the prompt into a DAG
     /// of subtasks before executing. Falls back to the reactive loop on plan failure.
-    #[arg(long)]
+    #[arg(long, alias = "plan")]
     pub planner: bool,
+
+    /// With --planner/--plan: generate the plan and show it but never execute.
+    #[arg(long)]
+    pub plan_dry_run: bool,
+
+    /// With --planner/--plan: skip the interactive editor and execute immediately (CI-friendly).
+    #[arg(long)]
+    pub plan_no_edit: bool,
 
     /// Skip all CLIDO.md / rules file injection for this invocation.
     #[arg(long)]
@@ -271,6 +279,12 @@ pub enum Subcommand {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Plan management (list, show, run, delete saved plans).
+    Plan {
+        #[command(subcommand)]
+        cmd: PlanCmd,
+    },
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -401,6 +415,27 @@ pub enum CheckpointCmd {
     },
 }
 
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum PlanCmd {
+    /// List all saved plans.
+    List,
+    /// Show a saved plan with its tasks and status.
+    Show {
+        /// Plan ID.
+        id: String,
+    },
+    /// Execute a saved plan (resumes from the first pending task).
+    Run {
+        /// Plan ID.
+        id: String,
+    },
+    /// Delete a saved plan.
+    Delete {
+        /// Plan ID.
+        id: String,
+    },
+}
+
 impl Cli {
     /// Single prompt string from positional args.
     pub fn prompt_str(&self) -> String {
@@ -431,6 +466,7 @@ impl Cli {
             Some(Subcommand::Commit { .. }) => false,
             Some(Subcommand::Checkpoint { .. }) => false,
             Some(Subcommand::Rollback { .. }) => false,
+            Some(Subcommand::Plan { .. }) => false,
         }
     }
 }

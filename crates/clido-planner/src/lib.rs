@@ -5,10 +5,14 @@
 //! Falls back to the reactive agent loop whenever the plan is invalid or
 //! low-quality.
 
+pub mod editor;
 pub mod executor;
 pub mod graph;
 pub mod parser;
+pub mod storage;
 
+pub use editor::{PlanEditError, PlanEditor};
 pub use executor::{PlanExecutor, PlanResult, TaskResult, TaskRunner};
-pub use graph::{GraphError, TaskGraph, TaskId, TaskNode};
-pub use parser::{parse_plan, PlanParseError};
+pub use graph::{Complexity, GraphError, Plan, PlanMeta, TaskGraph, TaskId, TaskNode, TaskStatus};
+pub use parser::{parse_plan, parse_plan_with_meta, plan_to_json, PlanParseError};
+pub use storage::{delete_plan, list_plans, load_plan, save_plan, PlanSummary, StorageError};
