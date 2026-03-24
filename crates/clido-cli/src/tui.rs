@@ -2310,6 +2310,18 @@ fn tool_color(name: &str, done: bool, is_error: bool) -> Color {
     }
 }
 
+/// Return true if `input` is an exact slash command or a slash command followed
+/// by a space (i.e. a command with arguments). Used to decide whether Enter
+/// should execute a command or send the input as a chat message.
+fn is_known_slash_cmd(input: &str) -> bool {
+    if !input.starts_with('/') {
+        return false;
+    }
+    SLASH_COMMANDS
+        .iter()
+        .any(|(cmd, _)| input == *cmd || input.starts_with(&format!("{} ", cmd)))
+}
+
 fn slash_completions(input: &str) -> Vec<(&'static str, &'static str)> {
     if !input.starts_with('/') {
         return vec![];
@@ -2790,7 +2802,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
                     .to_string(),
             );
         }
-        _ if cmd.starts_with("/pr") => {
+        _ if cmd == "/pr" || cmd.starts_with("/pr ") => {
             let title_arg = cmd.trim_start_matches("/pr").trim().to_string();
             let title_instruction = if title_arg.is_empty() {
                 "Generate a PR title (≤70 chars, imperative mood) and body from the branch diff."
@@ -3003,38 +3015,37 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 ));
             }
         },
+        "/profile" => {
+            app.push(ChatLine::Info(format!(
+                "  active profile: {}  (use /profile <name> to switch)",
+                app.current_profile
+            )));
+        }
         cmd if cmd.starts_with("/profile ") => {
             let name = cmd.trim_start_matches("/profile ").trim();
-            if name.is_empty() {
-                app.push(ChatLine::Info(format!(
-                    "  active profile: {}",
-                    app.current_profile
-                )));
-            } else {
-                match clido_core::load_config(&app.workspace_root) {
-                    Err(e) => app.push(ChatLine::Info(format!(
-                        "  profile: error loading config: {}",
-                        e
-                    ))),
-                    Ok(loaded) => {
-                        if !loaded.profiles.contains_key(name) {
-                            app.push(ChatLine::Info(format!(
-                                "  profile '{}' not found. Use /profiles to list.",
-                                name
-                            )));
-                        } else if name == loaded.default_profile {
-                            app.push(ChatLine::Info(format!(
-                                "  profile '{}' is already active.",
-                                name
-                            )));
-                        } else {
-                            app.push(ChatLine::Info(format!(
-                                "  switching to profile '{}'…",
-                                name
-                            )));
-                            app.wants_profile_switch = Some(name.to_string());
-                            app.quit = true;
-                        }
+            match clido_core::load_config(&app.workspace_root) {
+                Err(e) => app.push(ChatLine::Info(format!(
+                    "  profile: error loading config: {}",
+                    e
+                ))),
+                Ok(loaded) => {
+                    if !loaded.profiles.contains_key(name) {
+                        app.push(ChatLine::Info(format!(
+                            "  profile '{}' not found. Use /profiles to list.",
+                            name
+                        )));
+                    } else if name == loaded.default_profile {
+                        app.push(ChatLine::Info(format!(
+                            "  profile '{}' is already active.",
+                            name
+                        )));
+                    } else {
+                        app.push(ChatLine::Info(format!(
+                            "  switching to profile '{}'…",
+                            name
+                        )));
+                        app.wants_profile_switch = Some(name.to_string());
+                        app.quit = true;
                     }
                 }
             }
@@ -4160,12 +4171,7 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         (_, Enter) => {
             // Execute slash command if input starts with a known command prefix; otherwise normal send.
             let trimmed = app.input.trim().to_string();
-            let is_slash_cmd = trimmed.starts_with('/')
-                && SLASH_COMMANDS.iter().any(|(cmd, _)| {
-                    // Exact match or prefix match (for commands that accept arguments like /memory <query>).
-                    trimmed == *cmd || trimmed.starts_with(&format!("{} ", cmd))
-                });
-            if is_slash_cmd {
+            if is_known_slash_cmd(&trimmed) {
                 app.input.clear();
                 app.cursor = 0;
                 execute_slash(app, &trimmed);
@@ -5184,5 +5190,175 @@ mod tests {
         let smart_model = "claude-opus-4-6";
         assert!(!smart_model.is_empty());
         assert!(smart_model.contains("opus"));
+    }
+
+    // ── slash_completions ──────────────────────────────────────────────────────
+
+    #[test]
+    fn completions_for_slash_only_returns_all_commands() {
+        let c = slash_completions("/");
+        assert_eq!(c.len(), SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn completions_for_pr_includes_profile_variants() {
+        // When the user types "/pr", autocomplete should offer /pr, /profile,
+        // and /profiles — all are valid prefixed matches for the popup.
+        let c = slash_completions("/pr");
+        let cmds: Vec<&str> = c.iter().map(|(cmd, _)| *cmd).collect();
+        assert!(cmds.contains(&"/pr"), "/pr must be in completions");
+        assert!(
+            cmds.contains(&"/profile"),
+            "/profile must be in completions"
+        );
+        assert!(
+            cmds.contains(&"/profiles"),
+            "/profiles must be in completions"
+        );
+    }
+
+    #[test]
+    fn completions_for_profile_does_not_include_pr() {
+        let c = slash_completions("/profile");
+        let cmds: Vec<&str> = c.iter().map(|(cmd, _)| *cmd).collect();
+        assert!(
+            !cmds.contains(&"/pr"),
+            "/pr must NOT appear for /profile prefix"
+        );
+    }
+
+    #[test]
+    fn completions_for_profiles_returns_only_profiles() {
+        let c = slash_completions("/profiles");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "/profiles");
+    }
+
+    #[test]
+    fn completions_empty_for_non_slash() {
+        assert!(slash_completions("hello").is_empty());
+        assert!(slash_completions("").is_empty());
+    }
+
+    // ── is_known_slash_cmd ────────────────────────────────────────────────────
+
+    #[test]
+    fn known_slash_cmd_exact_match() {
+        assert!(is_known_slash_cmd("/pr"));
+        assert!(is_known_slash_cmd("/clear"));
+        assert!(is_known_slash_cmd("/ship"));
+        assert!(is_known_slash_cmd("/profile"));
+        assert!(is_known_slash_cmd("/profiles"));
+    }
+
+    #[test]
+    fn known_slash_cmd_with_args() {
+        assert!(is_known_slash_cmd("/pr my feature title"));
+        assert!(is_known_slash_cmd("/profile work"));
+        assert!(is_known_slash_cmd("/memory search query"));
+        assert!(is_known_slash_cmd("/branch feature/foo"));
+        assert!(is_known_slash_cmd("/ship fix login bug"));
+    }
+
+    #[test]
+    fn known_slash_cmd_profile_with_name_is_recognized() {
+        // Regression: /profile <name> must be recognized as a slash command,
+        // not silently treated as chat input.
+        assert!(is_known_slash_cmd("/profile default"));
+        assert!(is_known_slash_cmd("/profile my-work-profile"));
+    }
+
+    #[test]
+    fn known_slash_cmd_rejects_unknown() {
+        assert!(!is_known_slash_cmd("/prfoo"));
+        assert!(!is_known_slash_cmd("/notacommand"));
+        assert!(!is_known_slash_cmd("not a slash"));
+        assert!(!is_known_slash_cmd(""));
+    }
+
+    // ── slash_completion_rows grouping ────────────────────────────────────────
+
+    #[test]
+    fn completion_rows_have_headers_between_sections() {
+        let rows = slash_completion_rows("/");
+        let headers: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| {
+                if let CompletionRow::Header(h) = r {
+                    Some(*h)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // All six sections should appear as headers.
+        assert!(headers.contains(&"Session"));
+        assert!(headers.contains(&"Git"));
+        assert!(headers.contains(&"Model"));
+        assert!(headers.contains(&"Context"));
+        assert!(headers.contains(&"Plan"));
+        assert!(headers.contains(&"Project"));
+    }
+
+    #[test]
+    fn completion_rows_pr_section_under_git_header() {
+        let rows = slash_completion_rows("/pr");
+        // Should have exactly one Git header since /pr, /profile, /profiles
+        // all live in different sections.
+        let header_sections: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| {
+                if let CompletionRow::Header(h) = r {
+                    Some(*h)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            header_sections.contains(&"Git"),
+            "Git section header expected"
+        );
+        assert!(
+            header_sections.contains(&"Project"),
+            "Project section header expected (contains /profile)"
+        );
+    }
+
+    #[test]
+    fn completion_rows_flat_indices_are_contiguous() {
+        // flat_idx in Cmd rows must be 0, 1, 2, ... without gaps.
+        let rows = slash_completion_rows("/");
+        let indices: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| {
+                if let CompletionRow::Cmd { flat_idx, .. } = r {
+                    Some(*flat_idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (expected, got) in indices.iter().enumerate() {
+            assert_eq!(
+                expected, *got,
+                "flat_idx out of order at position {}",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn slash_commands_and_sections_have_same_command_count() {
+        // SLASH_COMMANDS flat list must match total commands across all sections.
+        let section_total: usize = SLASH_COMMAND_SECTIONS
+            .iter()
+            .map(|(_, cmds)| cmds.len())
+            .sum();
+        assert_eq!(
+            SLASH_COMMANDS.len(),
+            section_total,
+            "SLASH_COMMANDS and SLASH_COMMAND_SECTIONS are out of sync"
+        );
     }
 }
