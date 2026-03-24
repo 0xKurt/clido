@@ -246,6 +246,32 @@ mod tests {
         assert!(out.content.contains("unexpected parameter"));
     }
 
+    /// Lines 51-52: is_read_only returns true.
+    #[test]
+    fn grep_tool_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        assert!(tool.is_read_only());
+    }
+
+    /// Line 80: path is provided explicitly.
+    #[tokio::test]
+    async fn grep_with_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("main.rs"), "fn hello() {}").unwrap();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let canonical_sub = std::fs::canonicalize(&sub).unwrap();
+        let out = tool
+            .execute(serde_json::json!({
+                "pattern": "hello",
+                "path": canonical_sub.to_str().unwrap()
+            }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+    }
+
     #[tokio::test]
     async fn grep_head_limit() {
         let dir = tempfile::tempdir().unwrap();

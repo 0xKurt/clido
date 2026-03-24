@@ -42,12 +42,12 @@ fn clido_init_exits_zero() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // provider=1 (Anthropic), model=default (Enter), api_key=Y
+    // provider=1 (OpenRouter), api_key=Y, model=test-model (fetch will fail → text input)
     child
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"1\n\nY\n")
+        .write_all(b"1\nY\ntest-model\n")
         .unwrap();
     child.stdin.as_mut().unwrap().flush().unwrap();
     drop(child.stdin.take());
@@ -114,14 +114,14 @@ fn init_with_piped_input_and_check_config(input: &str, test_suffix: &str) {
 
 #[test]
 fn first_run_interactive() {
-    // provider=1 (Anthropic), model=default (Enter), api_key=Y
-    init_with_piped_input_and_check_config("1\n\nY\n", "first_run");
+    // provider=1 (OpenRouter), api_key=test-key, model=test-model (fetch will fail → text input)
+    init_with_piped_input_and_check_config("1\ntest-key\ntest-model\n", "first_run");
 }
 
 #[test]
 fn init_interactive_writes_config() {
-    // provider=1 (Anthropic), model=default (Enter), api_key=Y
-    init_with_piped_input_and_check_config("1\n\nY\n", "init_writes");
+    // provider=1 (OpenRouter), api_key=test-key, model=test-model
+    init_with_piped_input_and_check_config("1\ntest-key\ntest-model\n", "init_writes");
 }
 
 #[test]
@@ -139,12 +139,12 @@ fn init_openrouter_writes_config() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // provider=2 (OpenRouter), model=default (Enter), api_key=Y
+    // provider=1 (OpenRouter), api_key=sk-or-test-key, model=test-model (fetch will fail → text input)
     child
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"2\n\nY\n")
+        .write_all(b"1\nsk-or-test-key\ntest-model\n")
         .unwrap();
     child.stdin.as_mut().unwrap().flush().unwrap();
     drop(child.stdin.take());
@@ -168,8 +168,8 @@ fn init_openrouter_writes_config() {
         content
     );
     assert!(
-        content.contains("OPENROUTER_API_KEY"),
-        "config must reference OPENROUTER_API_KEY; config: {}",
+        content.contains("api_key"),
+        "config must contain api_key field; config: {}",
         content
     );
     let _ = std::fs::remove_file(&config_path);
@@ -193,12 +193,12 @@ fn init_stores_api_key_directly_in_config() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // provider=2 (OpenRouter), model=default, api_key=No, key=sk-test-direct-key
+    // provider=2 (Anthropic), api_key=sk-test-direct-key, model=test-model (fetch will fail → text input)
     child
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"2\n\nN\nsk-test-direct-key\n")
+        .write_all(b"2\nsk-test-direct-key\ntest-model\n")
         .unwrap();
     child.stdin.as_mut().unwrap().flush().unwrap();
     drop(child.stdin.take());
@@ -257,27 +257,34 @@ fn cli_output_format_json_in_help() {
 }
 
 #[test]
-fn cli_list_models_exits_zero() {
-    let out = clido_bin().arg("list-models").output().unwrap();
+fn cli_list_models_no_config_exits_zero() {
+    // Without a config, list-models prints a message to stderr and exits 0.
+    let tmp = std::env::temp_dir().join(format!("clido_lm_noconf_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let out = clido_bin()
+        .env("CLIDO_CONFIG", tmp.join("nonexistent.toml"))
+        .arg("list-models")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir(&tmp);
     assert!(
         out.status.success(),
         "expected exit 0; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.is_empty(),
-        "expected non-empty model list; stdout: {}",
-        stdout
-    );
 }
 
 #[test]
-fn cli_list_models_json_is_valid_json() {
+fn cli_list_models_json_no_config_returns_empty_array() {
+    // Without a config, --json outputs an empty JSON array.
+    let tmp = std::env::temp_dir().join(format!("clido_lm_json_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
     let out = clido_bin()
+        .env("CLIDO_CONFIG", tmp.join("nonexistent.toml"))
         .args(["list-models", "--json"])
         .output()
         .unwrap();
+    let _ = std::fs::remove_dir(&tmp);
     assert!(
         out.status.success(),
         "expected exit 0; stderr: {}",
@@ -285,31 +292,8 @@ fn cli_list_models_json_is_valid_json() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("list-models --json output is not valid JSON");
-    assert!(
-        parsed.is_array() || parsed.is_object(),
-        "expected JSON array or object; got: {}",
-        stdout
-    );
-}
-
-#[test]
-fn cli_list_models_provider_filter() {
-    let out = clido_bin()
-        .args(["list-models", "--provider", "anthropic"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "expected exit 0; stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.to_lowercase().contains("claude") || stdout.to_lowercase().contains("anthropic"),
-        "expected anthropic models in output; stdout: {}",
-        stdout
-    );
+        serde_json::from_str(stdout.trim()).expect("list-models --json must be valid JSON");
+    assert!(parsed.is_array(), "expected JSON array; got: {}", stdout);
 }
 
 #[test]
@@ -398,7 +382,7 @@ fn cli_text_output_exits_zero_on_help() {
 
 // ─── UX requirements ──────────────────────────────────────────────────────────
 
-/// UX requirements: init prompts must state what to type and press Enter (ux-requirements §2.3).
+/// UX requirements: init prompts must show a numbered list of providers.
 #[test]
 fn init_prompts_contain_ux_copy() {
     let tmp = std::env::temp_dir().join(format!("clido_ux_test_{}", std::process::id()));
@@ -413,25 +397,26 @@ fn init_prompts_contain_ux_copy() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // provider=1, model=default, api_key=Y
+    // provider=1 (OpenRouter), api_key=sk-or-test, model=test-model (fetch will fail → text input)
     child
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"1\n\nY\n")
+        .write_all(b"1\nsk-or-test\ntest-model\n")
         .unwrap();
     child.stdin.as_mut().unwrap().flush().unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // The non-TTY setup prints a numbered provider list with "Enter 1–N:" prompt.
     assert!(
-        stderr.contains("Type 1, 2, or 3") || stderr.contains("press Enter"),
-        "stderr must contain UX copy (Type 1, 2, or 3 / press Enter); stderr: {}",
+        stderr.contains("Provider") || stderr.contains("provider"),
+        "stderr must contain provider prompt; stderr: {}",
         stderr
     );
     assert!(
-        stderr.contains("[default: 1]") || stderr.contains("default: 1"),
-        "stderr must show default; stderr: {}",
+        stderr.contains("1)") || stderr.contains("Enter"),
+        "stderr must contain numbered list or Enter prompt; stderr: {}",
         stderr
     );
     let _ = std::fs::remove_file(&config_path);

@@ -626,4 +626,205 @@ FAIL	example.com/calc	0.045s
         assert!(t.len() <= MAX_OUTPUT_CHARS + 20); // allow for the ellipsis suffix
         assert!(t.contains('…'));
     }
+
+    // --- parse_npm_output ---
+
+    const NPM_JEST_OUTPUT: &str = r#"
+ PASS  src/utils.test.js
+ FAIL  src/app.test.js
+
+Tests:       3 passed, 2 failed, 5 total
+Test Suites: 1 failed, 1 passed, 2 total
+"#;
+
+    #[test]
+    fn test_npm_parses_jest_output() {
+        let r = parse_npm_output(NPM_JEST_OUTPUT);
+        assert_eq!(r.passed, 3);
+        assert_eq!(r.failed, 2);
+        assert!(!r.all_pass());
+        assert_eq!(r.failures.len(), 1);
+        assert_eq!(r.failures[0].name, "(test suite)");
+    }
+
+    #[test]
+    fn test_npm_all_pass() {
+        let output = "Tests:       5 passed, 0 failed, 5 total\n";
+        let r = parse_npm_output(output);
+        assert_eq!(r.passed, 5);
+        assert_eq!(r.failed, 0);
+        assert!(r.all_pass());
+    }
+
+    #[test]
+    fn test_npm_fallback_error_keyword() {
+        let output = "Some unexpected error occurred";
+        let r = parse_npm_output(output);
+        assert_eq!(r.failed, 1);
+        assert!(!r.all_pass());
+    }
+
+    #[test]
+    fn test_npm_fallback_no_keywords_treated_as_pass() {
+        let output = "All done!";
+        let r = parse_npm_output(output);
+        // No keywords match → treated as pass
+        assert!(r.all_pass());
+        assert_eq!(r.passed, 1);
+    }
+
+    // --- parse_cargo_output: placeholder entries for failures without details ---
+
+    const CARGO_FAIL_NO_DETAIL: &str = r#"
+running 2 tests
+test foo::tests::test_a ... ok
+test foo::tests::test_b ... FAILED
+
+failures:
+
+    foo::tests::test_b
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"#;
+
+    #[test]
+    fn test_cargo_failure_no_stdout_block_creates_placeholder() {
+        let r = parse_cargo_output(CARGO_FAIL_NO_DETAIL);
+        assert_eq!(r.failed, 1);
+        assert_eq!(r.failures.len(), 1);
+        assert_eq!(r.failures[0].name, "foo::tests::test_b");
+        // No stdout detail block → empty output
+        assert!(r.failures[0].output.is_empty());
+    }
+
+    // --- parse_pytest: summary without FAILED lines ---
+
+    const PYTEST_SUMMARY_ONLY: &str = r#"
+2 failed in 0.05s
+"#;
+
+    #[test]
+    fn test_pytest_summary_only_synthesizes_failure() {
+        let r = parse_pytest_output(PYTEST_SUMMARY_ONLY);
+        assert_eq!(r.failed, 2);
+        assert!(!r.failures.is_empty());
+        assert_eq!(r.failures[0].name, "(unknown)");
+    }
+
+    // --- TestResult methods ---
+
+    #[test]
+    fn test_result_all_pass_when_no_failures() {
+        let r = TestResult {
+            passed: 5,
+            failed: 0,
+            skipped: 1,
+            duration_ms: 100,
+            failures: vec![],
+        };
+        assert!(r.all_pass());
+        assert!(r.failing_names().is_empty());
+    }
+
+    #[test]
+    fn test_result_failing_names_returns_names() {
+        let r = TestResult {
+            passed: 1,
+            failed: 2,
+            skipped: 0,
+            duration_ms: 50,
+            failures: vec![
+                TestFailure {
+                    name: "test_a".into(),
+                    output: "".into(),
+                },
+                TestFailure {
+                    name: "test_b".into(),
+                    output: "detail".into(),
+                },
+            ],
+        };
+        let names = r.failing_names();
+        assert_eq!(names, vec!["test_a", "test_b"]);
+    }
+
+    // --- run_tests: custom runner ---
+
+    #[test]
+    fn run_tests_custom_runner_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        // "true" should succeed
+        let result = run_tests(tmp.path(), Some("true"));
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(r.all_pass());
+    }
+
+    #[test]
+    fn run_tests_custom_runner_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        // "false" exits with non-zero
+        let result = run_tests(tmp.path(), Some("false"));
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(!r.all_pass());
+    }
+
+    // --- run_tests: explicit runner types ---
+
+    #[test]
+    fn run_tests_explicit_pytest_string_recognizes_python() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Even if no pytest installed, it should attempt the python runner
+        // (not panic)
+        let _ = run_tests(tmp.path(), Some("python"));
+    }
+
+    #[test]
+    fn run_tests_explicit_vitest_string_recognizes_npm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = run_tests(tmp.path(), Some("vitest"));
+    }
+
+    #[test]
+    fn run_tests_explicit_go_string_recognizes_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = run_tests(tmp.path(), Some("go"));
+    }
+
+    #[test]
+    fn run_tests_no_runner_no_markers_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = run_tests(tmp.path(), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("detect test runner") || msg.contains("Could not"));
+    }
+
+    /// Lines 319-321: pytest skipped count parsing.
+    #[test]
+    fn test_pytest_parses_skipped_in_summary() {
+        let output = "2 passed, 1 failed, 3 skipped in 0.20s\nFAILED test_foo.py::test_bad\n";
+        let r = parse_pytest_output(output);
+        assert_eq!(r.passed, 2);
+        assert_eq!(r.failed, 1);
+        assert_eq!(r.skipped, 3);
+    }
+
+    /// Lines 248-251: Cargo output with summary count but no individual FAILED lines.
+    /// This path is reachable if someone crafts output with test result summary but no
+    /// individual test lines. But in practice `failed` is only set via individual lines,
+    /// so this tests the placeholder path via parse_cargo_output with no detail blocks.
+    #[test]
+    fn test_cargo_no_failing_names_but_failed_count() {
+        // Craft output where test result says FAILED but no individual "... FAILED" lines
+        // Note: this is an edge case that's hard to reach through the normal parse path.
+        // The test asserts parse_cargo_output handles it gracefully.
+        let output =
+            "test result: FAILED. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let r = parse_cargo_output(output);
+        // No individual lines → passed=0, failed=0
+        assert_eq!(r.passed, 0);
+        assert_eq!(r.failed, 0);
+    }
 }

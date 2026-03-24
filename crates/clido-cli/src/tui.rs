@@ -47,6 +47,10 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/session", "show current session ID"),
             ("/help", "show key bindings and all slash commands"),
             ("/quit", "exit clido"),
+            (
+                "/init",
+                "re-run setup wizard — reconfigure provider, model, API key, roles",
+            ),
         ],
     ),
     (
@@ -122,6 +126,16 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "/image",
                 "attach an image to the next message. Usage: /image <path>",
             ),
+            (
+                "/agents",
+                "show current agent configuration (main, worker, reviewer)",
+            ),
+            ("/profiles", "list all profiles with active model per slot"),
+            ("/profile", "switch active profile. Usage: /profile <name>"),
+            (
+                "/settings",
+                "open settings editor (roles, default model) — changes saved to config.toml",
+            ),
         ],
     ),
 ];
@@ -133,6 +147,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "show current session ID"),
     ("/help", "show key bindings and all slash commands"),
     ("/quit", "exit clido"),
+    (
+        "/init",
+        "re-run setup wizard — reconfigure provider, model, API key, roles",
+    ),
     (
         "/models",
         "open interactive model picker (search, filter, favorites)",
@@ -182,6 +200,16 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/image",
         "attach an image to the next message. Usage: /image <path>",
+    ),
+    (
+        "/agents",
+        "show current agent configuration (main, worker, reviewer)",
+    ),
+    ("/profiles", "list all profiles with active model per slot"),
+    ("/profile", "switch active profile. Usage: /profile <name>"),
+    (
+        "/settings",
+        "open settings editor (roles, default model) — changes saved to config.toml",
     ),
 ];
 
@@ -369,6 +397,145 @@ impl ModelPickerState {
     }
 }
 
+// ── Settings editor popup ──────────────────────────────────────────────────────
+
+/// Which field is being edited in the settings/roles editor.
+#[derive(Debug, Clone, PartialEq)]
+enum SettingsEditField {
+    None,
+    DefaultModel,     // editing the default model string
+    RoleName(usize),  // editing role name at index (usize::MAX = new)
+    RoleModel(usize), // editing model id at index
+}
+
+struct SettingsState {
+    /// Current roles (name, model_id) — loaded from config on open.
+    roles: Vec<(String, String)>,
+    cursor: usize,
+    edit_field: SettingsEditField,
+    input: String,
+    /// Path to the config file that will be updated on save.
+    config_path: std::path::PathBuf,
+    /// Status message after save.
+    status: Option<String>,
+    /// Default model from config (editable).
+    default_model: String,
+    /// Active config profile name (used when saving default model).
+    profile: String,
+}
+
+impl SettingsState {
+    fn new(
+        config_path: std::path::PathBuf,
+        roles: std::collections::HashMap<String, String>,
+        default_model: String,
+        profile: String,
+    ) -> Self {
+        let mut sorted: Vec<(String, String)> = roles.into_iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        Self {
+            roles: sorted,
+            cursor: 0,
+            edit_field: SettingsEditField::None,
+            input: String::new(),
+            config_path,
+            status: None,
+            default_model,
+            profile,
+        }
+    }
+
+    /// Write roles and default model back to the config file.
+    fn save(&mut self) {
+        let r1 = save_roles_to_config(&self.config_path, &self.roles);
+        let r2 =
+            save_default_model_to_config(&self.config_path, &self.default_model, &self.profile);
+        match (r1, r2) {
+            (Ok(()), Ok(())) => self.status = Some("  ✓  saved to config.toml".into()),
+            (Err(e), _) | (_, Err(e)) => self.status = Some(format!("  ✗  {}", e)),
+        }
+    }
+}
+
+/// Read config file, update `[roles]` section, write back.
+fn save_roles_to_config(path: &std::path::Path, roles: &[(String, String)]) -> Result<(), String> {
+    // Read existing config text (may not exist yet).
+    let existing = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+
+    // Parse as toml::Value so we can round-trip non-roles sections.
+    let mut doc: toml::Value = if existing.is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&existing).map_err(|e| e.to_string())?
+    };
+
+    // Build the new [roles] table.
+    let roles_table: toml::map::Map<String, toml::Value> = roles
+        .iter()
+        .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
+        .collect();
+
+    if let toml::Value::Table(ref mut t) = doc {
+        if roles_table.is_empty() {
+            t.remove("roles");
+        } else {
+            t.insert("roles".into(), toml::Value::Table(roles_table));
+        }
+    }
+
+    let new_text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, new_text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Update `[profile.<profile>].model` in the config file. Preserves all other keys.
+fn save_default_model_to_config(
+    path: &std::path::Path,
+    model: &str,
+    profile: &str,
+) -> Result<(), String> {
+    if model.trim().is_empty() {
+        return Ok(());
+    }
+    let existing = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+    let mut doc: toml::Value = if existing.is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&existing).map_err(|e| e.to_string())?
+    };
+    if let toml::Value::Table(ref mut root) = doc {
+        let profile_table = root
+            .entry("profile".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let toml::Value::Table(ref mut profiles) = profile_table {
+            let entry = profiles
+                .entry(profile.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            if let toml::Value::Table(ref mut prof) = entry {
+                prof.insert("model".to_string(), toml::Value::String(model.to_string()));
+            }
+        }
+    }
+    let new_text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, new_text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── Permission request (agent → TUI, reply via oneshot) ───────────────────────
 
 struct PermRequest {
@@ -554,6 +721,8 @@ struct App {
     session_picker: Option<SessionPickerState>,
     /// Model picker popup state (Some = popup visible).
     model_picker: Option<ModelPickerState>,
+    /// Settings editor popup (Some = visible).
+    settings: Option<SettingsState>,
     /// All known models (built at startup from pricing table + profiles).
     known_models: Vec<ModelEntry>,
     /// User model preferences: favorites, recency, role assignments.
@@ -567,8 +736,14 @@ struct App {
     /// Selected index in the slash-command popup (None = no popup).
     selected_cmd: Option<usize>,
     quit: bool,
+    /// When true, the TUI exits and setup wizard re-runs to reconfigure.
+    wants_reinit: bool,
+    /// When Some(name), the TUI exits and the active profile is switched then TUI restarts.
+    wants_profile_switch: Option<String>,
     provider: String,
     model: String,
+    /// Active profile name, shown in the header.
+    current_profile: String,
     /// Session ID of the current agent session (set after SessionStarted event).
     current_session_id: Option<String>,
     /// Project root used for listing sessions.
@@ -633,6 +808,7 @@ impl App {
         known_models: Vec<ModelEntry>,
         model_prefs: clido_core::ModelPrefs,
         config_roles: std::collections::HashMap<String, String>,
+        current_profile: String,
     ) -> Self {
         let mut app = Self {
             messages: Vec::new(),
@@ -652,6 +828,7 @@ impl App {
             queued: None,
             session_picker: None,
             model_picker: None,
+            settings: None,
             known_models,
             model_prefs,
             config_roles,
@@ -659,8 +836,11 @@ impl App {
             perm_selected: 0,
             selected_cmd: None,
             quit: false,
+            wants_reinit: false,
+            wants_profile_switch: None,
             provider,
             model,
+            current_profile,
             current_session_id: None,
             workspace_root,
             input_history: Vec::new(),
@@ -866,6 +1046,12 @@ fn render(frame: &mut Frame, app: &mut App) {
         ),
         Span::styled(
             format!("{}  {}", app.provider, app.model),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            format!("  [{}]", app.current_profile),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -1080,6 +1266,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         Span::styled(" history  ", hint_dim),
         Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
         Span::styled(" scroll  ", hint_dim),
+        Span::styled("/settings", Style::default().fg(Color::DarkGray)),
+        Span::styled(" config  ", hint_dim),
         Span::styled("/help", Style::default().fg(Color::DarkGray)),
         Span::styled(" commands  ", hint_dim),
         Span::styled("Ctrl+C", Style::default().fg(Color::DarkGray)),
@@ -1140,16 +1328,27 @@ fn render(frame: &mut Frame, app: &mut App) {
     let completions = slash_completions(&app.input);
     if !completions.is_empty() && app.pending_perm.is_none() && app.session_picker.is_none() {
         let popup_h = completions.len() as u16 + 2;
-        let popup_rect = popup_above_input(input_area, popup_h, input_area.width.min(54));
+        // Use nearly the full terminal width so descriptions are readable.
+        // Cap at 120 to avoid comically wide popups on ultra-wide displays.
+        let popup_w = area.width.saturating_sub(4).min(120);
+        let cmd_col_w = 18usize; // wide enough for "/plan edit", "/rollback", etc.
+        let popup_rect = popup_above_input(input_area, popup_h, popup_w);
+        let desc_w = (popup_rect.width as usize).saturating_sub(cmd_col_w + 4);
         frame.render_widget(Clear, popup_rect);
         let items: Vec<Line<'static>> = completions
             .iter()
             .enumerate()
             .map(|(i, (cmd, desc))| {
                 let selected = app.selected_cmd == Some(i);
+                // Truncate description to fit the available width.
+                let desc_str = if desc.len() > desc_w {
+                    format!("{}…", &desc[..desc_w.saturating_sub(1)])
+                } else {
+                    desc.to_string()
+                };
                 modal_row_two_col(
-                    format!(" {:<13}", cmd),
-                    format!(" {}", desc),
+                    format!(" {:<width$}", cmd, width = cmd_col_w - 1),
+                    format!(" {}", desc_str),
                     Color::Cyan,
                     Color::DarkGray,
                     selected,
@@ -1318,7 +1517,7 @@ fn render(frame: &mut Frame, app: &mut App) {
 
         let total = filtered.len();
         let title = format!(
-            " Models — {} found  (↑↓  Enter=use  f=fav  Esc=close  type to filter) ",
+            " Models — {} found  (↑↓  Enter=use for session  Ctrl+S=save as default  f=fav  Esc=close  type to filter) ",
             total
         );
         frame.render_widget(Clear, popup_rect);
@@ -1326,6 +1525,11 @@ fn render(frame: &mut Frame, app: &mut App) {
             Paragraph::new(content).block(modal_block(&title, Color::Magenta)),
             popup_rect,
         );
+    }
+
+    // ── Settings editor popup ─────────────────────────────────────────────────
+    if let Some(ref st) = app.settings {
+        render_settings(frame, area, input_area, st);
     }
 
     // ── Permission popup ─────────────────────────────────────────────────────
@@ -1668,6 +1872,273 @@ fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+// ── Settings editor rendering ─────────────────────────────────────────────────
+
+fn render_settings(frame: &mut Frame, area: Rect, input_area: Rect, st: &SettingsState) {
+    // Take up most of the screen.
+    let popup_h = area.height.saturating_sub(6).max(10);
+    let popup_w = area.width.saturating_sub(8).min(90);
+    let popup_rect = popup_above_input(input_area, popup_h, popup_w);
+    frame.render_widget(Clear, popup_rect);
+
+    // Layout: title block wraps everything; inside: content + hint footer.
+    let inner = {
+        let b = popup_rect;
+        Rect {
+            x: b.x + 1,
+            y: b.y + 1,
+            width: b.width.saturating_sub(2),
+            height: b.height.saturating_sub(2),
+        }
+    };
+    let [_list_area, hint_area] =
+        ratatui::layout::Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+
+    let name_w = 14usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Default model row ──
+    let dm_selected = st.cursor == 0 && st.edit_field == SettingsEditField::None;
+    let dm_editing = st.edit_field == SettingsEditField::DefaultModel;
+    lines.push(Line::from(vec![Span::styled(
+        "  Default model",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    )]));
+    lines.push(Line::from(vec![
+        if dm_selected {
+            Span::styled(
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("   ")
+        },
+        Span::styled(
+            if dm_editing {
+                st.input.clone()
+            } else {
+                st.default_model.clone()
+            },
+            Style::default()
+                .fg(if dm_editing {
+                    Color::Yellow
+                } else if dm_selected {
+                    Color::White
+                } else {
+                    Color::Green
+                })
+                .add_modifier(if dm_editing || dm_selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        if dm_editing {
+            Span::styled("_", Style::default().fg(Color::Yellow))
+        } else if dm_selected {
+            Span::styled(
+                "  (Enter to edit)",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  {:<name_w$}  model", "role name"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    )]));
+    lines.push(Line::raw(""));
+
+    // Role rows — cursor offset by 1 (cursor 0 = default model)
+    for (i, (name, model)) in st.roles.iter().enumerate() {
+        let selected = (i + 1) == st.cursor && st.edit_field == SettingsEditField::None;
+        let editing_name = matches!(&st.edit_field, SettingsEditField::RoleName(idx) if *idx == i);
+        let editing_model =
+            matches!(&st.edit_field, SettingsEditField::RoleModel(idx) if *idx == i);
+
+        let marker = if selected {
+            Span::styled(
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("   ")
+        };
+        let name_span = Span::styled(
+            format!(
+                "{:<width$}",
+                if editing_name {
+                    st.input.as_str()
+                } else {
+                    name.as_str()
+                },
+                width = name_w
+            ),
+            Style::default()
+                .fg(if editing_name {
+                    Color::Yellow
+                } else if selected {
+                    Color::White
+                } else {
+                    Color::Cyan
+                })
+                .add_modifier(if editing_name || selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        );
+        let arrow = Span::styled("  →  ", Style::default().fg(Color::DarkGray));
+        let model_span = if editing_model {
+            Span::styled(
+                st.input.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if model.is_empty() {
+            Span::styled(
+                "(unset — Enter to set)",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )
+        } else {
+            Span::styled(
+                model.clone(),
+                Style::default().fg(if selected {
+                    Color::White
+                } else {
+                    Color::DarkGray
+                }),
+            )
+        };
+        lines.push(Line::from(vec![marker, name_span, arrow, model_span]));
+    }
+
+    // New-role name input row
+    if matches!(&st.edit_field, SettingsEditField::RoleName(idx) if *idx == usize::MAX) {
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                format!("{:<width$}", st.input.as_str(), width = name_w),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  →  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "type name, Enter to set model",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]));
+    }
+
+    lines.push(Line::raw(""));
+
+    // "Add role" and "Save & close" rows — cursors shifted by 1
+    let add_sel = st.cursor == st.roles.len() + 1 && st.edit_field == SettingsEditField::None;
+    let save_sel = st.cursor == st.roles.len() + 2 && st.edit_field == SettingsEditField::None;
+    lines.push(Line::from(vec![
+        if add_sel {
+            Span::styled(
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("   ")
+        },
+        Span::styled(
+            "+ Add role",
+            Style::default().fg(if add_sel {
+                Color::White
+            } else {
+                Color::DarkGray
+            }),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        if save_sel {
+            Span::styled(
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("   ")
+        },
+        Span::styled(
+            "Save & close",
+            Style::default()
+                .fg(if save_sel {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                })
+                .add_modifier(if save_sel {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Settings ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        popup_rect,
+    );
+
+    // Status / hint line
+    let hint = if let Some(ref msg) = st.status {
+        Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(if msg.contains('✓') {
+                Color::Green
+            } else {
+                Color::Red
+            }),
+        ))
+    } else if st.edit_field == SettingsEditField::None {
+        Line::from(Span::styled(
+            "  ↑↓ navigate   Enter edit   n add role   d delete   s save   Esc close",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "  Enter confirm   Backspace edit   Esc cancel",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ))
+    };
+    frame.render_widget(Paragraph::new(hint), hint_area);
+}
+
 // ── Modal component helpers ───────────────────────────────────────────────────
 
 /// Rect anchored just above the input field (grows upward).
@@ -1789,6 +2260,7 @@ fn tool_color(name: &str, done: bool, is_error: bool) -> Color {
         "Bash" => Color::Yellow,
         "SemanticSearch" => Color::Cyan,
         "WebFetch" | "WebSearch" => Color::Magenta,
+        "SpawnWorker" | "SpawnReviewer" => Color::LightCyan,
         _ => Color::White,
     }
 }
@@ -1907,7 +2379,10 @@ fn execute_slash(app: &mut App, cmd: &str) {
                     app.provider, app.model, fav
                 )));
                 app.push(ChatLine::Info(
-                    "  tip: /models picker  /fast  /smart  /role <name>  /fav".into(),
+                    "  session: /models picker  /model <name>  /fast  /smart  /role <name>".into(),
+                ));
+                app.push(ChatLine::Info(
+                    "  default: /settings → Default model  (changes saved to config.toml)".into(),
                 ));
             } else {
                 let new_model = arg.to_string();
@@ -2367,6 +2842,130 @@ fn execute_slash(app: &mut App, cmd: &str) {
                     }
                 }
             }
+        }
+        "/agents" => match clido_core::load_config(&app.workspace_root) {
+            Err(e) => app.push(ChatLine::Info(format!(
+                "  agents: error loading config: {}",
+                e
+            ))),
+            Ok(loaded) => {
+                app.push(ChatLine::Info("  Agent configuration:".into()));
+                if let Some(main) = &loaded.agents.main {
+                    app.push(ChatLine::Info(format!(
+                        "  main      {} / {}",
+                        main.provider, main.model
+                    )));
+                } else {
+                    app.push(ChatLine::Info(
+                        "  main      (using [profile.default])".into(),
+                    ));
+                }
+                if let Some(worker) = &loaded.agents.worker {
+                    app.push(ChatLine::Info(format!(
+                        "  worker    {} / {}",
+                        worker.provider, worker.model
+                    )));
+                } else {
+                    app.push(ChatLine::Info("  worker    not configured".into()));
+                }
+                if let Some(reviewer) = &loaded.agents.reviewer {
+                    app.push(ChatLine::Info(format!(
+                        "  reviewer  {} / {}",
+                        reviewer.provider, reviewer.model
+                    )));
+                } else {
+                    app.push(ChatLine::Info("  reviewer  not configured".into()));
+                }
+                app.push(ChatLine::Info("  Use /init to reconfigure agents.".into()));
+            }
+        },
+        "/profiles" => match clido_core::load_config(&app.workspace_root) {
+            Err(e) => app.push(ChatLine::Info(format!(
+                "  profiles: error loading config: {}",
+                e
+            ))),
+            Ok(loaded) => {
+                app.push(ChatLine::Info("  Profiles:".into()));
+                let mut names: Vec<&String> = loaded.profiles.keys().collect();
+                names.sort();
+                for name in names {
+                    let entry = &loaded.profiles[name];
+                    let is_active = name == &loaded.default_profile;
+                    let marker = if is_active { "▶" } else { " " };
+                    app.push(ChatLine::Info(format!(
+                        "  {} {}  {} / {}",
+                        marker, name, entry.provider, entry.model
+                    )));
+                    if let Some(ref w) = entry.worker {
+                        app.push(ChatLine::Info(format!(
+                            "       worker    {} / {}",
+                            w.provider, w.model
+                        )));
+                    }
+                    if let Some(ref r) = entry.reviewer {
+                        app.push(ChatLine::Info(format!(
+                            "       reviewer  {} / {}",
+                            r.provider, r.model
+                        )));
+                    }
+                }
+                app.push(ChatLine::Info(
+                    "  Use /profile <name> to switch, or 'clido profile create' to add a profile."
+                        .into(),
+                ));
+            }
+        },
+        cmd if cmd.starts_with("/profile ") => {
+            let name = cmd.trim_start_matches("/profile ").trim();
+            if name.is_empty() {
+                app.push(ChatLine::Info(format!(
+                    "  active profile: {}",
+                    app.current_profile
+                )));
+            } else {
+                match clido_core::load_config(&app.workspace_root) {
+                    Err(e) => app.push(ChatLine::Info(format!(
+                        "  profile: error loading config: {}",
+                        e
+                    ))),
+                    Ok(loaded) => {
+                        if !loaded.profiles.contains_key(name) {
+                            app.push(ChatLine::Info(format!(
+                                "  profile '{}' not found. Use /profiles to list.",
+                                name
+                            )));
+                        } else if name == loaded.default_profile {
+                            app.push(ChatLine::Info(format!(
+                                "  profile '{}' is already active.",
+                                name
+                            )));
+                        } else {
+                            app.push(ChatLine::Info(format!(
+                                "  switching to profile '{}'…",
+                                name
+                            )));
+                            app.wants_profile_switch = Some(name.to_string());
+                            app.quit = true;
+                        }
+                    }
+                }
+            }
+        }
+        "/settings" => {
+            let config_path = clido_core::global_config_path()
+                .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+            let roles = app.config_roles.clone();
+            app.settings = Some(SettingsState::new(
+                config_path,
+                roles,
+                app.model.clone(),
+                "default".to_string(),
+            ));
+        }
+        "/init" => {
+            app.push(ChatLine::Info("  launching setup wizard…".into()));
+            app.wants_reinit = true;
+            app.quit = true;
         }
         _ => {}
     }
@@ -3010,6 +3609,192 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         return;
     }
 
+    // ── Settings editor (modal) ──────────────────────────────────────────────
+    if app.settings.is_some() {
+        let st = app.settings.as_mut().unwrap();
+        st.status = None;
+        match &st.edit_field {
+            SettingsEditField::None => match event.code {
+                Up => {
+                    if st.cursor > 0 {
+                        st.cursor -= 1;
+                    }
+                }
+                Down => {
+                    // default model + roles + "Add role" + "Save & close"
+                    if st.cursor < st.roles.len() + 2 {
+                        st.cursor += 1;
+                    }
+                }
+                Enter => {
+                    let cursor = st.cursor;
+                    let roles_len = st.roles.len();
+                    if cursor == 0 {
+                        // Edit default model
+                        let current = st.default_model.clone();
+                        st.input = current;
+                        st.edit_field = SettingsEditField::DefaultModel;
+                    } else if cursor <= roles_len {
+                        let idx = cursor - 1;
+                        let model = st.roles[idx].1.clone();
+                        st.input = model;
+                        st.edit_field = SettingsEditField::RoleModel(idx);
+                    } else if cursor == roles_len + 1 {
+                        // "Add role"
+                        st.input.clear();
+                        st.edit_field = SettingsEditField::RoleName(usize::MAX);
+                    } else {
+                        // "Save & close"
+                        st.save();
+                        // Reload config_roles and model in app if save succeeded
+                        if st
+                            .status
+                            .as_deref()
+                            .map(|s| s.contains('✓'))
+                            .unwrap_or(false)
+                        {
+                            let new_roles: std::collections::HashMap<String, String> =
+                                st.roles.iter().cloned().collect();
+                            let new_model = st.default_model.clone();
+                            app.config_roles = new_roles.clone();
+                            let (pricing, _) = clido_core::load_pricing();
+                            app.known_models =
+                                build_model_list(&pricing, &new_roles, &app.model_prefs);
+                            // Switch to new default model for this session too
+                            if !new_model.is_empty() && new_model != app.model {
+                                app.model = new_model.clone();
+                                let _ = app.model_switch_tx.send(new_model);
+                            }
+                            app.settings = None;
+                        }
+                    }
+                }
+                Char('n') => {
+                    let st = app.settings.as_mut().unwrap();
+                    st.input.clear();
+                    st.edit_field = SettingsEditField::RoleName(usize::MAX);
+                }
+                Char('d') => {
+                    let cursor = st.cursor;
+                    // cursor 0 = default model (not deletable), cursor 1..N+1 = roles
+                    if cursor > 0 && cursor <= st.roles.len() {
+                        st.roles.remove(cursor - 1);
+                        if st.cursor > 1 && st.cursor > st.roles.len() {
+                            st.cursor -= 1;
+                        }
+                    }
+                }
+                Char('s') => {
+                    let st = app.settings.as_mut().unwrap();
+                    st.save();
+                    if st
+                        .status
+                        .as_deref()
+                        .map(|s| s.contains('✓'))
+                        .unwrap_or(false)
+                    {
+                        let new_roles: std::collections::HashMap<String, String> =
+                            st.roles.iter().cloned().collect();
+                        let new_model = st.default_model.clone();
+                        app.config_roles = new_roles.clone();
+                        let (pricing, _) = clido_core::load_pricing();
+                        app.known_models = build_model_list(&pricing, &new_roles, &app.model_prefs);
+                        if !new_model.is_empty() && new_model != app.model {
+                            app.model = new_model.clone();
+                            let _ = app.model_switch_tx.send(new_model);
+                        }
+                    }
+                }
+                Esc => {
+                    app.settings = None;
+                }
+                _ => {}
+            },
+            SettingsEditField::DefaultModel => match event.code {
+                Enter => {
+                    let model = app.settings.as_ref().unwrap().input.trim().to_string();
+                    let st = app.settings.as_mut().unwrap();
+                    st.default_model = model;
+                    st.edit_field = SettingsEditField::None;
+                    st.input.clear();
+                }
+                Backspace => {
+                    app.settings.as_mut().unwrap().input.pop();
+                }
+                Esc => {
+                    let st = app.settings.as_mut().unwrap();
+                    st.edit_field = SettingsEditField::None;
+                    st.input.clear();
+                }
+                Char(c) => {
+                    app.settings.as_mut().unwrap().input.push(c);
+                }
+                _ => {}
+            },
+            SettingsEditField::RoleName(_) => match event.code {
+                Enter => {
+                    let name = app.settings.as_ref().unwrap().input.trim().to_string();
+                    let st = app.settings.as_mut().unwrap();
+                    if !name.is_empty() {
+                        st.roles.push((name, String::new()));
+                        let idx = st.roles.len() - 1;
+                        st.cursor = idx + 1;
+                        st.input.clear();
+                        st.edit_field = SettingsEditField::RoleModel(idx);
+                    } else {
+                        st.edit_field = SettingsEditField::None;
+                    }
+                }
+                Backspace => {
+                    app.settings.as_mut().unwrap().input.pop();
+                }
+                Esc => {
+                    let st = app.settings.as_mut().unwrap();
+                    st.edit_field = SettingsEditField::None;
+                    st.input.clear();
+                }
+                Char(c) => {
+                    app.settings.as_mut().unwrap().input.push(c);
+                }
+                _ => {}
+            },
+            SettingsEditField::RoleModel(idx) => {
+                let idx = *idx;
+                match event.code {
+                    Enter => {
+                        let model = app.settings.as_ref().unwrap().input.trim().to_string();
+                        let st = app.settings.as_mut().unwrap();
+                        if model.is_empty() {
+                            if idx < st.roles.len() {
+                                st.roles.remove(idx);
+                            }
+                        } else if idx < st.roles.len() {
+                            st.roles[idx].1 = model;
+                        }
+                        st.edit_field = SettingsEditField::None;
+                        st.input.clear();
+                    }
+                    Backspace => {
+                        app.settings.as_mut().unwrap().input.pop();
+                    }
+                    Esc => {
+                        let st = app.settings.as_mut().unwrap();
+                        if idx < st.roles.len() && st.roles[idx].1.is_empty() {
+                            st.roles.remove(idx);
+                        }
+                        st.edit_field = SettingsEditField::None;
+                        st.input.clear();
+                    }
+                    Char(c) => {
+                        app.settings.as_mut().unwrap().input.push(c);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return;
+    }
+
     // ── Error modal (dismiss with Enter / Esc / Space) ───────────────────────
     if app.pending_error.is_some() {
         match event.code {
@@ -3035,6 +3820,33 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
     // ── Model picker (modal) ─────────────────────────────────────────────────
     if app.model_picker.is_some() {
         const VISIBLE: usize = 14;
+        // Ctrl+S: save selected model as default in config
+        if event.modifiers == Km::CONTROL {
+            if let KeyCode::Char('s') = event.code {
+                if let Some(picker) = &app.model_picker {
+                    let filtered = picker.filtered();
+                    if !filtered.is_empty() {
+                        let model_id = filtered[picker.selected].id.clone();
+                        drop(filtered);
+                        let config_path = clido_core::global_config_path()
+                            .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+                        match save_default_model_to_config(&config_path, &model_id, "default") {
+                            Ok(()) => {
+                                app.push(ChatLine::Info(format!(
+                                    "  ✓ {} saved as default model",
+                                    model_id
+                                )));
+                            }
+                            Err(e) => {
+                                app.push(ChatLine::Info(format!("  ✗ could not save: {}", e)));
+                            }
+                        }
+                        app.model_picker = None;
+                    }
+                }
+                return;
+            }
+        }
         match event.code {
             Up => {
                 if let Some(picker) = &mut app.model_picker {
@@ -3840,7 +4652,13 @@ fn build_model_list(
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
+pub fn run_tui(
+    cli: Cli,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), anyhow::Error>> + Send>> {
+    Box::pin(run_tui_inner(cli))
+}
+
+async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
     let workspace_root = cli
         .workdir
         .clone()
@@ -3910,11 +4728,14 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
 
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(
-        out,
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
+    execute!(out, EnterAlternateScreen)?;
+    // Enable X10 mouse button-press events + SGR coordinate extension.
+    // This gives us scroll-wheel (buttons 4/5) without capturing drag events,
+    // so the terminal emulator can still perform native text selection.
+    // Deliberately NOT using EnableMouseCapture, which also enables button-motion
+    // tracking (\x1b[?1002h) and prevents the user from selecting/copying text.
+    write!(out, "\x1b[?1000h\x1b[?1006h")?;
+    out.flush()?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
@@ -3923,12 +4744,19 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
     // Build model list from pricing table + loaded config (for the /models picker).
     let (pricing_table, _) = clido_core::load_pricing();
     let model_prefs = clido_core::ModelPrefs::load();
-    let (config_roles, known_models) = {
-        let roles = clido_core::load_config(&workspace_root)
+    let (config_roles, known_models, current_profile) = {
+        let loaded = clido_core::load_config(&workspace_root).ok();
+        let roles = loaded
+            .as_ref()
             .map(|c| c.roles.as_map())
             .unwrap_or_default();
+        let profile = cli
+            .profile
+            .clone()
+            .or_else(|| loaded.as_ref().map(|c| c.default_profile.clone()))
+            .unwrap_or_else(|| "default".to_string());
         let models = build_model_list(&pricing_table, &roles, &model_prefs);
-        (roles, models)
+        (roles, models, profile)
     };
 
     let mut app = App::new(
@@ -3946,15 +4774,67 @@ pub async fn run_tui(cli: Cli) -> Result<(), anyhow::Error> {
         known_models,
         model_prefs,
         config_roles,
+        current_profile,
     );
     let result = event_loop(&mut app, &mut terminal, &mut event_rx, &mut perm_rx).await;
 
     let _ = disable_raw_mode();
-    let _ = execute!(
-        terminal.backend_mut(),
-        crossterm::event::DisableMouseCapture,
-        LeaveAlternateScreen
-    );
+    // Disable the X10 button-press + SGR mouse modes we enabled at startup.
+    let _ = write!(terminal.backend_mut(), "\x1b[?1000l\x1b[?1006l");
+    let _ = terminal.backend_mut().flush();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+
+    // Handle /profile <name> switch request.
+    if let Some(profile_name) = app.wants_profile_switch.take() {
+        if let Some(config_path) = clido_core::global_config_path() {
+            let _ = clido_core::switch_active_profile(&config_path, &profile_name);
+        }
+        return run_tui(cli).await;
+    }
+
+    // Handle /init reinit request.
+    if app.wants_reinit {
+        let pre_fill = {
+            let loaded = clido_core::load_config(&workspace_root).ok();
+            let profile = loaded
+                .as_ref()
+                .map(|c| c.default_profile.clone())
+                .unwrap_or_else(|| "default".to_string());
+            let prof_entry = loaded
+                .as_ref()
+                .and_then(|c| c.profiles.get(&profile).cloned());
+            let api_key = prof_entry
+                .as_ref()
+                .and_then(|p| {
+                    p.api_key
+                        .clone()
+                        .or_else(|| p.api_key_env.as_ref().and_then(|e| std::env::var(e).ok()))
+                })
+                .unwrap_or_default();
+            let roles: Vec<(String, String)> = loaded
+                .as_ref()
+                .map(|c| {
+                    let mut v: Vec<(String, String)> = c.roles.as_map().into_iter().collect();
+                    v.sort_by(|a, b| a.0.cmp(&b.0));
+                    v
+                })
+                .unwrap_or_default();
+            crate::setup::SetupPreFill {
+                provider: app.provider.clone(),
+                api_key,
+                model: app.model.clone(),
+                roles,
+                profile_name: String::new(),
+                is_new_profile: false,
+            }
+        };
+        // Run setup wizard with current values pre-filled.
+        crate::setup::run_reinit(pre_fill).await?;
+        // Re-launch the TUI.
+        let cli_for_reinit = cli.clone();
+        return run_tui(cli_for_reinit).await;
+    }
+
     result
 }
 

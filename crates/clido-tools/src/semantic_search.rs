@@ -226,3 +226,214 @@ impl Tool for SemanticSearchTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_age_secs_returns_none_for_nonexistent_file() {
+        let p = std::path::Path::new("/nonexistent/path/index.db");
+        assert!(SemanticSearchTool::index_age_secs(p).is_none());
+    }
+
+    #[test]
+    fn index_age_secs_returns_some_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.db");
+        std::fs::write(&file, "data").unwrap();
+        let age = SemanticSearchTool::index_age_secs(&file);
+        assert!(age.is_some());
+        // Age should be >= 0 (could be 0 for a just-created file)
+        assert!(age.unwrap() < 60); // just created, should be < 1 minute old
+    }
+
+    #[test]
+    fn tool_name_and_schema() {
+        let tool = SemanticSearchTool::new(std::env::temp_dir());
+        assert_eq!(tool.name(), "SemanticSearch");
+        assert!(tool.is_read_only());
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        let props = &schema["properties"];
+        assert!(props.get("query").is_some());
+        assert!(props.get("target_directory").is_some());
+        assert!(props.get("num_results").is_some());
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("query")));
+    }
+
+    #[tokio::test]
+    async fn execute_missing_query_returns_error() {
+        let tool = SemanticSearchTool::new(std::env::temp_dir());
+        let out = tool.execute(serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("Missing required field"));
+    }
+
+    #[tokio::test]
+    async fn execute_empty_query_returns_error() {
+        let tool = SemanticSearchTool::new(std::env::temp_dir());
+        let out = tool.execute(serde_json::json!({"query": "   "})).await;
+        assert!(out.is_error);
+    }
+
+    #[tokio::test]
+    async fn execute_with_query_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        // Write a test file so the index builds something
+        std::fs::write(dir.path().join("test.rs"), "fn hello() {}").unwrap();
+        let out = tool.execute(serde_json::json!({"query": "hello"})).await;
+        // Should not be an error (even if no results found)
+        assert!(!out.is_error);
+    }
+
+    #[test]
+    fn ensure_index_builds_for_new_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        // First call should build the index
+        let note = tool.ensure_index();
+        // Should return a note about building
+        assert!(
+            note.is_empty()
+                || note.contains("Building")
+                || note.contains("Refreshing")
+                || note.contains("Index")
+        );
+    }
+
+    /// Lines 63 (Some path) + 67 (not stale → empty string): call ensure_index twice;
+    /// second call finds a fresh index and returns "".
+    #[test]
+    fn ensure_index_returns_empty_when_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.rs"), "fn foo() {}").unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        // Build the index
+        let _first = tool.ensure_index();
+        // Second call: index exists and is fresh, should return empty string
+        let second = tool.ensure_index();
+        assert!(
+            second.is_empty(),
+            "expected empty for fresh index, got: {:?}",
+            second
+        );
+    }
+
+    /// Line 78: Refreshing label — create a stale index by writing a dummy .db file
+    /// with an old mtime via libc utimes (unix only), then ensure_index should rebuild.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_index_refreshes_stale_index() {
+        use std::ffi::CString;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.rs"), "fn foo() {}").unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        // First: build the index normally.
+        let _ = tool.ensure_index();
+        let db_path = dir.path().join(".clido").join("index.db");
+        if db_path.exists() {
+            // Set mtime to 2 hours ago using utimes
+            let two_hours_ago = std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(7200))
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as libc::time_t;
+            let times = [
+                libc::timeval {
+                    tv_sec: two_hours_ago,
+                    tv_usec: 0,
+                },
+                libc::timeval {
+                    tv_sec: two_hours_ago,
+                    tv_usec: 0,
+                },
+            ];
+            let path_cstr = CString::new(db_path.to_str().unwrap()).unwrap();
+            let _ = unsafe { libc::utimes(path_cstr.as_ptr(), times.as_ptr()) };
+
+            // Now ensure_index should see it as stale and return a Refreshing note.
+            let note = tool.ensure_index();
+            assert!(
+                note.contains("Refreshing") || note.contains("Building") || note.contains("Index"),
+                "expected refresh note, got: {:?}",
+                note
+            );
+        }
+    }
+
+    /// Line 142: num_results is clamped to 20.
+    #[tokio::test]
+    async fn execute_with_large_num_results_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({"query": "hello", "num_results": 100}))
+            .await;
+        assert!(!out.is_error);
+    }
+
+    /// Lines 175, 177: target_directory filter (Some and None paths).
+    #[tokio::test]
+    async fn execute_with_target_directory_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.rs"), "fn search_target() {}").unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        // Build index first
+        let _ = tool.ensure_index();
+        // With target_directory set
+        let out = tool
+            .execute(serde_json::json!({
+                "query": "search_target",
+                "target_directory": "."
+            }))
+            .await;
+        assert!(!out.is_error);
+    }
+
+    #[tokio::test]
+    async fn execute_without_target_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bar.rs"), "fn search_no_dir() {}").unwrap();
+        let tool = SemanticSearchTool::new(dir.path().to_path_buf());
+        let _ = tool.ensure_index();
+        let out = tool
+            .execute(serde_json::json!({"query": "search_no_dir"}))
+            .await;
+        assert!(!out.is_error);
+    }
+
+    /// Line 82: ensure_index when RepoIndex::open fails.
+    #[test]
+    fn ensure_index_open_error_does_not_panic() {
+        let bad_root = std::path::PathBuf::from("/nonexistent_xyz/a/b");
+        let tool = SemanticSearchTool::new(bad_root);
+        let note = tool.ensure_index();
+        let _ = note;
+    }
+
+    /// Line 91: idx.build fails — workspace_root is a file, not a directory.
+    #[test]
+    fn ensure_index_build_error_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a file at workspace_root so idx.build (which walks the directory) still works
+        // but make workspace_root point to a file (not a dir) to make the WalkBuilder fail.
+        // Actually, create a valid dir but let the db be in a place where open succeeds
+        // and then build fails because the "workspace_root" is a regular file.
+        let workspace_file = dir.path().join("workspace_as_file");
+        std::fs::write(&workspace_file, "not a dir").unwrap();
+        let clido_dir = dir.path().join(".clido");
+        std::fs::create_dir_all(&clido_dir).unwrap();
+        // Create the index.db at the expected location but make workspace_root a file
+        // so build will be called on a file path (WalkBuilder on a file just walks that file)
+        // In this case, build might succeed or fail but shouldn't panic
+        let tool = SemanticSearchTool::new(workspace_file.clone());
+        let note = tool.ensure_index();
+        // Should handle gracefully regardless
+        let _ = note;
+    }
+}

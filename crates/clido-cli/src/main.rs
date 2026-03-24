@@ -16,18 +16,20 @@ mod models;
 mod notify;
 mod plan_cmd;
 mod pricing_cmd;
+mod profiles;
 mod provider;
 mod repl;
 mod run;
 mod sessions;
 mod setup;
+mod spawn_tools;
 mod stats;
 mod tui;
 mod ui;
 mod workflow;
 
 use clap::{CommandFactory, Parser};
-use clido_core::config_file_exists;
+use clido_core::{config_file_exists, load_config};
 use std::env;
 use std::io::{self, IsTerminal, Write};
 
@@ -122,6 +124,33 @@ async fn main() {
     std::process::exit(exit);
 }
 
+/// Returns true if a config exists AND the default profile's provider is fully usable
+/// (API key is present or resolvable from environment). Returns false if either the
+/// config is missing, has no profiles, or the API key cannot be resolved — all of
+/// which mean the user should go through first-run setup.
+fn config_ready_for_use(cli: &cli::Cli, workspace_root: &std::path::Path) -> bool {
+    if !config_file_exists(workspace_root) {
+        return false;
+    }
+    let Ok(loaded) = load_config(workspace_root) else {
+        return false;
+    };
+    let profile_name = cli
+        .profile
+        .as_deref()
+        .unwrap_or(loaded.default_profile.as_str());
+    let Ok(profile) = loaded.get_profile(profile_name) else {
+        return false;
+    };
+    provider::make_provider(
+        profile_name,
+        profile,
+        cli.provider.as_deref(),
+        cli.model.as_deref(),
+    )
+    .is_ok()
+}
+
 async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
     match &cli.subcommand {
         Some(cli::Subcommand::Version) => {
@@ -138,8 +167,7 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
         Some(cli::Subcommand::Config { cmd }) => return config::run_config(cmd).await,
         Some(cli::Subcommand::Workflow { cmd }) => return workflow::run_workflow(cmd).await,
         Some(cli::Subcommand::ListModels { provider, json }) => {
-            models::run_list_models(provider.as_deref(), *json);
-            return Ok(());
+            return models::run_list_models(provider.as_deref(), *json).await;
         }
         Some(cli::Subcommand::UpdatePricing) => {
             pricing_cmd::run_update_pricing();
@@ -197,8 +225,7 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
             return memory_cmd::run_memory(cmd);
         }
         Some(cli::Subcommand::FetchModels { provider, json }) => {
-            models::run_list_models(provider.as_deref(), *json);
-            return Ok(());
+            return models::run_list_models(provider.as_deref(), *json).await;
         }
         Some(cli::Subcommand::Index { cmd }) => {
             return index_cmd::run_index(cmd).await;
@@ -212,6 +239,9 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
         }
         Some(cli::Subcommand::Plan { cmd }) => {
             return plan_cmd::run_plan(cmd, &cli).await;
+        }
+        Some(cli::Subcommand::Profile { cmd }) => {
+            return profiles::run_profile(cmd).await;
         }
         Some(cli::Subcommand::Commit { yes, dry_run }) => {
             let workspace_root = cli.workdir.clone().unwrap_or_else(|| {
@@ -247,7 +277,7 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
         .clone()
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
 
-    if !config_file_exists(&workspace_root) {
+    if !config_ready_for_use(&cli, &workspace_root) {
         if sessions::is_stdin_tty() {
             setup::run_first_run_setup().await?;
         } else {

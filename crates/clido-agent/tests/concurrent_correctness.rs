@@ -56,6 +56,9 @@ impl ModelProvider for MockProvider {
     > {
         unimplemented!("stream not used in this test")
     }
+    async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+        vec![]
+    }
 }
 
 /// Build a minimal AgentConfig for testing.

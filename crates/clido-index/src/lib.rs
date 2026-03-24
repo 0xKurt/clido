@@ -533,6 +533,31 @@ mod tests {
         );
     }
 
+    /// Lines 245-257: search_symbols LIKE fallback — exact match finds nothing,
+    /// so the fallback LIKE query runs and returns results.
+    #[test]
+    fn search_symbols_like_fallback() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("foo.rs"),
+            "pub fn unique_function_name() {}\npub struct MyStruct {}\n",
+        )
+        .unwrap();
+
+        let db_file = NamedTempFile::new().unwrap();
+        let mut idx = RepoIndex::open(db_file.path()).unwrap();
+        idx.build(dir.path(), &["rs"]).unwrap();
+
+        // "unique_function" doesn't match exact name "unique_function_name",
+        // but does match via LIKE "%unique_function%"
+        let results = idx.search_symbols("unique_function").unwrap();
+        assert!(
+            !results.is_empty(),
+            "LIKE fallback should find unique_function_name"
+        );
+        assert!(results.iter().any(|s| s.name.contains("unique_function")));
+    }
+
     #[test]
     fn test_exclude_patterns_applied() {
         let dir = tempdir().unwrap();

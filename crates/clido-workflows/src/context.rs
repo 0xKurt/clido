@@ -100,6 +100,35 @@ mod tests {
         assert!(err.to_string().contains("required_key"));
     }
 
+    /// Lines 36, 40: overrides are inserted into map, and inputs already in map are skipped.
+    #[test]
+    fn resolve_inputs_override_skips_default() {
+        let def = WorkflowDef {
+            name: "x".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![InputDef {
+                name: "key".to_string(),
+                required: false,
+                default: Some(serde_json::Value::String("default_val".to_string())),
+            }],
+            steps: vec![],
+            output: None,
+            prerequisites: None,
+        };
+        // Override the key so the default should be skipped (line 40: continue)
+        let overrides = vec![(
+            "key".to_string(),
+            serde_json::Value::String("override_val".to_string()),
+        )];
+        let map = WorkflowContext::resolve_inputs(&def, &overrides).unwrap();
+        // Should use override value, not default
+        assert_eq!(
+            map.get("key").and_then(|v| v.as_str()),
+            Some("override_val")
+        );
+    }
+
     #[test]
     fn resolve_inputs_default_applied() {
         let def = WorkflowDef {

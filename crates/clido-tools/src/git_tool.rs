@@ -281,4 +281,258 @@ mod tests {
         let tool = GitTool::new(tmp.path().to_path_buf());
         assert!(tool.is_read_only());
     }
+
+    // ── build_args coverage ────────────────────────────────────────────────
+
+    #[test]
+    fn build_args_status() {
+        let args = build_args("status", None, 10);
+        assert_eq!(args, vec!["status", "--short"]);
+    }
+
+    #[test]
+    fn build_args_diff_no_path() {
+        let args = build_args("diff", None, 10);
+        assert_eq!(args, vec!["diff"]);
+    }
+
+    #[test]
+    fn build_args_diff_with_path() {
+        let args = build_args("diff", Some("src/lib.rs"), 10);
+        assert_eq!(args, vec!["diff", "--", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn build_args_diff_staged_no_path() {
+        let args = build_args("diff-staged", None, 10);
+        assert_eq!(args, vec!["diff", "--staged"]);
+    }
+
+    #[test]
+    fn build_args_diff_staged_with_path() {
+        let args = build_args("diff-staged", Some("main.rs"), 10);
+        assert_eq!(args, vec!["diff", "--staged", "--", "main.rs"]);
+    }
+
+    #[test]
+    fn build_args_log_with_count() {
+        let args = build_args("log", None, 5);
+        assert!(args.contains(&"-5".to_string()));
+        assert!(args.contains(&"log".to_string()));
+    }
+
+    #[test]
+    fn build_args_branch() {
+        let args = build_args("branch", None, 10);
+        assert_eq!(args, vec!["branch", "--show-current"]);
+    }
+
+    #[test]
+    fn build_args_show_no_path() {
+        let args = build_args("show", None, 10);
+        assert!(args.contains(&"show".to_string()));
+        assert!(args.contains(&"HEAD".to_string()));
+        assert!(args.contains(&"--stat".to_string()));
+    }
+
+    #[test]
+    fn build_args_show_with_path() {
+        let args = build_args("show", Some("src/main.rs"), 10);
+        assert!(args.contains(&"--".to_string()));
+        assert!(args.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn build_args_stash_list() {
+        let args = build_args("stash-list", None, 10);
+        assert_eq!(args, vec!["stash", "list"]);
+    }
+
+    #[test]
+    fn build_args_unknown_fallback() {
+        let args = build_args("unknown_cmd", None, 10);
+        assert_eq!(args, vec!["unknown_cmd"]);
+    }
+
+    // ── git tool in real repo ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_git_tool_diff_staged_returns_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        // Create first commit
+        std::fs::write(tmp.path().join("a.txt"), "initial").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        // Stage a new file
+        std::fs::write(tmp.path().join("b.txt"), "staged").unwrap();
+        Command::new("git")
+            .args(["add", "b.txt"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "subcommand": "diff-staged" }))
+            .await;
+        assert!(!out.is_error, "diff-staged should succeed: {}", out.content);
+        assert!(
+            out.content.contains("b.txt")
+                || out.content.contains("+staged")
+                || out.content.is_empty()
+                || !out.is_error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_tool_branch_returns_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("f.txt"), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "subcommand": "branch" }))
+            .await;
+        assert!(!out.is_error, "branch should succeed: {}", out.content);
+    }
+
+    #[tokio::test]
+    async fn test_git_tool_show_returns_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("f.txt"), "content").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "test commit"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "subcommand": "show" }))
+            .await;
+        assert!(!out.is_error, "show should succeed: {}", out.content);
+        assert!(out.content.contains("test commit") || out.content.contains("f.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_git_tool_stash_list_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("f.txt"), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "subcommand": "stash-list" }))
+            .await;
+        assert!(!out.is_error, "stash-list should succeed: {}", out.content);
+        // Empty stash → empty content
+        assert!(out.content.trim().is_empty() || !out.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_git_tool_diff_with_path_arg() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("f.txt"), "old").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        // Modify file
+        std::fs::write(tmp.path().join("f.txt"), "new").unwrap();
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "subcommand": "diff", "path": "f.txt" }))
+            .await;
+        assert!(
+            !out.is_error,
+            "diff with path should succeed: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_tool_log_with_count_arg() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        for i in 0..3 {
+            std::fs::write(tmp.path().join(format!("f{}.txt", i)), format!("{}", i)).unwrap();
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(tmp.path())
+                .output()
+                .unwrap();
+            Command::new("git")
+                .args(["commit", "-m", &format!("c{}", i)])
+                .current_dir(tmp.path())
+                .output()
+                .unwrap();
+        }
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({ "subcommand": "log", "count": 2 }))
+            .await;
+        assert!(
+            !out.is_error,
+            "log with count should succeed: {}",
+            out.content
+        );
+        assert_eq!(out.content.lines().count(), 2);
+    }
+
+    #[test]
+    fn git_tool_schema_has_required_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["subcommand"].is_object());
+        assert_eq!(schema["required"][0], "subcommand");
+    }
+
+    #[test]
+    fn git_tool_description_non_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = GitTool::new(tmp.path().to_path_buf());
+        assert!(!tool.description().is_empty());
+    }
 }

@@ -141,3 +141,206 @@ impl PrereqEntry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── WorkflowDef construction and defaults ──────────────────────────────
+
+    #[test]
+    fn workflow_def_minimal_roundtrip() {
+        let yaml = r#"
+name: test_workflow
+steps:
+  - id: step1
+    prompt: "Do something"
+"#;
+        let def: WorkflowDef = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(def.name, "test_workflow");
+        assert_eq!(def.steps.len(), 1);
+        assert_eq!(def.steps[0].id, "step1");
+        assert_eq!(def.steps[0].prompt, "Do something");
+        // Defaults
+        assert!(def.version.is_empty());
+        assert!(def.description.is_empty());
+        assert!(def.inputs.is_empty());
+        assert!(def.output.is_none());
+        assert!(def.prerequisites.is_none());
+    }
+
+    #[test]
+    fn step_def_defaults() {
+        let yaml = r#"
+id: s1
+prompt: "hello"
+"#;
+        let step: StepDef = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(step.id, "s1");
+        assert!(step.name.is_none());
+        assert!(step.profile.is_none());
+        assert!(step.tools.is_none());
+        assert!(step.outputs.is_empty());
+        assert_eq!(step.on_error, OnErrorPolicy::Fail); // default
+        assert!(step.retry.is_none());
+        assert!(!step.parallel);
+        assert!(step.system_prompt.is_none());
+        assert!(step.max_turns.is_none());
+    }
+
+    // ── OnErrorPolicy default ────────────────────────────────────────────
+
+    #[test]
+    fn on_error_policy_default_is_fail() {
+        let policy = OnErrorPolicy::default();
+        assert_eq!(policy, OnErrorPolicy::Fail);
+    }
+
+    #[test]
+    fn on_error_policy_roundtrip() {
+        let json = serde_json::to_string(&OnErrorPolicy::Continue).unwrap();
+        let parsed: OnErrorPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, OnErrorPolicy::Continue);
+
+        let json = serde_json::to_string(&OnErrorPolicy::Retry).unwrap();
+        let parsed: OnErrorPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, OnErrorPolicy::Retry);
+    }
+
+    // ── BackoffKind default ───────────────────────────────────────────────
+
+    #[test]
+    fn backoff_kind_default_is_none() {
+        let b = BackoffKind::default();
+        assert_eq!(b, BackoffKind::None);
+    }
+
+    #[test]
+    fn backoff_kind_roundtrip() {
+        let json = serde_json::to_string(&BackoffKind::Exponential).unwrap();
+        let parsed: BackoffKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, BackoffKind::Exponential);
+
+        let json = serde_json::to_string(&BackoffKind::Linear).unwrap();
+        let parsed: BackoffKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, BackoffKind::Linear);
+    }
+
+    // ── RetryConfig ───────────────────────────────────────────────────────
+
+    #[test]
+    fn retry_config_default_max_attempts() {
+        let yaml = r#"backoff: exponential"#;
+        let r: RetryConfig = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(r.max_attempts, 3); // default_max_attempts()
+        assert_eq!(r.backoff, BackoffKind::Exponential);
+    }
+
+    // ── OutputConfig ──────────────────────────────────────────────────────
+
+    #[test]
+    fn output_config_default() {
+        let c = OutputConfig::default();
+        assert!(!c.print_summary);
+    }
+
+    #[test]
+    fn output_config_roundtrip() {
+        let yaml = r#"print_summary: true"#;
+        let c: OutputConfig = serde_yaml::from_str(yaml).expect("parse failed");
+        assert!(c.print_summary);
+    }
+
+    // ── PrerequisitesDef ──────────────────────────────────────────────────
+
+    #[test]
+    fn prerequisites_def_default() {
+        let p = PrerequisitesDef::default();
+        assert!(p.commands.is_empty());
+        assert!(p.env.is_empty());
+    }
+
+    // ── PrereqEntry ───────────────────────────────────────────────────────
+
+    #[test]
+    fn prereq_entry_required_name_and_not_optional() {
+        let e = PrereqEntry::Required("cargo".to_string());
+        assert_eq!(e.name(), "cargo");
+        assert!(!e.optional());
+    }
+
+    #[test]
+    fn prereq_entry_optional_name_and_optional() {
+        let e = PrereqEntry::Optional {
+            name: "node".to_string(),
+            optional: true,
+        };
+        assert_eq!(e.name(), "node");
+        assert!(e.optional());
+    }
+
+    #[test]
+    fn prereq_entry_optional_false() {
+        let e = PrereqEntry::Optional {
+            name: "go".to_string(),
+            optional: false,
+        };
+        assert!(!e.optional());
+    }
+
+    #[test]
+    fn prereq_entry_required_json_roundtrip() {
+        let e = PrereqEntry::Required("git".to_string());
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: PrereqEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name(), "git");
+        assert!(!parsed.optional());
+    }
+
+    // ── InputDef ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn input_def_required_and_default() {
+        let yaml = r#"
+name: my_input
+required: true
+default: "hello"
+"#;
+        let i: InputDef = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(i.name, "my_input");
+        assert!(i.required);
+        assert_eq!(i.default, Some(serde_json::json!("hello")));
+    }
+
+    #[test]
+    fn input_def_defaults() {
+        let yaml = r#"name: x"#;
+        let i: InputDef = serde_yaml::from_str(yaml).expect("parse");
+        assert!(!i.required);
+        assert!(i.default.is_none());
+    }
+
+    // ── OutputDef ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn output_def_defaults() {
+        let yaml = r#"name: result"#;
+        let o: OutputDef = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(o.name, "result");
+        assert!(o.r#type.is_empty());
+        assert!(o.save_to.is_none());
+    }
+
+    #[test]
+    fn output_def_with_all_fields() {
+        let yaml = r#"
+name: report
+type: text
+save_to: "outputs/{{step_id}}.txt"
+"#;
+        let o: OutputDef = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(o.name, "report");
+        assert_eq!(o.r#type, "text");
+        assert_eq!(o.save_to.as_deref(), Some("outputs/{{step_id}}.txt"));
+    }
+}

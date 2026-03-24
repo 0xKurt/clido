@@ -355,4 +355,141 @@ mod tests {
         assert!(!out.is_error, "error: {}", out.content);
         assert!(out.content.contains("rust") || out.content.contains("Rust"));
     }
+
+    // ── percent_encode_query ──────────────────────────────────────────────
+
+    #[test]
+    fn test_percent_encode_unreserved_chars() {
+        let encoded = percent_encode_query("hello");
+        assert_eq!(encoded, "hello");
+    }
+
+    #[test]
+    fn test_percent_encode_space_becomes_plus() {
+        let encoded = percent_encode_query("hello world");
+        assert_eq!(encoded, "hello+world");
+    }
+
+    #[test]
+    fn test_percent_encode_special_chars() {
+        let encoded = percent_encode_query("rust & cargo");
+        // & is not in unreserved set, should be percent-encoded
+        assert!(encoded.contains("%"), "encoded: {}", encoded);
+    }
+
+    #[test]
+    fn test_percent_encode_alphanumeric_unchanged() {
+        let s = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
+        let encoded = percent_encode_query(s);
+        assert_eq!(encoded, s);
+    }
+
+    #[test]
+    fn test_percent_encode_hash_encoded() {
+        let encoded = percent_encode_query("#query");
+        // '#' is not in unreserved, should be encoded
+        assert!(encoded.starts_with("%23"), "encoded: {}", encoded);
+    }
+
+    // ── parse_ddg_results: group topics skipped ──────────────────────────
+
+    #[test]
+    fn test_parse_ddg_results_group_topics_skipped() {
+        let json = serde_json::json!({
+            "AbstractText": "",
+            "AbstractURL": "",
+            "RelatedTopics": [
+                {
+                    // Group entry — has a Topics sub-array
+                    "Topics": [
+                        {"Text": "subtopic", "FirstURL": "https://sub.com"}
+                    ],
+                    "Name": "Group Name"
+                },
+                {
+                    "Text": "Real topic - a description",
+                    "FirstURL": "https://real.com"
+                }
+            ]
+        });
+        let results = parse_ddg_results(&json, 5);
+        // Group entry should be skipped; only real topic should be included
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://real.com");
+    }
+
+    #[test]
+    fn test_parse_ddg_results_empty_text_or_url_skipped() {
+        let json = serde_json::json!({
+            "AbstractText": "",
+            "AbstractURL": "",
+            "RelatedTopics": [
+                {
+                    "Text": "",
+                    "FirstURL": "https://empty-text.com"
+                },
+                {
+                    "Text": "Some text here",
+                    "FirstURL": ""
+                },
+                {
+                    "Text": "Valid - entry",
+                    "FirstURL": "https://valid.com"
+                }
+            ]
+        });
+        let results = parse_ddg_results(&json, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://valid.com");
+    }
+
+    #[test]
+    fn test_parse_ddg_results_no_dash_in_text_title_truncated() {
+        // Text without " - " separator → title is first 60 chars
+        let long_text = "a".repeat(80);
+        let json = serde_json::json!({
+            "AbstractText": "",
+            "AbstractURL": "",
+            "RelatedTopics": [
+                {
+                    "Text": long_text,
+                    "FirstURL": "https://example.com"
+                }
+            ]
+        });
+        let results = parse_ddg_results(&json, 5);
+        assert_eq!(results.len(), 1);
+        // Title is first 60 chars of text
+        assert_eq!(results[0].title.len(), 60);
+    }
+
+    #[test]
+    fn test_parse_ddg_abstract_without_heading() {
+        // AbstractURL and AbstractText present but no Heading → uses default title
+        let json = serde_json::json!({
+            "AbstractText": "Some description",
+            "AbstractURL": "https://example.com",
+            "RelatedTopics": []
+        });
+        let results = parse_ddg_results(&json, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "DuckDuckGo Answer");
+    }
+
+    // ── WebSearchTool default ─────────────────────────────────────────────
+
+    #[test]
+    fn web_search_tool_default() {
+        let tool = WebSearchTool::default();
+        assert_eq!(tool.name(), "WebSearch");
+        assert!(tool.is_read_only());
+        let schema = tool.schema();
+        assert!(schema["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn web_search_tool_description_non_empty() {
+        let tool = WebSearchTool::new();
+        assert!(!tool.description().is_empty());
+    }
 }

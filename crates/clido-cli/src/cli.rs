@@ -285,6 +285,12 @@ pub enum Subcommand {
         #[command(subcommand)]
         cmd: PlanCmd,
     },
+
+    /// Agent profile management (list, create, switch, edit, delete).
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -439,6 +445,35 @@ pub enum PlanCmd {
     },
 }
 
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum ProfileCmd {
+    /// List all profiles with active model per slot.
+    List,
+    /// Create a new profile (guided wizard).
+    Create {
+        /// Profile name (prompted if omitted).
+        name: Option<String>,
+    },
+    /// Switch the active profile.
+    Switch {
+        /// Profile name to activate.
+        name: String,
+    },
+    /// Edit a profile (guided, pre-filled with current values).
+    Edit {
+        /// Profile name to edit.
+        name: String,
+    },
+    /// Delete a profile (default profile cannot be deleted).
+    Delete {
+        /// Profile name to delete.
+        name: String,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 impl Cli {
     /// Single prompt string from positional args.
     pub fn prompt_str(&self) -> String {
@@ -470,6 +505,7 @@ impl Cli {
             Some(Subcommand::Checkpoint { .. }) => false,
             Some(Subcommand::Rollback { .. }) => false,
             Some(Subcommand::Plan { .. }) => false,
+            Some(Subcommand::Profile { .. }) => false,
         }
     }
 }

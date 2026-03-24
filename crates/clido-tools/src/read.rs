@@ -251,4 +251,152 @@ mod tests {
         assert!(out.content.contains("line2"));
         assert!(out.content.contains("line3"));
     }
+
+    #[tokio::test]
+    async fn read_missing_path_field_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = ReadTool::new(dir.path().to_path_buf());
+        let out = t.execute(serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("file_path") || out.content.contains("path"));
+    }
+
+    #[tokio::test]
+    async fn read_directory_returns_eisdir_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a subdirectory and try to read it
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let t = ReadTool::new(dir.path().to_path_buf());
+        let out = t
+            .execute(serde_json::json!({ "file_path": "subdir" }))
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("EISDIR") || out.content.contains("directory"),
+            "content: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn read_offset_out_of_range_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "line1\nline2\n").unwrap();
+        let t = ReadTool::new(dir.path().to_path_buf());
+        // Offset beyond file length
+        let out = t
+            .execute(serde_json::json!({ "file_path": "small.txt", "offset": 100 }))
+            .await;
+        assert!(
+            out.is_error,
+            "expected error for offset out of range, got: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn read_full_file_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.txt");
+        std::fs::write(&path, "hello\nworld\n").unwrap();
+        let t = ReadTool::new(dir.path().to_path_buf());
+        let out = t
+            .execute(serde_json::json!({ "file_path": "full.txt" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert!(out.content.contains("hello"));
+        assert!(out.content.contains("world"));
+    }
+
+    #[test]
+    fn read_tool_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = ReadTool::new(dir.path().to_path_buf());
+        assert_eq!(t.name(), "Read");
+        assert!(t.is_read_only());
+        let schema = t.schema();
+        assert_eq!(schema["type"], "object");
+    }
+
+    /// Line 24: new_with_guard constructor.
+    #[test]
+    fn read_tool_new_with_guard() {
+        use crate::path_guard::PathGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = PathGuard::new(dir.path().to_path_buf());
+        let tool = ReadTool::new_with_guard(guard);
+        assert_eq!(tool.name(), "Read");
+        assert!(tool.is_read_only());
+    }
+
+    /// Lines 129-150: read_cache hit path — read a file twice with cache enabled.
+    #[tokio::test]
+    async fn read_with_cache_returns_cached_on_second_read() {
+        use crate::file_tracker::FileTracker;
+        use crate::path_guard::PathGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached.txt");
+        std::fs::write(&path, "hello world\n").unwrap();
+        let root_canon = std::fs::canonicalize(dir.path()).unwrap();
+        let guard = PathGuard::new(root_canon.clone());
+        let tracker = FileTracker::new();
+        let cache = clido_context::read_cache::ReadCache::new();
+        let t = ReadTool::new_with_cache(guard, tracker, cache);
+        // First read — populates cache
+        let out1 = t
+            .execute(serde_json::json!({ "file_path": "cached.txt" }))
+            .await;
+        assert!(!out1.is_error, "first read error: {}", out1.content);
+        // Second read — should hit cache (lines 129-150)
+        let out2 = t
+            .execute(serde_json::json!({ "file_path": "cached.txt" }))
+            .await;
+        assert!(!out2.is_error, "second read error: {}", out2.content);
+        assert!(out2.content.contains("hello world"));
+    }
+
+    /// Lines 129-130: cache hit path with offset/limit provided (non-zero).
+    /// When offset or limit are non-zero the cache hit returns early above the normal path.
+    #[tokio::test]
+    async fn read_with_cache_hit_and_offset_skips_cache() {
+        use crate::file_tracker::FileTracker;
+        use crate::path_guard::PathGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paged.txt");
+        std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
+        let root_canon = std::fs::canonicalize(dir.path()).unwrap();
+        let guard = PathGuard::new(root_canon.clone());
+        let tracker = FileTracker::new();
+        let cache = clido_context::read_cache::ReadCache::new();
+        let t = ReadTool::new_with_cache(guard, tracker, cache);
+        // First read populates cache (full read)
+        let out1 = t
+            .execute(serde_json::json!({ "file_path": "paged.txt" }))
+            .await;
+        assert!(!out1.is_error, "first read error: {}", out1.content);
+        // Second read with offset — enters cache hit branch but offset != 0, falls through
+        let out2 = t
+            .execute(serde_json::json!({ "file_path": "paged.txt", "offset": 2, "limit": 1 }))
+            .await;
+        assert!(!out2.is_error, "second read error: {}", out2.content);
+        assert!(out2.content.contains("line2"));
+    }
+
+    #[tokio::test]
+    async fn read_with_tracker_records_file() {
+        use crate::file_tracker::FileTracker;
+        use crate::path_guard::PathGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracked.txt");
+        std::fs::write(&path, "content\n").unwrap();
+        let guard = PathGuard::new(dir.path().to_path_buf());
+        let tracker = FileTracker::new();
+        let t = ReadTool::new_with_tracker(guard, tracker);
+        let out = t
+            .execute(serde_json::json!({ "file_path": "tracked.txt" }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+    }
 }

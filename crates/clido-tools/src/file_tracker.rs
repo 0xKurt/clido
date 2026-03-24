@@ -66,3 +66,122 @@ impl FileTracker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn new_creates_empty_tracker() {
+        let tracker = FileTracker::new();
+        // Untracked path should return None
+        assert!(tracker
+            .check_not_stale(Path::new("/some/nonexistent/path"))
+            .is_none());
+    }
+
+    #[test]
+    fn record_zero_mtime_is_ignored() {
+        let tracker = FileTracker::new();
+        let p = Path::new("/tmp/test_file.txt");
+        tracker.record(p, 0); // zero mtime should be ignored
+                              // Since not tracked (zero was ignored), check should return None
+        assert!(tracker.check_not_stale(p).is_none());
+    }
+
+    #[test]
+    fn check_not_stale_returns_none_for_untracked_path() {
+        let tracker = FileTracker::new();
+        let result = tracker.check_not_stale(Path::new("/tmp/untracked_file_xyz.txt"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_not_stale_ok_when_mtime_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("tracked.txt");
+        std::fs::write(&file_path, "content").unwrap();
+
+        // Get the actual mtime
+        let meta = std::fs::metadata(&file_path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let tracker = FileTracker::new();
+        tracker.record(&file_path, mtime);
+        // No external modification → should be None (not stale)
+        assert!(tracker.check_not_stale(&file_path).is_none());
+    }
+
+    #[test]
+    fn check_not_stale_detects_modification() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("modified.txt");
+        std::fs::write(&file_path, "original").unwrap();
+
+        // Record with an old mtime (1 = epoch + 1 ns)
+        let tracker = FileTracker::new();
+        tracker.record(&file_path, 1); // old mtime
+
+        // Now file has a much newer mtime → should detect as stale
+        let result = tracker.check_not_stale(&file_path);
+        assert!(result.is_some(), "expected stale detection");
+        assert!(result.unwrap().contains("modified externally"));
+    }
+
+    #[test]
+    fn update_refreshes_tracked_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("update_test.txt");
+        std::fs::write(&file_path, "v1").unwrap();
+
+        // Get current mtime
+        let meta = std::fs::metadata(&file_path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let tracker = FileTracker::new();
+        tracker.record(&file_path, 1); // stale old mtime
+
+        // Now update with the real mtime
+        tracker.update(&file_path, mtime);
+
+        // Should not be stale anymore
+        assert!(tracker.check_not_stale(&file_path).is_none());
+    }
+
+    #[test]
+    fn update_zero_mtime_is_ignored() {
+        let tracker = FileTracker::new();
+        let p = Path::new("/tmp/zero_test.txt");
+        tracker.record(p, 999);
+        tracker.update(p, 0); // should be ignored
+                              // Should still have the old recorded mtime (999)
+        let inner = tracker.inner.lock().unwrap();
+        assert_eq!(inner.get(p), Some(&999));
+    }
+
+    #[test]
+    fn clone_shares_inner_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("shared.txt");
+        std::fs::write(&file_path, "x").unwrap();
+
+        let tracker1 = FileTracker::new();
+        let tracker2 = tracker1.clone();
+
+        tracker1.record(&file_path, 12345);
+        // tracker2 should see the same record
+        let inner = tracker2.inner.lock().unwrap();
+        assert_eq!(inner.get(&file_path), Some(&12345));
+    }
+}

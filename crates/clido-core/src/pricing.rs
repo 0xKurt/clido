@@ -218,4 +218,80 @@ mod tests {
         // table.models may or may not be empty depending on whether the user has a pricing file
         let _ = table; // just ensure no panic
     }
+
+    // ── PricingToml deserialization ────────────────────────────────────────
+
+    #[test]
+    fn pricing_toml_parses_model_entries() {
+        let toml_str = r#"
+[model.claude-3-haiku]
+name = "claude-3-haiku"
+provider = "anthropic"
+input_per_mtok = 0.25
+output_per_mtok = 1.25
+context_window = 200000
+"#;
+        let parsed: PricingToml = toml::from_str(toml_str).unwrap();
+        assert!(parsed.model.contains_key("claude-3-haiku"));
+        let entry = &parsed.model["claude-3-haiku"];
+        assert_eq!(entry.input_per_mtok, 0.25);
+        assert_eq!(entry.output_per_mtok, 1.25);
+        assert_eq!(entry.context_window, Some(200000));
+    }
+
+    #[test]
+    fn pricing_toml_with_cache_rates() {
+        let toml_str = r#"
+[model.claude-3-5-sonnet]
+name = "claude-3-5-sonnet"
+provider = "anthropic"
+input_per_mtok = 3.0
+output_per_mtok = 15.0
+cache_creation_per_mtok = 3.75
+cache_read_per_mtok = 0.30
+"#;
+        let parsed: PricingToml = toml::from_str(toml_str).unwrap();
+        let entry = &parsed.model["claude-3-5-sonnet"];
+        assert_eq!(entry.cache_creation_per_mtok, Some(3.75));
+        assert_eq!(entry.cache_read_per_mtok, Some(0.30));
+    }
+
+    #[test]
+    fn pricing_toml_empty_parses_ok() {
+        let toml_str = "";
+        let parsed: PricingToml = toml::from_str(toml_str).unwrap();
+        assert!(parsed.model.is_empty());
+    }
+
+    #[test]
+    fn pricing_table_default_has_no_models() {
+        let table = PricingTable::default();
+        assert!(table.models.is_empty());
+    }
+
+    #[test]
+    fn cost_only_input_tokens() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let table = PricingTable::default(); // uses fallback: $3/mtok input
+        let cost = compute_cost_usd(&usage, "unknown", &table);
+        assert!((cost - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cost_only_output_tokens() {
+        let usage = Usage {
+            input_tokens: 0,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let table = PricingTable::default(); // uses fallback: $15/mtok output
+        let cost = compute_cost_usd(&usage, "unknown", &table);
+        assert!((cost - 15.0).abs() < 0.001);
+    }
 }

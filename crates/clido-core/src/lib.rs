@@ -7,9 +7,13 @@ pub mod model_prefs;
 pub mod pricing;
 pub mod types;
 
-pub use config::{AgentConfig, HooksConfig, PermissionMode, ProviderConfig, ProviderType};
+pub use config::{
+    AgentConfig, AgentSlotConfig, AgentsConfig, HooksConfig, PermissionMode, ProviderConfig,
+    ProviderType,
+};
 pub use config_loader::{
-    agent_config_from_loaded, config_file_exists, load_config, LoadedConfig, ProfileEntry,
+    agent_config_from_loaded, config_file_exists, delete_profile_from_config, global_config_path,
+    load_config, switch_active_profile, upsert_profile_in_config, LoadedConfig, ProfileEntry,
     RolesSection,
 };
 pub use error::{ClidoError, Result};

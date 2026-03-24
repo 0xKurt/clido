@@ -50,3 +50,101 @@ pub enum ClidoError {
 
 /// Result type using ClidoError.
 pub type Result<T> = std::result::Result<T, ClidoError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_error_display() {
+        let e = ClidoError::Provider("bad api key".to_string());
+        assert!(e.to_string().contains("provider error"));
+        assert!(e.to_string().contains("bad api key"));
+    }
+
+    #[test]
+    fn tool_error_display() {
+        let e = ClidoError::Tool {
+            tool_name: "Read".to_string(),
+            message: "file not found".to_string(),
+        };
+        assert!(e.to_string().contains("tool error"));
+        assert!(e.to_string().contains("Read"));
+        assert!(e.to_string().contains("file not found"));
+    }
+
+    #[test]
+    fn context_limit_display() {
+        let e = ClidoError::ContextLimit { tokens: 200_001 };
+        assert!(e.to_string().contains("context limit exceeded"));
+        assert!(e.to_string().contains("200001"));
+    }
+
+    #[test]
+    fn session_not_found_display() {
+        let e = ClidoError::SessionNotFound {
+            session_id: "abc-123".to_string(),
+        };
+        assert!(e.to_string().contains("session not found"));
+        assert!(e.to_string().contains("abc-123"));
+    }
+
+    #[test]
+    fn permission_denied_display() {
+        let e = ClidoError::PermissionDenied {
+            tool_name: "Write".to_string(),
+        };
+        assert!(e.to_string().contains("permission denied"));
+        assert!(e.to_string().contains("Write"));
+    }
+
+    #[test]
+    fn planner_error_display() {
+        let e = ClidoError::Planner("bad plan".to_string());
+        assert!(e.to_string().contains("planner error"));
+    }
+
+    #[test]
+    fn workflow_error_display() {
+        let e = ClidoError::Workflow("step failed".to_string());
+        assert!(e.to_string().contains("workflow error"));
+    }
+
+    #[test]
+    fn config_error_display() {
+        let e = ClidoError::Config("missing field".to_string());
+        assert!(e.to_string().contains("config error"));
+    }
+
+    #[test]
+    fn budget_exceeded_display() {
+        let e = ClidoError::BudgetExceeded;
+        assert!(e.to_string().contains("budget exceeded"));
+    }
+
+    #[test]
+    fn max_turns_exceeded_display() {
+        let e = ClidoError::MaxTurnsExceeded;
+        assert!(e.to_string().contains("max_turns exceeded"));
+    }
+
+    #[test]
+    fn interrupted_display() {
+        let e = ClidoError::Interrupted;
+        assert!(e.to_string().contains("interrupted"));
+    }
+
+    #[test]
+    fn io_error_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let e = ClidoError::from(io_err);
+        assert!(e.to_string().contains("io error"));
+    }
+
+    #[test]
+    fn json_error_from() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let e = ClidoError::from(json_err);
+        assert!(e.to_string().contains("json error"));
+    }
+}

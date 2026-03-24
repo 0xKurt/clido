@@ -77,3 +77,150 @@ fn prefs_path() -> Option<std::path::PathBuf> {
     directories::ProjectDirs::from("", "", "clido")
         .map(|d: directories::ProjectDirs| d.config_dir().join("model_prefs.json"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_prefs_are_empty() {
+        let p = ModelPrefs::default();
+        assert!(p.favorites.is_empty());
+        assert!(p.recent.is_empty());
+        assert!(p.roles.is_empty());
+    }
+
+    #[test]
+    fn toggle_favorite_adds_model() {
+        let mut p = ModelPrefs::default();
+        p.toggle_favorite("claude-3-sonnet");
+        assert!(p.is_favorite("claude-3-sonnet"));
+        assert_eq!(p.favorites.len(), 1);
+    }
+
+    #[test]
+    fn toggle_favorite_removes_existing() {
+        let mut p = ModelPrefs::default();
+        p.toggle_favorite("claude-3-sonnet");
+        p.toggle_favorite("claude-3-sonnet"); // toggle off
+        assert!(!p.is_favorite("claude-3-sonnet"));
+        assert!(p.favorites.is_empty());
+    }
+
+    #[test]
+    fn toggle_favorite_multiple_models() {
+        let mut p = ModelPrefs::default();
+        p.toggle_favorite("model-a");
+        p.toggle_favorite("model-b");
+        assert!(p.is_favorite("model-a"));
+        assert!(p.is_favorite("model-b"));
+        p.toggle_favorite("model-a");
+        assert!(!p.is_favorite("model-a"));
+        assert!(p.is_favorite("model-b"));
+    }
+
+    #[test]
+    fn push_recent_moves_to_front() {
+        let mut p = ModelPrefs::default();
+        p.push_recent("model-a");
+        p.push_recent("model-b");
+        p.push_recent("model-a"); // should move to front
+        assert_eq!(p.recent[0], "model-a");
+        assert_eq!(p.recent[1], "model-b");
+        assert_eq!(p.recent.len(), 2); // no duplicate
+    }
+
+    #[test]
+    fn push_recent_capped_at_max_recent() {
+        let mut p = ModelPrefs::default();
+        for i in 0..15 {
+            p.push_recent(&format!("model-{}", i));
+        }
+        assert_eq!(p.recent.len(), ModelPrefs::MAX_RECENT);
+    }
+
+    #[test]
+    fn push_recent_newest_at_front() {
+        let mut p = ModelPrefs::default();
+        p.push_recent("old");
+        p.push_recent("new");
+        assert_eq!(p.recent[0], "new");
+        assert_eq!(p.recent[1], "old");
+    }
+
+    #[test]
+    fn resolve_role_returns_assigned_model() {
+        let mut p = ModelPrefs::default();
+        p.roles
+            .insert("fast".to_string(), "claude-haiku".to_string());
+        assert_eq!(p.resolve_role("fast"), Some("claude-haiku"));
+    }
+
+    #[test]
+    fn resolve_role_returns_none_for_unassigned() {
+        let p = ModelPrefs::default();
+        assert_eq!(p.resolve_role("fast"), None);
+    }
+
+    #[test]
+    fn is_favorite_returns_false_for_unknown() {
+        let p = ModelPrefs::default();
+        assert!(!p.is_favorite("not-a-model"));
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let mut p = ModelPrefs::default();
+        p.toggle_favorite("model-x");
+        p.push_recent("model-y");
+        p.roles.insert("critic".to_string(), "model-z".to_string());
+
+        let json = serde_json::to_string(&p).unwrap();
+        let p2: ModelPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(p2.favorites, p.favorites);
+        assert_eq!(p2.recent, p.recent);
+        assert_eq!(p2.roles, p.roles);
+    }
+
+    // ── load/save smoke tests ──────────────────────────────────────────────
+
+    #[test]
+    fn load_returns_default_on_missing_file() {
+        // load() is silent on missing file — returns Default
+        let prefs = ModelPrefs::load();
+        // Just verify it returns without panic; favorites/recent/roles may or may not be populated
+        let _ = prefs;
+    }
+
+    #[test]
+    fn save_does_not_panic() {
+        // save() is silent on error — should never panic
+        let p = ModelPrefs::default();
+        p.save(); // may fail silently if config dir is not writable
+    }
+
+    #[test]
+    fn save_then_load_roundtrip_via_json() {
+        // Test the JSON serialization path that save() uses
+        let mut p = ModelPrefs::default();
+        p.toggle_favorite("model-save-test");
+        p.push_recent("model-save-test-2");
+        p.roles.insert("fast".to_string(), "haiku".to_string());
+
+        let json = serde_json::to_string_pretty(&p).unwrap();
+        let loaded: ModelPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.favorites, p.favorites);
+        assert_eq!(loaded.recent, p.recent);
+        assert_eq!(loaded.roles["fast"], "haiku");
+    }
+
+    #[test]
+    fn load_from_invalid_json_returns_default() {
+        // Test the error path in load(): invalid JSON → default
+        let result: Option<ModelPrefs> = serde_json::from_str("not json").ok();
+        assert!(result.is_none());
+        // The load() fn uses .unwrap_or_default() — simulate that:
+        let loaded = result.unwrap_or_default();
+        assert!(loaded.favorites.is_empty());
+    }
+}

@@ -14,6 +14,8 @@ use tracing::warn;
 use crate::provider::{ModelProvider, StreamEvent};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1";
 
 /// OpenAI-compatible chat provider (OpenRouter, OpenAI, local OpenAI-compatible endpoints).
 pub struct OpenAICompatProvider {
@@ -61,6 +63,16 @@ impl OpenAICompatProvider {
             OPENROUTER_BASE_URL.to_string(),
             extra_headers,
         )
+    }
+
+    /// OpenAI: standard base URL, Bearer auth.
+    pub fn new_openai(api_key: String, model: String) -> Self {
+        Self::new(api_key, model, OPENAI_BASE_URL.to_string(), vec![])
+    }
+
+    /// Mistral: OpenAI-compatible API.
+    pub fn new_mistral(api_key: String, model: String) -> Self {
+        Self::new(api_key, model, MISTRAL_BASE_URL.to_string(), vec![])
     }
 
     fn request_url(&self) -> String {
@@ -238,6 +250,39 @@ impl OpenAICompatProvider {
             return Err(ClidoError::Provider(msg));
         }
     }
+}
+
+/// Filter for OpenAI chat/completion models — skip embeddings, image, audio, etc.
+/// Determine whether an OpenRouter model entry has usable chat endpoints.
+///
+/// OpenRouter's `/api/v1/models` response includes:
+/// - `supported_generation_types`: array of strings (e.g. `["text"]`).
+///   If present and empty, or does not contain `"text"`, the model has no
+///   chat completion endpoint.
+/// - `per_request_limits`: object when the model is accessible; null when
+///   it is not available to the current account/key.
+///
+/// A model passes if either check says it's available. Both being absent
+/// means the field schema is not yet known — assume available (safe default).
+fn openrouter_model_available(m: &serde_json::Value) -> bool {
+    // Check supported_generation_types if present.
+    if let Some(types) = m["supported_generation_types"].as_array() {
+        return types.iter().any(|t| t.as_str() == Some("text"));
+    }
+    // Fallback: per_request_limits is null ↔ model is not accessible.
+    if !m["per_request_limits"].is_null() {
+        return true;
+    }
+    // Neither field present — assume available.
+    true
+}
+
+fn is_openai_chat_model(id: &str) -> bool {
+    id.starts_with("gpt-")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+        || id.starts_with("chatgpt-")
 }
 
 fn rate_limit_backoff_secs(attempt: u32) -> u64 {
@@ -452,6 +497,52 @@ impl ModelProvider for OpenAICompatProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         Ok(Box::pin(stream::empty()))
     }
+
+    async fn list_models(&self) -> Vec<crate::provider::ModelEntry> {
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{}/models", base);
+        let mut req = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key));
+        for (k, v) in &self.extra_headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let Ok(resp) = req.send().await else {
+            return vec![];
+        };
+        if !resp.status().is_success() {
+            return vec![];
+        }
+        let Ok(json) = resp.json::<serde_json::Value>().await else {
+            return vec![];
+        };
+        let is_openrouter = base.contains("openrouter.ai");
+        let is_openai = base.contains("api.openai.com");
+        let mut models: Vec<crate::provider::ModelEntry> = json["data"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|m| {
+                let id = m["id"].as_str()?.to_string();
+                if is_openai && !is_openai_chat_model(&id) {
+                    return None;
+                }
+                // For OpenRouter: mark models that have no usable chat endpoints.
+                // The API returns `supported_generation_types` (array) — if it
+                // exists and does not contain "text", the model cannot generate
+                // chat completions. Falls back to checking `per_request_limits`.
+                let available = if is_openrouter {
+                    openrouter_model_available(m)
+                } else {
+                    true
+                };
+                Some(crate::provider::ModelEntry { id, available })
+            })
+            .collect();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
 }
 
 #[cfg(test)]
@@ -591,6 +682,248 @@ mod tests {
             assert_eq!(input["path"], "src/main.rs");
         } else {
             panic!("expected tool_use block");
+        }
+    }
+
+    // ── backoff helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_backoff_increases_and_caps() {
+        assert_eq!(rate_limit_backoff_secs(1), 15);
+        assert_eq!(rate_limit_backoff_secs(2), 30);
+        assert_eq!(rate_limit_backoff_secs(3), 60);
+        assert_eq!(rate_limit_backoff_secs(4), 120); // capped at 120
+        assert_eq!(rate_limit_backoff_secs(5), 120); // still capped
+        assert_eq!(rate_limit_backoff_secs(10), 120);
+    }
+
+    #[test]
+    fn server_error_backoff_exponential() {
+        assert_eq!(server_error_backoff_secs(1), 1);
+        assert_eq!(server_error_backoff_secs(2), 2);
+        assert_eq!(server_error_backoff_secs(3), 4);
+        assert_eq!(server_error_backoff_secs(4), 8);
+        assert_eq!(server_error_backoff_secs(5), 16);
+        assert_eq!(server_error_backoff_secs(6), 16); // capped at 16
+    }
+
+    #[test]
+    fn network_backoff_increases_and_caps() {
+        assert_eq!(network_backoff_secs(1), 1);
+        assert_eq!(network_backoff_secs(2), 2);
+        assert_eq!(network_backoff_secs(3), 4);
+        assert_eq!(network_backoff_secs(4), 4); // capped at 4
+        assert_eq!(network_backoff_secs(10), 4);
+    }
+
+    // ── request_url ────────────────────────────────────────────────────────
+
+    #[test]
+    fn request_url_strips_trailing_slash() {
+        let p = OpenAICompatProvider::new(
+            "key".into(),
+            "model".into(),
+            "https://example.com/v1/".into(),
+            vec![],
+        );
+        assert_eq!(p.request_url(), "https://example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn request_url_no_trailing_slash() {
+        let p = OpenAICompatProvider::new(
+            "key".into(),
+            "model".into(),
+            "https://example.com/v1".into(),
+            vec![],
+        );
+        assert_eq!(p.request_url(), "https://example.com/v1/chat/completions");
+    }
+
+    // ── new_openrouter ─────────────────────────────────────────────────────
+
+    #[test]
+    fn new_openrouter_uses_openrouter_url() {
+        let p = OpenAICompatProvider::new_openrouter("sk-or-key".into(), "model".into());
+        assert!(p.request_url().contains("openrouter.ai"));
+    }
+
+    // ── messages_to_openai system messages ────────────────────────────────
+
+    #[test]
+    fn messages_to_openai_system_message_extracted() {
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text {
+                    text: "You are a bot.".to_string(),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hi".to_string(),
+                }],
+            },
+        ];
+        let (sys, msgs) = messages_to_openai(&messages).unwrap();
+        assert_eq!(sys, Some("You are a bot.".to_string()));
+        assert_eq!(msgs.len(), 1); // system not in messages list
+        assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
+    fn messages_to_openai_multiple_system_messages_joined() {
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text {
+                    text: "part1".to_string(),
+                }],
+            },
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text {
+                    text: "part2".to_string(),
+                }],
+            },
+        ];
+        let (sys, msgs) = messages_to_openai(&messages).unwrap();
+        assert_eq!(sys, Some("part1\npart2".to_string()));
+        assert!(msgs.is_empty());
+    }
+
+    // ── messages_to_openai assistant with text only ────────────────────────
+
+    #[test]
+    fn messages_to_openai_assistant_text_only() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "answer".to_string(),
+            }],
+        }];
+        let (_, msgs) = messages_to_openai(&messages).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["content"], "answer");
+        assert!(!msgs[0]["tool_calls"].is_array());
+    }
+
+    // ── messages_to_openai assistant with both text and tool calls ─────────
+
+    #[test]
+    fn messages_to_openai_assistant_with_text_and_tool_calls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "thinking...".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_x".to_string(),
+                    name: "Write".to_string(),
+                    input: serde_json::json!({"file_path": "f.txt", "content": "hi"}),
+                },
+            ],
+        }];
+        let (_, msgs) = messages_to_openai(&messages).unwrap();
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["content"], "thinking...");
+        assert!(msgs[0]["tool_calls"].is_array());
+    }
+
+    // ── parse_openai_response edge cases ──────────────────────────────────
+
+    #[test]
+    fn parse_openai_response_length_stop() {
+        let json = serde_json::json!({
+            "id": "x",
+            "model": "gpt-4",
+            "choices": [{
+                "message": {"role": "assistant", "content": "partial"},
+                "finish_reason": "length"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let r = parse_openai_response(&json).unwrap();
+        assert!(matches!(r.stop_reason, StopReason::MaxTokens));
+    }
+
+    #[test]
+    fn parse_openai_response_empty_choices_error() {
+        let json = serde_json::json!({
+            "id": "x",
+            "model": "gpt-4",
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let result = parse_openai_response(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_openai_response_missing_choices_error() {
+        let json = serde_json::json!({
+            "id": "x",
+            "model": "gpt-4",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let result = parse_openai_response(&json);
+        assert!(result.is_err());
+    }
+
+    // ── message_to_content_blocks array content ────────────────────────────
+
+    #[test]
+    fn message_to_content_blocks_array_content() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "text", "text": "world"}
+            ]
+        });
+        let blocks = message_to_content_blocks(&message).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "hello"));
+        assert!(matches!(&blocks[1], ContentBlock::Text { text } if text == "world"));
+    }
+
+    #[test]
+    fn message_to_content_blocks_empty_text_not_added() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": ""
+        });
+        let blocks = message_to_content_blocks(&message).unwrap();
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn message_to_content_blocks_tool_calls_parsed() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": "{\"command\":\"echo hi\"}"
+                    }
+                }
+            ]
+        });
+        let blocks = message_to_content_blocks(&message).unwrap();
+        assert_eq!(blocks.len(), 1);
+        if let ContentBlock::ToolUse { id, name, input } = &blocks[0] {
+            assert_eq!(id, "call_1");
+            assert_eq!(name, "Bash");
+            assert_eq!(input["command"], "echo hi");
+        } else {
+            panic!("expected ToolUse");
         }
     }
 }

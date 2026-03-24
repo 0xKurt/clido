@@ -326,6 +326,20 @@ mod tests {
         }
     }
 
+    /// Lines 196-197: TfIdfEmbeddingEngine::default() calls new().
+    #[test]
+    fn tf_idf_default_is_same_as_new() {
+        let engine = TfIdfEmbeddingEngine::default();
+        assert_eq!(engine.dimension, 128);
+    }
+
+    /// Lines 225-226: dimension() returns the field value.
+    #[test]
+    fn tf_idf_dimension_returns_128() {
+        let engine = TfIdfEmbeddingEngine::new();
+        assert_eq!(engine.dimension(), 128);
+    }
+
     #[test]
     fn irrelevant_memories_do_not_surface() {
         let mut store = open_test_store();

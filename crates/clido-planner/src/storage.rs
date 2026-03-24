@@ -194,4 +194,55 @@ mod tests {
         let result = load_plan(dir.path(), "plan-ghost");
         assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
+
+    /// Line 57: list_plans returns empty when dir doesn't exist.
+    #[test]
+    fn test_list_plans_no_dir_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pass a nonexistent workspace root so the plans dir doesn't exist
+        let nonexistent = dir.path().join("no_such_workspace");
+        let result = list_plans(&nonexistent).unwrap();
+        assert!(result.is_empty());
+    }
+
+    /// Line 64: list_plans skips non-.json files.
+    #[test]
+    fn test_list_plans_skips_non_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create the plans dir manually
+        let plans = dir.path().join(".clido").join("plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        // Write a non-json file
+        std::fs::write(plans.join("readme.txt"), "not a plan").unwrap();
+        // Write a valid plan
+        let plan = make_plan("plan-xyz", "test", "2026-01-01T00:00:00Z");
+        save_plan(dir.path(), &plan).unwrap();
+        let summaries = list_plans(dir.path()).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "plan-xyz");
+    }
+
+    /// Line 69: list_plans skips files with corrupt JSON.
+    #[test]
+    fn test_list_plans_skips_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans = dir.path().join(".clido").join("plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        // Write a corrupt JSON file
+        std::fs::write(plans.join("corrupt.json"), "not valid json {{{").unwrap();
+        // Write a valid plan
+        let plan = make_plan("plan-valid", "valid", "2026-01-01T00:00:00Z");
+        save_plan(dir.path(), &plan).unwrap();
+        let summaries = list_plans(dir.path()).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "plan-valid");
+    }
+
+    /// Line 105: delete_plan returns NotFound for nonexistent plan.
+    #[test]
+    fn test_delete_plan_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = delete_plan(dir.path(), "nonexistent-plan-id");
+        assert!(matches!(result, Err(StorageError::NotFound(_))));
+    }
 }

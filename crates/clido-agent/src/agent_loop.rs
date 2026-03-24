@@ -1549,3 +1549,985 @@ fn run_hook(cmd: &str, env_vars: &[(&str, &str)]) {
     }
     let _ = command.spawn();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use clido_core::{
+        AgentConfig, ContentBlock, ModelResponse, PermissionMode, Role, StopReason, ToolSchema,
+        Usage,
+    };
+    use clido_providers::ModelProvider;
+    use clido_storage::SessionLine;
+    use clido_tools::ToolRegistry;
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Minimal mock provider that always returns a fixed text response.
+    struct MockProvider {
+        response_text: String,
+    }
+
+    impl MockProvider {
+        fn new(text: &str) -> Self {
+            Self {
+                response_text: text.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<ModelResponse> {
+            Ok(ModelResponse {
+                id: "mock-id".to_string(),
+                model: "mock".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: self.response_text.clone(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                },
+            })
+        }
+
+        async fn complete_stream(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<
+            Pin<Box<dyn Stream<Item = clido_core::Result<clido_providers::StreamEvent>> + Send>>,
+        > {
+            unimplemented!()
+        }
+        async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+            vec![]
+        }
+    }
+
+    fn mock_config() -> AgentConfig {
+        AgentConfig {
+            model: "mock".to_string(),
+            system_prompt: None,
+            max_turns: 3,
+            max_budget_usd: None,
+            permission_mode: PermissionMode::AcceptAll,
+            max_context_tokens: None,
+            compaction_threshold: None,
+            quiet: false,
+            max_parallel_tools: 1,
+            use_planner: false,
+            use_index: false,
+            no_rules: false,
+            rules_file: None,
+        }
+    }
+
+    fn empty_registry() -> ToolRegistry {
+        clido_tools::default_registry_with_blocked(std::env::temp_dir(), vec![])
+    }
+
+    // ── session_lines_to_messages ──────────────────────────────────────────
+
+    #[test]
+    fn session_lines_empty_returns_empty() {
+        let msgs = session_lines_to_messages(&[]);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn session_lines_user_message_converted() {
+        let lines = vec![SessionLine::UserMessage {
+            role: "user".to_string(),
+            content: vec![serde_json::json!({"type": "text", "text": "hello"})],
+        }];
+        let msgs = session_lines_to_messages(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    #[test]
+    fn session_lines_assistant_message_converted() {
+        let lines = vec![SessionLine::AssistantMessage {
+            content: vec![serde_json::json!({"type": "text", "text": "hi back"})],
+        }];
+        let msgs = session_lines_to_messages(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Assistant);
+    }
+
+    #[test]
+    fn session_lines_tool_results_grouped_into_user_message() {
+        let lines = vec![
+            SessionLine::AssistantMessage {
+                content: vec![serde_json::json!({"type": "text", "text": "thinking"})],
+            },
+            SessionLine::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "result text".to_string(),
+                is_error: false,
+                duration_ms: None,
+                path: None,
+                content_hash: None,
+                mtime_nanos: None,
+            },
+        ];
+        let msgs = session_lines_to_messages(&lines);
+        // Should have: assistant message + user message (tool result)
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[1].role, Role::User);
+        assert!(matches!(
+            msgs[1].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
+    }
+
+    #[test]
+    fn session_lines_tool_call_is_skipped() {
+        let lines = vec![SessionLine::ToolCall {
+            tool_use_id: "call-1".to_string(),
+            tool_name: "Read".to_string(),
+            input: serde_json::json!({}),
+        }];
+        let msgs = session_lines_to_messages(&lines);
+        assert!(msgs.is_empty());
+    }
+
+    // ── AgentLoop builder methods ──────────────────────────────────────────
+
+    #[test]
+    fn agent_loop_new_defaults() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        assert_eq!(agent.current_model(), "mock");
+        assert_eq!(agent.turn_count(), 0);
+        assert_eq!(agent.cumulative_cost_usd, 0.0);
+        assert_eq!(agent.cumulative_input_tokens, 0);
+        assert_eq!(agent.cumulative_output_tokens, 0);
+        assert!(!agent.planner_mode);
+    }
+
+    #[test]
+    fn agent_loop_with_planner_sets_flag() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let agent =
+            AgentLoop::new(provider, empty_registry(), mock_config(), None).with_planner(true);
+        assert!(agent.planner_mode);
+    }
+
+    #[test]
+    fn agent_loop_with_planner_false_clears_flag() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let agent =
+            AgentLoop::new(provider, empty_registry(), mock_config(), None).with_planner(false);
+        assert!(!agent.planner_mode);
+    }
+
+    #[test]
+    fn agent_loop_new_with_history_sets_history() {
+        let history = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }],
+        }];
+        let provider = Arc::new(MockProvider::new("ok"));
+        let agent =
+            AgentLoop::new_with_history(provider, empty_registry(), mock_config(), history, None);
+        assert_eq!(agent.history.len(), 1);
+    }
+
+    #[test]
+    fn agent_loop_set_model() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        assert_eq!(agent.current_model(), "mock");
+        agent.set_model("claude-sonnet-4-5".to_string());
+        assert_eq!(agent.current_model(), "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn agent_loop_replace_history_resets_counters() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        agent.cumulative_cost_usd = 5.0;
+        agent.cumulative_input_tokens = 100;
+        agent.cumulative_output_tokens = 50;
+        agent.replace_history(vec![]);
+        assert_eq!(agent.cumulative_cost_usd, 0.0);
+        assert_eq!(agent.cumulative_input_tokens, 0);
+        assert_eq!(agent.cumulative_output_tokens, 0);
+        assert_eq!(agent.history.len(), 0);
+    }
+
+    // ── compact_history_now ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compact_history_now_returns_before_after_counts() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let history = (0..5)
+            .map(|i| Message {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: vec![ContentBlock::Text {
+                    text: "x".repeat(100),
+                }],
+            })
+            .collect();
+        let mut agent =
+            AgentLoop::new_with_history(provider, empty_registry(), mock_config(), history, None);
+        let (before, _after) = agent.compact_history_now().await.unwrap();
+        assert_eq!(before, 5);
+        // After can differ from before (compaction adds a placeholder or drops messages)
+        // Just check the call succeeded and we got some counts back.
+        assert!(agent.history.len() <= before + 1); // +1 for possible compacted placeholder
+    }
+
+    // ── run() with mock provider ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn agent_run_returns_response_text() {
+        let provider = Arc::new(MockProvider::new("test response"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let result = agent.run("say hello", None, None, None).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+        let text = result.unwrap();
+        assert_eq!(text, "test response");
+    }
+
+    #[tokio::test]
+    async fn agent_run_increments_token_counters() {
+        let provider = Arc::new(MockProvider::new("hello"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        agent.run("prompt", None, None, None).await.unwrap();
+        assert!(agent.cumulative_input_tokens > 0);
+        assert!(agent.cumulative_output_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn complete_simple_returns_text() {
+        let provider = Arc::new(MockProvider::new("simple response"));
+        let agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let result = agent.complete_simple("what is 2+2?").await.unwrap();
+        assert_eq!(result, "simple response");
+    }
+
+    // ── run_next_turn ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_next_turn_appends_to_history() {
+        let provider = Arc::new(MockProvider::new("second response"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        // First run
+        agent.run("first", None, None, None).await.unwrap();
+        let len_after_first = agent.history.len();
+        // Second turn
+        let result = agent
+            .run_next_turn("second", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result, "second response");
+        // History grew
+        assert!(agent.history.len() > len_after_first);
+    }
+
+    // ── run_with_extra_blocks ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_extra_blocks_includes_extra_content() {
+        let provider = Arc::new(MockProvider::new("handled image"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let extra = vec![ContentBlock::Text {
+            text: "[image placeholder]".to_string(),
+        }];
+        let result = agent
+            .run_with_extra_blocks("describe image", extra, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result, "handled image");
+        // User message in history should have 2 content blocks
+        let first_user = agent.history.iter().find(|m| m.role == Role::User).unwrap();
+        assert_eq!(first_user.content.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_next_turn_with_extra_blocks_works() {
+        let provider = Arc::new(MockProvider::new("extra blocks response"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        // Initial run
+        agent.run("start", None, None, None).await.unwrap();
+        let extra = vec![ContentBlock::Text {
+            text: "[image]".to_string(),
+        }];
+        let result = agent
+            .run_next_turn_with_extra_blocks("follow up", extra, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result, "extra blocks response");
+    }
+
+    // ── cancel signal ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_returns_interrupted_when_cancel_already_set() {
+        let provider = Arc::new(MockProvider::new("response"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let cancel = Arc::new(AtomicBool::new(true)); // pre-cancelled
+        let result = agent.run("hi", None, None, Some(cancel)).await;
+        assert!(matches!(result, Err(ClidoError::Interrupted)));
+    }
+
+    // ── max_turns ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_returns_max_turns_exceeded_when_config_is_zero() {
+        let provider = Arc::new(MockProvider::new("response"));
+        let mut cfg = mock_config();
+        cfg.max_turns = 0;
+        let mut agent = AgentLoop::new(provider, empty_registry(), cfg, None);
+        let result = agent.run("hi", None, None, None).await;
+        assert!(matches!(result, Err(ClidoError::MaxTurnsExceeded)));
+    }
+
+    // ── budget exceeded ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_returns_budget_exceeded_when_limit_is_zero() {
+        let provider = Arc::new(MockProvider::new("response"));
+        let mut cfg = mock_config();
+        cfg.max_budget_usd = Some(0.0); // any non-zero cost exceeds this
+        let mut agent = AgentLoop::new(provider, empty_registry(), cfg, None);
+        let result = agent.run("hi", None, None, None).await;
+        assert!(matches!(result, Err(ClidoError::BudgetExceeded)));
+    }
+
+    // ── run_continue ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_continue_returns_response_when_history_already_set() {
+        let provider = Arc::new(MockProvider::new("continued"));
+        let history = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior message".to_string(),
+            }],
+        }];
+        let mut agent =
+            AgentLoop::new_with_history(provider, empty_registry(), mock_config(), history, None);
+        let result = agent.run_continue(None, None, None).await.unwrap();
+        assert_eq!(result, "continued");
+    }
+
+    #[tokio::test]
+    async fn run_continue_with_cancel() {
+        let provider = Arc::new(MockProvider::new("response"));
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let cancel = Arc::new(AtomicBool::new(true));
+        let result = agent.run_continue(None, None, Some(cancel)).await;
+        assert!(matches!(result, Err(ClidoError::Interrupted)));
+    }
+
+    // ── with_emitter / with_hooks / with_memory ──────────────────────────
+
+    #[test]
+    fn agent_loop_builder_methods_compile_and_chain() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let agent =
+            AgentLoop::new(provider, empty_registry(), mock_config(), None).with_planner(true);
+        assert!(agent.planner_mode);
+    }
+
+    // ── session_lines ToolResult flushed at end ────────────────────────────
+
+    #[test]
+    fn session_lines_trailing_tool_results_flushed() {
+        // Two tool results at end of lines (no following user/assistant message)
+        let lines = vec![
+            SessionLine::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "r1".to_string(),
+                is_error: false,
+                duration_ms: None,
+                path: None,
+                content_hash: None,
+                mtime_nanos: None,
+            },
+            SessionLine::ToolResult {
+                tool_use_id: "t2".to_string(),
+                content: "r2".to_string(),
+                is_error: true,
+                duration_ms: None,
+                path: None,
+                content_hash: None,
+                mtime_nanos: None,
+            },
+        ];
+        let msgs = session_lines_to_messages(&lines);
+        // Both tool results should be in a single user message
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[0].content.len(), 2);
+    }
+
+    // ── compute_diff_for_tool (pure helper) ───────────────────────────────
+
+    #[tokio::test]
+    async fn compute_diff_returns_none_for_unknown_tool() {
+        let (diff, content, path) =
+            compute_diff_for_tool("UnknownTool", &serde_json::json!({})).await;
+        assert!(diff.is_none());
+        assert!(content.is_none());
+        assert!(path.is_none());
+    }
+
+    #[tokio::test]
+    async fn compute_diff_returns_none_for_write_with_missing_path() {
+        let input = serde_json::json!({ "content": "hello" }); // no file_path
+        let (diff, content, path) = compute_diff_for_tool("Write", &input).await;
+        assert!(diff.is_none());
+        assert!(content.is_none());
+        assert!(path.is_none());
+    }
+
+    #[tokio::test]
+    async fn compute_diff_returns_none_for_write_with_missing_content() {
+        let input = serde_json::json!({ "file_path": "/tmp/clido_test_missing.txt" }); // no content
+        let (diff, content, path) = compute_diff_for_tool("Write", &input).await;
+        assert!(diff.is_none());
+        assert!(content.is_none());
+        assert!(path.is_none());
+    }
+
+    #[tokio::test]
+    async fn compute_diff_returns_diff_for_write_with_new_file() {
+        use std::fs;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(tmp.path(), "old content\n").unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+        let input = serde_json::json!({
+            "file_path": path_str,
+            "content": "new content\n"
+        });
+        let (diff, content, file_path) = compute_diff_for_tool("Write", &input).await;
+        assert!(diff.is_some()); // should have a diff
+        assert!(diff.unwrap().contains('+'));
+        assert_eq!(content.unwrap(), "new content\n");
+        assert_eq!(file_path.unwrap().to_str().unwrap(), path_str);
+    }
+
+    #[tokio::test]
+    async fn compute_diff_returns_none_diff_when_content_unchanged() {
+        use std::fs;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(tmp.path(), "same\n").unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+        let input = serde_json::json!({
+            "file_path": path_str,
+            "content": "same\n"
+        });
+        let (diff, _, _) = compute_diff_for_tool("Write", &input).await;
+        assert!(diff.is_none()); // no diff when content is identical
+    }
+
+    #[tokio::test]
+    async fn compute_diff_uses_edit_tool_keys() {
+        use std::fs;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(tmp.path(), "old\n").unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+        let input = serde_json::json!({
+            "file_path": path_str,
+            "new_string": "new\n"
+        });
+        let (diff, content, _) = compute_diff_for_tool("Edit", &input).await;
+        assert!(diff.is_some());
+        assert_eq!(content.unwrap(), "new\n");
+    }
+
+    // ── summarize_messages (pure helper) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn summarize_messages_calls_provider_and_returns_text() {
+        let provider = MockProvider::new("Summary of conversation.");
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "hi there".to_string(),
+                }],
+            },
+        ];
+        let result = summarize_messages(&messages, &provider, &mock_config())
+            .await
+            .unwrap();
+        assert_eq!(result, "Summary of conversation.");
+    }
+
+    #[tokio::test]
+    async fn summarize_messages_error_on_empty_response() {
+        let provider = MockProvider::new(""); // empty response
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+        let result = summarize_messages(&messages, &provider, &mock_config()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn summarize_messages_handles_tool_use_and_result_blocks() {
+        let provider = MockProvider::new("Summarized tool work.");
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"path": "/foo"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: "file contents".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let result = summarize_messages(&messages, &provider, &mock_config())
+            .await
+            .unwrap();
+        assert_eq!(result, "Summarized tool work.");
+    }
+
+    // ── compact_with_summary ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compact_with_summary_under_threshold_returns_as_is() {
+        let provider = MockProvider::new("irrelevant");
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "short".to_string(),
+            }],
+        }];
+        // Use a very high threshold so no compaction happens
+        let result = compact_with_summary(&messages, 0, 200_000, 0.9, &provider, &mock_config())
+            .await
+            .unwrap();
+        assert_eq!(result.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn compact_with_summary_compacts_large_history() {
+        let provider = MockProvider::new("Compacted summary text.");
+        // Create many messages to exceed the threshold
+        let messages: Vec<Message> = (0..50)
+            .map(|i| Message {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: vec![ContentBlock::Text {
+                    text: "x".repeat(500),
+                }],
+            })
+            .collect();
+        // Small context to force compaction
+        let result = compact_with_summary(
+            &messages,
+            0,
+            2000, // very small max context
+            0.1,  // very low threshold to trigger compaction
+            &provider,
+            &mock_config(),
+        )
+        .await;
+        // Either succeeds (compact happened) or fails with ContextLimit
+        match result {
+            Ok(compacted) => {
+                assert!(compacted.len() < messages.len());
+            }
+            Err(ClidoError::ContextLimit { .. }) => {
+                // Acceptable: summary + tail doesn't fit
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    // ── run() with max_tokens stop reason ─────────────────────────────────
+
+    struct MaxTokensProvider;
+
+    #[async_trait]
+    impl ModelProvider for MaxTokensProvider {
+        async fn complete(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<ModelResponse> {
+            Ok(ModelResponse {
+                id: "id".to_string(),
+                model: "mock".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "truncated".to_string(),
+                }],
+                stop_reason: StopReason::MaxTokens,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                },
+            })
+        }
+        async fn complete_stream(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<
+            Pin<Box<dyn Stream<Item = clido_core::Result<clido_providers::StreamEvent>> + Send>>,
+        > {
+            unimplemented!()
+        }
+        async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn run_returns_text_on_max_tokens_stop() {
+        let provider = Arc::new(MaxTokensProvider);
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let result = agent.run("hello", None, None, None).await.unwrap();
+        assert_eq!(result, "truncated");
+    }
+
+    // ── run() with tool_use that gets accepted (AcceptAll mode) ───────────
+
+    struct ToolUseProvider {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl ToolUseProvider {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for ToolUseProvider {
+        async fn complete(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<ModelResponse> {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                // First call: return a tool use
+                Ok(ModelResponse {
+                    id: "id1".to_string(),
+                    model: "mock".to_string(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call1".to_string(),
+                        name: "Bash".to_string(),
+                        input: serde_json::json!({"command": "echo hello"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                })
+            } else {
+                // Second call: end turn
+                Ok(ModelResponse {
+                    id: "id2".to_string(),
+                    model: "mock".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "done".to_string(),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                })
+            }
+        }
+        async fn complete_stream(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<
+            Pin<Box<dyn Stream<Item = clido_core::Result<clido_providers::StreamEvent>> + Send>>,
+        > {
+            unimplemented!()
+        }
+        async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_tool_use_executes_tool_and_continues() {
+        let provider = Arc::new(ToolUseProvider::new());
+        let mut cfg = mock_config();
+        cfg.max_turns = 5;
+        cfg.permission_mode = PermissionMode::AcceptAll;
+        let mut agent = AgentLoop::new(provider, empty_registry(), cfg, None);
+        let result = agent.run("do something", None, None, None).await.unwrap();
+        assert_eq!(result, "done");
+        // Turn count should be 2
+        assert_eq!(agent.turn_count(), 2);
+    }
+
+    // ── PermissionMode::PlanOnly blocks write tools ────────────────────────
+
+    #[tokio::test]
+    async fn plan_only_mode_blocks_write_and_returns_error_in_tool_result() {
+        // We need a provider that first calls a write tool, then ends.
+        struct WriteToolProvider {
+            call_count: std::sync::atomic::AtomicU32,
+        }
+        impl WriteToolProvider {
+            fn new() -> Self {
+                Self {
+                    call_count: std::sync::atomic::AtomicU32::new(0),
+                }
+            }
+        }
+        #[async_trait]
+        impl ModelProvider for WriteToolProvider {
+            async fn complete(
+                &self,
+                _messages: &[clido_core::Message],
+                _tools: &[ToolSchema],
+                _config: &AgentConfig,
+            ) -> clido_core::Result<ModelResponse> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Ok(ModelResponse {
+                        id: "id".to_string(),
+                        model: "mock".to_string(),
+                        content: vec![ContentBlock::ToolUse {
+                            id: "c1".to_string(),
+                            name: "Write".to_string(),
+                            input: serde_json::json!({"file_path": "/tmp/test.txt", "content": "hi"}),
+                        }],
+                        stop_reason: StopReason::ToolUse,
+                        usage: Usage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
+                        },
+                    })
+                } else {
+                    Ok(ModelResponse {
+                        id: "id2".to_string(),
+                        model: "mock".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: "blocked".to_string(),
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
+                        },
+                    })
+                }
+            }
+            async fn complete_stream(
+                &self,
+                _: &[clido_core::Message],
+                _: &[ToolSchema],
+                _: &AgentConfig,
+            ) -> clido_core::Result<
+                Pin<
+                    Box<dyn Stream<Item = clido_core::Result<clido_providers::StreamEvent>> + Send>,
+                >,
+            > {
+                unimplemented!()
+            }
+            async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+                vec![]
+            }
+        }
+
+        let provider = Arc::new(WriteToolProvider::new());
+        let mut cfg = mock_config();
+        cfg.max_turns = 5;
+        cfg.permission_mode = PermissionMode::PlanOnly;
+        let mut agent = AgentLoop::new(provider, empty_registry(), cfg, None);
+        let result = agent.run("write a file", None, None, None).await.unwrap();
+        // Should complete successfully (blocked tool returned error message to model)
+        assert_eq!(result, "blocked");
+        // History should include the tool result (error)
+        let has_tool_result = agent.history.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
+        });
+        assert!(has_tool_result);
+    }
+
+    // ── run_hook ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_hook_executes_without_panic() {
+        // Just test that run_hook doesn't panic (fire-and-forget)
+        run_hook("true", &[("MY_VAR", "hello")]);
+        run_hook("echo $CLIDO_TOOL_NAME", &[("CLIDO_TOOL_NAME", "Read")]);
+    }
+
+    // ── with_hooks integration ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_hooks_config_executes_successfully() {
+        use clido_core::HooksConfig;
+        let provider = Arc::new(MockProvider::new("hooked response"));
+        let mut cfg = mock_config();
+        let hooks = HooksConfig {
+            pre_tool_use: Some("true".to_string()),
+            post_tool_use: Some("true".to_string()),
+        };
+        let mut agent = AgentLoop::new(provider, empty_registry(), cfg, None).with_hooks(hooks);
+        let result = agent.run("hello", None, None, None).await.unwrap();
+        assert_eq!(result, "hooked response");
+    }
+
+    // ── session_lines_to_messages edge cases ──────────────────────────────
+
+    #[test]
+    fn session_lines_unknown_variant_is_skipped() {
+        // SessionLine::Result (a synthetic line type) should just be skipped
+        let lines = vec![
+            SessionLine::UserMessage {
+                role: "user".to_string(),
+                content: vec![serde_json::json!({"type": "text", "text": "hi"})],
+            },
+            // Add a ToolCall (which is also skipped)
+            SessionLine::ToolCall {
+                tool_use_id: "x".to_string(),
+                tool_name: "Read".to_string(),
+                input: serde_json::json!({}),
+            },
+        ];
+        let msgs = session_lines_to_messages(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    #[test]
+    fn session_lines_user_then_tool_result_flushes_correctly() {
+        let lines = vec![
+            SessionLine::UserMessage {
+                role: "user".to_string(),
+                content: vec![serde_json::json!({"type": "text", "text": "hello"})],
+            },
+            SessionLine::AssistantMessage {
+                content: vec![
+                    serde_json::json!({"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+                ],
+            },
+            SessionLine::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "file data".to_string(),
+                is_error: false,
+                duration_ms: Some(100),
+                path: None,
+                content_hash: None,
+                mtime_nanos: None,
+            },
+            SessionLine::UserMessage {
+                role: "user".to_string(),
+                content: vec![serde_json::json!({"type": "text", "text": "next"})],
+            },
+        ];
+        let msgs = session_lines_to_messages(&lines);
+        // user, assistant, user(tool_result), user
+        assert_eq!(msgs.len(), 4);
+    }
+
+    // ── inject_memories returns None when no memory ───────────────────────
+
+    #[test]
+    fn inject_memories_returns_none_when_no_memory_store() {
+        let provider = Arc::new(MockProvider::new("ok"));
+        let agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        let result = agent.inject_memories("some prompt");
+        assert!(result.is_none());
+    }
+
+    // ── with_emitter (no panic) ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_emitter_does_not_panic() {
+        use std::sync::Mutex as StdMutex;
+
+        struct RecordingEmitter {
+            starts: StdMutex<Vec<String>>,
+            dones: StdMutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl EventEmitter for RecordingEmitter {
+            async fn on_tool_start(&self, name: &str, _input: &serde_json::Value) {
+                self.starts.lock().unwrap().push(name.to_string());
+            }
+            async fn on_tool_done(&self, name: &str, _is_error: bool, _diff: Option<String>) {
+                self.dones.lock().unwrap().push(name.to_string());
+            }
+        }
+
+        let emitter = Arc::new(RecordingEmitter {
+            starts: StdMutex::new(vec![]),
+            dones: StdMutex::new(vec![]),
+        });
+        let provider = Arc::new(MockProvider::new("emitted response"));
+        let mut agent =
+            AgentLoop::new(provider, empty_registry(), mock_config(), None).with_emitter(emitter);
+        let result = agent.run("hello", None, None, None).await.unwrap();
+        assert_eq!(result, "emitted response");
+    }
+}

@@ -209,6 +209,9 @@ async fn sub_agent_isolation_from_cli_crate() {
         > {
             unimplemented!()
         }
+        async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+            vec![]
+        }
     }
 
     let config = AgentConfig {

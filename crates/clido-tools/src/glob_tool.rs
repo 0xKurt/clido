@@ -142,6 +142,33 @@ mod tests {
         assert!(out.content.is_empty());
     }
 
+    /// Lines 47-48: is_read_only returns true.
+    #[test]
+    fn glob_tool_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        assert!(tool.is_read_only());
+    }
+
+    /// Line 53: path_str is provided explicitly (non-default).
+    #[tokio::test]
+    async fn glob_with_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("main.rs"), "fn main() {}").unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        let canonical_sub = std::fs::canonicalize(&sub).unwrap();
+        let out = tool
+            .execute(serde_json::json!({
+                "pattern": "*.rs",
+                "path": canonical_sub.to_str().unwrap()
+            }))
+            .await;
+        assert!(!out.is_error, "error: {}", out.content);
+        assert!(out.content.contains("main.rs"), "content: {}", out.content);
+    }
+
     #[tokio::test]
     async fn glob_nested_pattern() {
         let dir = tempfile::tempdir().unwrap();

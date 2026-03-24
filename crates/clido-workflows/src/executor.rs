@@ -563,4 +563,306 @@ mod tests {
         let tools = runner.last_tools.lock().unwrap();
         assert_eq!(*tools, Some(vec![]));
     }
+
+    // ── on_error: fail propagates error ───────────────────────────────────
+
+    #[tokio::test]
+    async fn on_error_fail_returns_workflow_error() {
+        let def = WorkflowDef {
+            name: "fail".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "bad".into(),
+                name: None,
+                profile: None,
+                tools: None,
+                prompt: "Bad".into(),
+                outputs: vec![],
+                on_error: OnErrorPolicy::Fail,
+                retry: None,
+                parallel: false,
+                system_prompt: None,
+                max_turns: None,
+            }],
+            output: None,
+            prerequisites: None,
+        };
+        let runner = MockRunner::new().fail_step("bad");
+        let mut ctx = WorkflowContext::new(HashMap::new());
+        let result = run(&def, &mut ctx, &runner, None).await;
+        assert!(result.is_err());
+        if let Err(ClidoError::Workflow(msg)) = result {
+            assert!(msg.contains("mock failure") || !msg.is_empty());
+        } else {
+            panic!("expected Workflow error");
+        }
+    }
+
+    // ── retry exhausted marks success=false ───────────────────────────────
+
+    #[tokio::test]
+    async fn on_error_retry_exhausted_marks_not_success() {
+        let def = WorkflowDef {
+            name: "retry_fail".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "s".into(),
+                name: None,
+                profile: None,
+                tools: None,
+                prompt: "Always fail".into(),
+                outputs: vec![],
+                on_error: OnErrorPolicy::Retry,
+                retry: Some(crate::types::RetryConfig {
+                    max_attempts: 2,
+                    backoff: crate::types::BackoffKind::None,
+                }),
+                parallel: false,
+                system_prompt: None,
+                max_turns: None,
+            }],
+            output: None,
+            prerequisites: None,
+        };
+        let runner = MockRunner::new().fail_step("s");
+        let mut ctx = WorkflowContext::new(HashMap::new());
+        let summary = run(&def, &mut ctx, &runner, None).await.unwrap();
+        assert!(!summary.success);
+    }
+
+    // ── audit_path writes JSON ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_audit_path_writes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let audit_path = tmp.path().join("audit").join("run.json");
+        let (def, mut ctx) = linear_three_step_def();
+        let runner = MockRunner::new();
+        run(&def, &mut ctx, &runner, Some(&audit_path))
+            .await
+            .unwrap();
+        assert!(audit_path.exists(), "audit file should be written");
+        let content = std::fs::read_to_string(&audit_path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(json.get("total_cost_usd").is_some());
+    }
+
+    // ── WorkflowSummary serialization ─────────────────────────────────────
+
+    #[test]
+    fn workflow_summary_serialization() {
+        let summary = WorkflowSummary {
+            total_cost_usd: 0.001,
+            total_duration_ms: 100,
+            step_count: 3,
+            success: true,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: WorkflowSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.step_count, 3);
+        assert!(parsed.success);
+        assert!((parsed.total_cost_usd - 0.001).abs() < 1e-9);
+    }
+
+    // ── parallel batch with failure + Fail policy ─────────────────────────
+
+    #[tokio::test]
+    async fn parallel_batch_with_fail_returns_error() {
+        let def = WorkflowDef {
+            name: "par_fail".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![
+                StepDef {
+                    id: "p1".into(),
+                    name: None,
+                    profile: None,
+                    tools: None,
+                    prompt: "P1".into(),
+                    outputs: vec![],
+                    on_error: OnErrorPolicy::Fail,
+                    retry: None,
+                    parallel: true,
+                    system_prompt: None,
+                    max_turns: None,
+                },
+                StepDef {
+                    id: "p2".into(),
+                    name: None,
+                    profile: None,
+                    tools: None,
+                    prompt: "P2".into(),
+                    outputs: vec![],
+                    on_error: OnErrorPolicy::Fail,
+                    retry: None,
+                    parallel: true,
+                    system_prompt: None,
+                    max_turns: None,
+                },
+            ],
+            output: None,
+            prerequisites: None,
+        };
+        let runner = MockRunner::new().fail_step("p1");
+        let mut ctx = WorkflowContext::new(HashMap::new());
+        let result = run(&def, &mut ctx, &runner, None).await;
+        assert!(result.is_err());
+    }
+
+    // ── step with named outputs (non-"output") ────────────────────────────
+
+    #[tokio::test]
+    async fn step_with_named_output_sets_context() {
+        use crate::types::OutputDef;
+        let def = WorkflowDef {
+            name: "named_output".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "s1".into(),
+                name: None,
+                profile: None,
+                tools: None,
+                prompt: "Generate summary".into(),
+                outputs: vec![
+                    OutputDef {
+                        name: "output".into(),
+                        r#type: "text".into(),
+                        save_to: None,
+                    },
+                    OutputDef {
+                        name: "summary".into(),
+                        r#type: "text".into(),
+                        save_to: None,
+                    },
+                ],
+                on_error: OnErrorPolicy::Fail,
+                retry: None,
+                parallel: false,
+                system_prompt: None,
+                max_turns: None,
+            }],
+            output: None,
+            prerequisites: None,
+        };
+        let runner = MockRunner::new();
+        let mut ctx = WorkflowContext::new(HashMap::new());
+        let summary = run(&def, &mut ctx, &runner, None).await.unwrap();
+        assert!(summary.success);
+        // "output" is the main output; "summary" is a named secondary output with same text
+        assert_eq!(ctx.get_step_output("s1", "output"), Some("output_s1"));
+        assert_eq!(ctx.get_step_output("s1", "summary"), Some("output_s1"));
+    }
+
+    // ── run_one_step_owned via parallel execution ──────────────────────────
+
+    #[tokio::test]
+    async fn parallel_steps_use_run_one_step_owned() {
+        // Two parallel steps from the start → forces run_one_step_owned
+        let def = WorkflowDef {
+            name: "par_owned".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![
+                StepDef {
+                    id: "p1".into(),
+                    name: None,
+                    profile: None,
+                    tools: None,
+                    prompt: "P1".into(),
+                    outputs: vec![],
+                    on_error: OnErrorPolicy::Fail,
+                    retry: None,
+                    parallel: true,
+                    system_prompt: None,
+                    max_turns: None,
+                },
+                StepDef {
+                    id: "p2".into(),
+                    name: None,
+                    profile: None,
+                    tools: None,
+                    prompt: "P2".into(),
+                    outputs: vec![],
+                    on_error: OnErrorPolicy::Fail,
+                    retry: None,
+                    parallel: true,
+                    system_prompt: None,
+                    max_turns: None,
+                },
+            ],
+            output: None,
+            prerequisites: None,
+        };
+        let runner = MockRunner::new();
+        let mut ctx = WorkflowContext::new(HashMap::new());
+        let summary = run(&def, &mut ctx, &runner, None).await.unwrap();
+        assert!(summary.success);
+        assert_eq!(summary.step_count, 2);
+        assert_eq!(ctx.get_step_output("p1", "output"), Some("output_p1"));
+        assert_eq!(ctx.get_step_output("p2", "output"), Some("output_p2"));
+    }
+
+    // ── StepRunRequest fields passed through ──────────────────────────────
+
+    #[tokio::test]
+    async fn step_run_request_includes_profile_and_system_prompt() {
+        struct CapturingRunner {
+            last_req: Mutex<Option<StepRunRequest>>,
+        }
+        #[async_trait::async_trait]
+        impl WorkflowStepRunner for CapturingRunner {
+            async fn run_step(&self, request: StepRunRequest) -> clido_core::Result<StepRunResult> {
+                *self.last_req.lock().unwrap() = Some(request);
+                Ok(StepRunResult {
+                    output_text: "done".into(),
+                    cost_usd: 0.0,
+                    duration_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let def = WorkflowDef {
+            name: "capture".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "s1".into(),
+                name: None,
+                profile: Some("fast".into()),
+                tools: Some(vec!["Read".into()]),
+                prompt: "Test".into(),
+                outputs: vec![],
+                on_error: OnErrorPolicy::Fail,
+                retry: None,
+                parallel: false,
+                system_prompt: Some("You are helpful.".into()),
+                max_turns: Some(5),
+            }],
+            output: None,
+            prerequisites: None,
+        };
+
+        let runner = CapturingRunner {
+            last_req: Mutex::new(None),
+        };
+        let mut ctx = WorkflowContext::new(HashMap::new());
+        run(&def, &mut ctx, &runner, None).await.unwrap();
+
+        let req = runner.last_req.lock().unwrap().take().unwrap();
+        assert_eq!(req.step_id, "s1");
+        assert_eq!(req.profile, Some("fast".into()));
+        assert_eq!(req.system_prompt_override, Some("You are helpful.".into()));
+        assert_eq!(req.max_turns_override, Some(5));
+        assert_eq!(req.tools, Some(vec!["Read".into()]));
+    }
 }

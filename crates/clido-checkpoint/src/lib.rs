@@ -432,6 +432,102 @@ mod tests {
         assert!(diffs.is_empty());
     }
 
+    /// Line 107: load_blob returns BlobNotFound when blob file missing.
+    #[test]
+    fn test_load_blob_not_found_error() {
+        let tmp = tempdir().unwrap();
+        let err = load_blob(tmp.path(), "nonexistentdeadbeefdead");
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("blob not found"), "got: {}", msg);
+    }
+
+    /// Lines 128-129: read_manifest returns NotFound when manifest is missing.
+    #[test]
+    fn test_read_manifest_not_found() {
+        let tmp = tempdir().unwrap();
+        let err = read_manifest(tmp.path());
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("checkpoint not found"), "got: {}", msg);
+    }
+
+    /// Line 198: create silently skips files that don't exist.
+    #[test]
+    fn test_create_skips_nonexistent_files() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("ck_session");
+        let store = CheckpointStore::new(session_dir);
+        let nonexistent = tmp.path().join("ghost.txt");
+        let ck = store.create(None, false, &[nonexistent]).unwrap();
+        assert_eq!(ck.files.len(), 0, "non-existent file should be skipped");
+    }
+
+    /// Line 225: list returns empty vec when session dir doesn't exist.
+    #[test]
+    fn test_list_empty_when_session_dir_missing() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("nonexistent_session");
+        let store = CheckpointStore::new(session_dir);
+        let list = store.list().unwrap();
+        assert!(
+            list.is_empty(),
+            "expected empty list when session dir is missing"
+        );
+    }
+
+    /// Line 243: list skips corrupt directories (no manifest.json).
+    #[test]
+    fn test_list_skips_corrupt_checkpoint_dir() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("ck_session");
+        fs::create_dir_all(&session_dir).unwrap();
+        // Create a corrupt checkpoint dir (no manifest.json)
+        fs::create_dir_all(session_dir.join("ck_corrupt")).unwrap();
+        // Also create a valid checkpoint
+        let store = CheckpointStore::new(session_dir);
+        let file_a = tmp.path().join("valid.txt");
+        write_file(&file_a, "data");
+        let ck = store.create(Some("valid"), false, &[file_a]).unwrap();
+        let list = store.list().unwrap();
+        // Only the valid checkpoint should appear
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, ck.id);
+    }
+
+    /// Line 256: load returns NotFound when checkpoint ID doesn't exist.
+    #[test]
+    fn test_load_not_found() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("ck_session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let store = CheckpointStore::new(session_dir);
+        let err = store.load("ck_doesnotexist");
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("checkpoint not found"), "got: {}", msg);
+    }
+
+    /// Line 300: diff_since with a file that has been deleted (new_content is empty string).
+    #[test]
+    fn test_diff_since_file_deleted() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("ck_session");
+        let store = CheckpointStore::new(session_dir);
+        let file_a = tmp.path().join("to_be_deleted.txt");
+        write_file(&file_a, "original");
+        let ck = store.create(None, false, &[file_a.clone()]).unwrap();
+        // Delete the file
+        fs::remove_file(&file_a).unwrap();
+        let diffs = store.diff_since(&ck.id).unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].old_content, "original");
+        assert_eq!(
+            diffs[0].new_content, "",
+            "deleted file should have empty new_content"
+        );
+    }
+
     #[test]
     fn test_list_checkpoints_sorted_newest_first() {
         let tmp = tempdir().unwrap();

@@ -179,6 +179,24 @@ mod tests {
         );
     }
 
+    /// Line 24: new_with_guard constructor.
+    #[test]
+    fn write_tool_new_with_guard() {
+        use crate::path_guard::PathGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = PathGuard::new(dir.path().to_path_buf());
+        let tool = WriteTool::new_with_guard(guard);
+        assert_eq!(tool.name(), "Write");
+    }
+
+    /// Lines 59-60: is_read_only returns false.
+    #[test]
+    fn write_tool_is_not_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        assert!(!tool.is_read_only());
+    }
+
     #[tokio::test]
     async fn write_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();

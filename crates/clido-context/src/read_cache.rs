@@ -116,6 +116,17 @@ mod tests {
         assert!(cache.get(&last, &format!("hash{}", MAX_ENTRIES)).is_some());
     }
 
+    /// Lines 57-58: re-inserting same key refreshes the value without eviction.
+    #[test]
+    fn insert_existing_key_refreshes_value() {
+        let cache = ReadCache::new();
+        let path = PathBuf::from("/tmp/refresh.rs");
+        cache.insert(path.clone(), "hash1".to_string(), "old content".to_string());
+        // Re-insert with same key → should update in place without changing order len
+        cache.insert(path.clone(), "hash1".to_string(), "new content".to_string());
+        assert_eq!(cache.get(&path, "hash1"), Some("new content".to_string()));
+    }
+
     #[test]
     fn invalidate_removes_all_hashes_for_path() {
         let cache = ReadCache::new();

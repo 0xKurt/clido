@@ -153,3 +153,75 @@ pub trait Tool: Send + Sync {
     }
     async fn execute(&self, input: serde_json::Value) -> ToolOutput;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    /// A tool that uses the default `is_read_only` (returns false).
+    struct DefaultReadOnlyTool;
+
+    #[async_trait]
+    impl Tool for DefaultReadOnlyTool {
+        fn name(&self) -> &str {
+            "DefaultReadOnly"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        // does NOT override is_read_only — uses the default (false)
+        async fn execute(&self, _input: serde_json::Value) -> ToolOutput {
+            ToolOutput::ok("ok".to_string())
+        }
+    }
+
+    /// Lines 151-152: default is_read_only returns false.
+    #[test]
+    fn default_is_read_only_returns_false() {
+        let tool = DefaultReadOnlyTool;
+        assert!(!tool.is_read_only());
+    }
+
+    #[test]
+    fn tool_output_ok() {
+        let out = ToolOutput::ok("hello".into());
+        assert!(!out.is_error);
+        assert_eq!(out.content, "hello");
+    }
+
+    #[test]
+    fn tool_output_err() {
+        let out = ToolOutput::err("bad".into());
+        assert!(out.is_error);
+    }
+
+    #[test]
+    fn tool_output_ok_with_meta() {
+        let out = ToolOutput::ok_with_meta("done".into(), "/a/b".into(), "abc123".into(), 42);
+        assert!(!out.is_error);
+        assert_eq!(out.path, Some("/a/b".to_string()));
+        assert_eq!(out.content_hash, Some("abc123".to_string()));
+        assert_eq!(out.mtime_nanos, Some(42));
+    }
+
+    #[test]
+    fn default_registry_builds_without_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = default_registry(tmp.path().to_path_buf());
+        let schemas = reg.schemas();
+        assert!(!schemas.is_empty());
+    }
+
+    /// Line 70: sandbox branch in default_registry_with_options.
+    #[test]
+    fn default_registry_with_sandbox_builds_without_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = default_registry_with_options(tmp.path().to_path_buf(), vec![], true);
+        let schemas = reg.schemas();
+        assert!(!schemas.is_empty());
+    }
+}

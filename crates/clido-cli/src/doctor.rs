@@ -26,6 +26,7 @@ pub async fn run_doctor() -> Result<(), anyhow::Error> {
     check_session_dir(&cwd, use_color, &mut mandatory);
     check_pricing(use_color, &mut warnings);
     check_rules_files(&cwd, use_color, &mut warnings);
+    check_agents_config(&loaded, use_color, &mut warnings);
 
     if !mandatory.is_empty() {
         for m in &mandatory {
@@ -258,6 +259,291 @@ fn check_rules_files(cwd: &std::path::Path, use_color: bool, warnings: &mut Vec<
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clido_core::ProfileEntry;
+    use std::env;
+
+    fn make_profile(provider: &str, api_key: Option<&str>) -> ProfileEntry {
+        ProfileEntry {
+            provider: provider.to_string(),
+            model: "test-model".to_string(),
+            api_key: api_key.map(|s| s.to_string()),
+            api_key_env: None,
+            base_url: None,
+            worker: None,
+            reviewer: None,
+        }
+    }
+
+    #[test]
+    fn check_api_key_format_valid_anthropic() {
+        let profile = make_profile("anthropic", Some("sk-ant-api03-abcdef"));
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(warnings.is_empty(), "valid anthropic key should not warn");
+    }
+
+    #[test]
+    fn check_api_key_format_invalid_anthropic() {
+        let profile = make_profile("anthropic", Some("sk-OR-invalid-format"));
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(!warnings.is_empty(), "invalid anthropic key should warn");
+        assert!(warnings[0].contains("sk-ant-"));
+    }
+
+    #[test]
+    fn check_api_key_format_valid_openrouter() {
+        let profile = make_profile("openrouter", Some("sk-or-v1-abcdef12345"));
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(warnings.is_empty(), "valid openrouter key should not warn");
+    }
+
+    #[test]
+    fn check_api_key_format_invalid_openrouter() {
+        let profile = make_profile("openrouter", Some("sk-ant-wrong-provider"));
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("sk-or-"));
+    }
+
+    #[test]
+    fn check_api_key_format_local_provider_skips_check() {
+        let profile = make_profile("local", None);
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_api_key_format_no_key_no_warning() {
+        // No stored key → format check does not apply
+        let profile = make_profile("anthropic", None);
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_api_key_format_other_provider_any_key_ok() {
+        let profile = make_profile("alibabacloud", Some("whatever-key-format"));
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", false, &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "unknown provider should not warn on format"
+        );
+    }
+
+    // ── check_api_key ──────────────────────────────────────────────────────
+
+    #[test]
+    fn check_api_key_local_provider_skips() {
+        let profile = make_profile("local", None);
+        let mut mandatory = Vec::new();
+        check_api_key(&profile, "default", false, &mut mandatory);
+        assert!(
+            mandatory.is_empty(),
+            "local provider should not require API key"
+        );
+    }
+
+    #[test]
+    fn check_api_key_present_in_profile_no_error() {
+        let profile = make_profile("anthropic", Some("sk-ant-secret"));
+        let mut mandatory = Vec::new();
+        check_api_key(&profile, "default", false, &mut mandatory);
+        assert!(mandatory.is_empty());
+    }
+
+    #[test]
+    fn check_api_key_missing_key_env_not_set_adds_mandatory() {
+        let mut profile = make_profile("anthropic", None);
+        // Use a unique env var that is definitely not set
+        profile.api_key_env = Some("CLIDO_DOCTOR_TEST_NONEXISTENT_KEY_ABC123".to_string());
+        env::remove_var("CLIDO_DOCTOR_TEST_NONEXISTENT_KEY_ABC123");
+        let mut mandatory = Vec::new();
+        check_api_key(&profile, "default", false, &mut mandatory);
+        assert!(!mandatory.is_empty());
+        assert!(mandatory[0].contains("API key not set"));
+    }
+
+    #[test]
+    fn check_api_key_missing_key_env_set_no_error() {
+        let mut profile = make_profile("anthropic", None);
+        let env_name = "CLIDO_DOCTOR_TEST_PRESENT_KEY_XYZ987";
+        profile.api_key_env = Some(env_name.to_string());
+        env::set_var(env_name, "sk-ant-fake");
+        let mut mandatory = Vec::new();
+        check_api_key(&profile, "default", false, &mut mandatory);
+        env::remove_var(env_name);
+        assert!(mandatory.is_empty());
+    }
+
+    // ── check_session_dir ──────────────────────────────────────────────────
+
+    #[test]
+    fn check_session_dir_writable_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mandatory = Vec::new();
+        // check_session_dir uses session_dir_for_project() — just test it doesn't panic
+        check_session_dir(tmp.path(), false, &mut mandatory);
+        // Either creates dir successfully or raises error depending on env — just no panic
+    }
+
+    // ── check_pricing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn check_pricing_does_not_panic() {
+        let mut warnings = Vec::new();
+        check_pricing(false, &mut warnings);
+        // Either finds a pricing.toml or doesn't — no panic
+    }
+
+    // ── check_rules_files ──────────────────────────────────────────────────
+
+    #[test]
+    fn check_rules_files_empty_dir_no_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut warnings = Vec::new();
+        check_rules_files(tmp.path(), false, &mut warnings);
+        // With no CLIDO.md file, should print info but no warning
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_rules_files_large_file_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a large CLIDO.md
+        let large = "x".repeat(9000);
+        std::fs::write(tmp.path().join("CLIDO.md"), &large).unwrap();
+        let mut warnings = Vec::new();
+        check_rules_files(tmp.path(), false, &mut warnings);
+        assert!(!warnings.is_empty(), "large rules file should warn");
+        assert!(
+            warnings[0].contains("large")
+                || warnings[0].contains("chars")
+                || warnings[0].contains("token")
+        );
+    }
+
+    // ── print_ok and print_info smoke tests ────────────────────────────────
+
+    #[test]
+    fn print_ok_no_color_no_panic() {
+        print_ok(false, "all good");
+    }
+
+    #[test]
+    fn print_info_no_color_no_panic() {
+        print_info(false, "info msg");
+    }
+
+    #[test]
+    fn print_ok_with_color_no_panic() {
+        print_ok(true, "all good with color");
+    }
+
+    #[test]
+    fn print_info_with_color_no_panic() {
+        print_info(true, "info msg with color");
+    }
+
+    // ── check_session_dir: existing writable dir ──────────────────────────
+
+    #[test]
+    fn check_session_dir_existing_and_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mandatory = Vec::new();
+        // Create an actual session dir structure so it doesn't try to create it
+        check_session_dir(tmp.path(), false, &mut mandatory);
+        // Result may vary but should not panic
+    }
+
+    // ── check_pricing: color output path ─────────────────────────────────
+
+    #[test]
+    fn check_pricing_with_color_does_not_panic() {
+        let mut warnings = Vec::new();
+        check_pricing(true, &mut warnings);
+        // No panic with color=true
+    }
+
+    // ── check_api_key_format: valid format prints ok ───────────────────────
+
+    #[test]
+    fn check_api_key_format_valid_prints_ok() {
+        let profile = make_profile("anthropic", Some("sk-ant-api03-valid"));
+        let mut warnings = Vec::new();
+        // call with use_color=true to exercise color print_ok path
+        check_api_key_format(&profile, "default", true, &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_api_key_format_invalid_format_with_color() {
+        let profile = make_profile("anthropic", Some("wrong-format-key"));
+        let mut warnings = Vec::new();
+        check_api_key_format(&profile, "default", true, &mut warnings);
+        assert!(!warnings.is_empty());
+    }
+}
+
+fn check_agents_config(
+    loaded: &clido_core::LoadedConfig,
+    use_color: bool,
+    warnings: &mut Vec<String>,
+) {
+    let slots = [
+        ("main", loaded.agents.main.as_ref()),
+        ("worker", loaded.agents.worker.as_ref()),
+        ("reviewer", loaded.agents.reviewer.as_ref()),
+    ];
+    let mut any_configured = false;
+    for (role, slot) in &slots {
+        let Some(slot) = slot else { continue };
+        any_configured = true;
+        // Verify the API key is reachable for non-local providers.
+        if slot.provider == "local" {
+            print_ok(
+                use_color,
+                &format!("agents.{}: local provider ({})", role, slot.model),
+            );
+            continue;
+        }
+        let key_available = slot.api_key.is_some()
+            || slot
+                .api_key_env
+                .as_deref()
+                .map(|e| env::var(e).is_ok())
+                .unwrap_or(false);
+        if key_available {
+            print_ok(
+                use_color,
+                &format!(
+                    "agents.{}: {} / {} — API key OK",
+                    role, slot.provider, slot.model
+                ),
+            );
+        } else {
+            warnings.push(format!(
+                "agents.{}: no API key configured for provider '{}' (set api_key or api_key_env in [agents.{}]).",
+                role, slot.provider, role
+            ));
+        }
+    }
+    if !any_configured {
+        print_info(
+            use_color,
+            "agents: no sub-agent slots configured (run /init to set up worker/reviewer)",
+        );
     }
 }
 

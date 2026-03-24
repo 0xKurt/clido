@@ -8,7 +8,7 @@ pub mod provider;
 
 pub use anthropic::AnthropicProvider;
 pub use openai::OpenAICompatProvider;
-pub use provider::{ModelProvider, StreamEvent};
+pub use provider::{ModelEntry, ModelProvider, StreamEvent};
 
 use clido_core::{ClidoError, Result};
 
@@ -25,6 +25,8 @@ pub fn build_provider(
         "openrouter" => Ok(Arc::new(OpenAICompatProvider::new_openrouter(
             api_key, model,
         ))),
+        "openai" => Ok(Arc::new(OpenAICompatProvider::new_openai(api_key, model))),
+        "mistral" => Ok(Arc::new(OpenAICompatProvider::new_mistral(api_key, model))),
         "local" => {
             let url = base_url.unwrap_or("http://localhost:11434").to_string();
             Ok(Arc::new(OpenAICompatProvider::new(
@@ -46,10 +48,30 @@ pub fn build_provider(
             )))
         }
         p => Err(ClidoError::Config(format!(
-            "Provider '{}' is not yet supported. Available: anthropic, openrouter, local, alibabacloud.",
+            "Provider '{}' is not supported. Available: anthropic, openrouter, openai, mistral, local, alibabacloud.",
             p
         ))),
     }
+}
+
+/// Fetch models from a provider's API using the given credentials.
+/// Returns an empty vec on any error (bad key, network failure, unsupported provider).
+/// Used during setup to populate the model selection list dynamically.
+/// Entries with `available = false` have no usable chat endpoints (shown greyed-out).
+pub async fn fetch_provider_models(
+    provider_name: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+) -> Vec<ModelEntry> {
+    let Ok(provider) = build_provider(
+        provider_name,
+        api_key.to_string(),
+        "placeholder".to_string(),
+        base_url,
+    ) else {
+        return vec![];
+    };
+    provider.list_models().await
 }
 
 #[cfg(test)]
@@ -75,8 +97,62 @@ mod tests {
             Ok(_) => panic!("expected Err"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("not yet supported"));
+        assert!(err.contains("not supported"));
         assert!(err.contains("anthropic"));
         assert!(err.contains("openrouter"));
+    }
+
+    #[test]
+    fn build_provider_anthropic_returns_ok() {
+        let p = build_provider(
+            "anthropic",
+            "sk-ant-fake".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_local_with_default_url() {
+        let p = build_provider("local", "".to_string(), "llama3.2".to_string(), None).unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_local_with_custom_url() {
+        let p = build_provider(
+            "local",
+            "".to_string(),
+            "mistral".to_string(),
+            Some("http://127.0.0.1:8080"),
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_alibabacloud_default_url() {
+        let p = build_provider(
+            "alibabacloud",
+            "sk-fake".to_string(),
+            "qwen-plus".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_alibabacloud_custom_url() {
+        let p = build_provider(
+            "alibabacloud",
+            "sk-fake".to_string(),
+            "qwen-turbo".to_string(),
+            Some("https://custom.dashscope.com/v1"),
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
     }
 }

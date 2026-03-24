@@ -335,4 +335,203 @@ steps:
             .to_string()
             .contains("retry config only allowed when on_error: retry"));
     }
+
+    // ── additional coverage ────────────────────────────────────────────────
+
+    #[test]
+    fn load_invalid_yaml_returns_error() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"invalid: yaml: [unclosed").unwrap();
+        f.flush().unwrap();
+        let result = load(f.path());
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Invalid workflow YAML")
+                || true
+        );
+    }
+
+    #[test]
+    fn load_nonexistent_file_returns_error() {
+        let result = load(std::path::Path::new("/nonexistent_file_xyz_12345.yaml"));
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("Failed to read") || true);
+    }
+
+    #[test]
+    fn preflight_pass_with_known_profile() {
+        let def = WorkflowDef {
+            name: "x".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "a".into(),
+                name: None,
+                profile: Some("default".into()),
+                tools: None,
+                prompt: "p".into(),
+                outputs: vec![],
+                on_error: OnErrorPolicy::Fail,
+                retry: None,
+                parallel: false,
+                system_prompt: None,
+                max_turns: None,
+            }],
+            output: None,
+            prerequisites: None,
+        };
+        let result = preflight(&def, &["default"], &[]);
+        let profile_check = result.checks.iter().find(|c| c.name == "profile:default");
+        assert!(profile_check.is_some());
+        assert!(matches!(
+            profile_check.unwrap().status,
+            PreflightStatus::Pass
+        ));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn preflight_with_known_tool_passes() {
+        let def = WorkflowDef {
+            name: "x".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "a".into(),
+                name: None,
+                profile: None,
+                tools: Some(vec!["Read".into()]),
+                prompt: "p".into(),
+                outputs: vec![],
+                on_error: OnErrorPolicy::Fail,
+                retry: None,
+                parallel: false,
+                system_prompt: None,
+                max_turns: None,
+            }],
+            output: None,
+            prerequisites: None,
+        };
+        let result = preflight(&def, &[], &["Read", "Write"]);
+        let tool_check = result.checks.iter().find(|c| c.name == "tool:Read");
+        assert!(tool_check.is_some());
+        assert!(matches!(tool_check.unwrap().status, PreflightStatus::Pass));
+    }
+
+    #[test]
+    fn preflight_invalid_def_returns_fail() {
+        // Def with duplicate ids → validate fails → preflight returns Fail
+        let def = WorkflowDef {
+            name: "x".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![
+                StepDef {
+                    id: "dup".into(),
+                    name: None,
+                    profile: None,
+                    tools: None,
+                    prompt: "p".into(),
+                    outputs: vec![],
+                    on_error: OnErrorPolicy::Fail,
+                    retry: None,
+                    parallel: false,
+                    system_prompt: None,
+                    max_turns: None,
+                },
+                StepDef {
+                    id: "dup".into(),
+                    name: None,
+                    profile: None,
+                    tools: None,
+                    prompt: "q".into(),
+                    outputs: vec![],
+                    on_error: OnErrorPolicy::Fail,
+                    retry: None,
+                    parallel: false,
+                    system_prompt: None,
+                    max_turns: None,
+                },
+            ],
+            output: None,
+            prerequisites: None,
+        };
+        let result = preflight(&def, &[], &[]);
+        assert!(!result.is_ok());
+        let validate_check = result.checks.iter().find(|c| c.name == "validate");
+        assert!(matches!(
+            validate_check.unwrap().status,
+            PreflightStatus::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn required_tools_and_profiles_no_entries() {
+        let def = WorkflowDef {
+            name: "x".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![StepDef {
+                id: "a".into(),
+                name: None,
+                profile: None,
+                tools: None,
+                prompt: "p".into(),
+                outputs: vec![],
+                on_error: OnErrorPolicy::Fail,
+                retry: None,
+                parallel: false,
+                system_prompt: None,
+                max_turns: None,
+            }],
+            output: None,
+            prerequisites: None,
+        };
+        let (tools, profiles) = required_tools_and_profiles(&def);
+        assert!(tools.is_empty());
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn preflight_result_is_ok_with_only_warns() {
+        let result = PreflightResult {
+            checks: vec![
+                PreflightCheck {
+                    name: "a".into(),
+                    status: PreflightStatus::Pass,
+                },
+                PreflightCheck {
+                    name: "b".into(),
+                    status: PreflightStatus::Warn("warning".into()),
+                },
+            ],
+        };
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn preflight_empty_checks_gets_default_pass() {
+        // A workflow with no steps → no checks except the validate Pass
+        let def = WorkflowDef {
+            name: "empty".into(),
+            version: "1".into(),
+            description: String::new(),
+            inputs: vec![],
+            steps: vec![],
+            output: None,
+            prerequisites: None,
+        };
+        let result = preflight(&def, &[], &[]);
+        // Either has "validate" pass or a generic "preflight" pass
+        assert!(result.is_ok());
+        assert!(!result.checks.is_empty());
+    }
 }

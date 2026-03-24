@@ -188,4 +188,110 @@ mod tests {
         let findings = scan_for_secrets(content);
         assert!(findings.is_empty(), "Clean content should have no findings");
     }
+
+    // ── openai key detection ──────────────────────────────────────────────
+
+    #[test]
+    fn detects_openai_key() {
+        // OpenAI key: sk- followed by 20+ alphanumerics, not sk-ant or sk-or
+        let content = "key = \"sk-proj-abcdefghijklmnopqrstuvwxyz12345678\"";
+        let findings = scan_for_secrets(content);
+        assert!(
+            findings.iter().any(|f| f.contains("OpenAI")),
+            "Should detect OpenAI key, findings: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn openai_key_short_not_detected() {
+        // sk- followed by less than 20 chars → not detected
+        let content = "key = \"sk-short12345\"";
+        let findings = scan_for_secrets(content);
+        assert!(
+            !findings.iter().any(|f| f.contains("OpenAI")),
+            "Short sk- should not be flagged as OpenAI key"
+        );
+    }
+
+    // ── extract_assignment_value ──────────────────────────────────────────
+
+    #[test]
+    fn extract_assignment_value_returns_none_for_empty_value() {
+        // Line with = but no value after
+        let result = extract_assignment_value("key = ");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_assignment_value_strips_double_quotes() {
+        let result = extract_assignment_value("key = \"myvalue\"");
+        assert_eq!(result, Some("myvalue"));
+    }
+
+    #[test]
+    fn extract_assignment_value_strips_single_quotes() {
+        let result = extract_assignment_value("key = 'myvalue'");
+        assert_eq!(result, Some("myvalue"));
+    }
+
+    #[test]
+    fn extract_assignment_value_no_equal_sign_returns_none() {
+        let result = extract_assignment_value("no equals here");
+        assert!(result.is_none());
+    }
+
+    // ── contains_aws_key ─────────────────────────────────────────────────
+
+    #[test]
+    fn aws_key_short_not_detected() {
+        // AKIA followed by less than 16 uppercase alphanumeric chars
+        let content = "AKIASHORT123";
+        assert!(!contains_aws_key(content));
+    }
+
+    #[test]
+    fn aws_key_exact_16_chars_detected() {
+        // AKIA + exactly 16 uppercase alphanumeric chars
+        let key_16 = "AKIAIOSFODNN7EXAMPLE"; // 4 + 16 chars after AKIA
+        assert!(contains_aws_key(key_16));
+    }
+
+    // ── contains_openai_key ───────────────────────────────────────────────
+
+    #[test]
+    fn openai_key_skip_ant_prefix() {
+        // sk-ant should not be counted as an OpenAI key
+        let content = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890";
+        assert!(!contains_openai_key(content));
+    }
+
+    #[test]
+    fn openai_key_skip_or_prefix() {
+        // sk-or should not be counted as an OpenAI key
+        let content = "sk-or-v1-abcdefghijklmnopqrstuvwxyz1234567890";
+        assert!(!contains_openai_key(content));
+    }
+
+    // ── generic password field ────────────────────────────────────────────
+
+    #[test]
+    fn detects_password_field() {
+        let content = "db_password = \"supersecretdbpassword1234\"";
+        let findings = scan_for_secrets(content);
+        assert!(
+            findings.iter().any(|f| f.contains("credential")),
+            "Should detect password assignment"
+        );
+    }
+
+    #[test]
+    fn detects_secret_field() {
+        let content = "client_secret = \"abcdefghijklmnop1234567890\"";
+        let findings = scan_for_secrets(content);
+        assert!(
+            findings.iter().any(|f| f.contains("credential")),
+            "Should detect secret assignment"
+        );
+    }
 }

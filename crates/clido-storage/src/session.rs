@@ -331,4 +331,334 @@ mod tests {
         assert_eq!(records[0].path, "/tmp/a");
         assert_eq!(records[0].content_hash, "abc");
     }
+
+    #[test]
+    fn stale_file_records_skips_non_path_results() {
+        let lines = vec![
+            SessionLine::ToolResult {
+                tool_use_id: "y".into(),
+                content: "output".into(),
+                is_error: false,
+                duration_ms: None,
+                path: None, // no path
+                content_hash: None,
+                mtime_nanos: None,
+            },
+            SessionLine::UserMessage {
+                role: "user".into(),
+                content: vec![],
+            },
+        ];
+        let records = SessionReader::stale_file_records(&lines);
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn session_writer_append_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "append-test";
+        {
+            let mut w = SessionWriter::create(project_path, id).unwrap();
+            w.write_line(&SessionLine::UserMessage {
+                role: "user".into(),
+                content: vec![serde_json::json!({"type": "text", "text": "hello"})],
+            })
+            .unwrap();
+        }
+        // Now append
+        {
+            let mut w = SessionWriter::append(project_path, id).unwrap();
+            w.write_line(&SessionLine::AssistantMessage {
+                content: vec![serde_json::json!({"type": "text", "text": "world"})],
+            })
+            .unwrap();
+        }
+        let lines = SessionReader::load(project_path, id).unwrap();
+        assert!(lines.len() >= 3); // meta + user + assistant
+        assert!(lines
+            .iter()
+            .any(|l| matches!(l, SessionLine::AssistantMessage { .. })));
+    }
+
+    #[test]
+    fn summarize_lines_with_result_line() {
+        let lines = vec![
+            SessionLine::Meta {
+                session_id: "s1".into(),
+                schema_version: SCHEMA_VERSION,
+                start_time: "2026-01-01T00:00:00Z".into(),
+                project_path: "/tmp/proj".into(),
+            },
+            SessionLine::UserMessage {
+                role: "user".into(),
+                content: vec![serde_json::json!({"type": "text", "text": "What is 2+2?"})],
+            },
+            SessionLine::Result {
+                exit_status: "success".into(),
+                total_cost_usd: 0.05,
+                num_turns: 1,
+                duration_ms: 1234,
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "summarize-test";
+        {
+            let mut w = SessionWriter::create(project_path, id).unwrap();
+            for line in &lines[1..] {
+                w.write_line(line).unwrap();
+            }
+        }
+        let loaded = SessionReader::load(project_path, id).unwrap();
+        let sessions = list_sessions(project_path).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, id);
+        assert!((sessions[0].total_cost_usd - 0.05).abs() < 0.001);
+        assert_eq!(sessions[0].num_turns, 1);
+        assert!(sessions[0].preview.contains("2+2"));
+        let _ = loaded;
+    }
+
+    #[test]
+    fn list_sessions_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = list_sessions(dir.path()).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn list_sessions_nonexistent_dir() {
+        let result = list_sessions(std::path::Path::new("/this/path/does/not/exist/xyz"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_paths_with_nonexistent_file() {
+        let records = vec![StaleFileRecord {
+            path: "/nonexistent/file/xyz.txt".into(),
+            content_hash: "abc".into(),
+            mtime_nanos: 0,
+        }];
+        let stale = stale_paths(&records);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0], "/nonexistent/file/xyz.txt");
+    }
+
+    #[test]
+    fn stale_paths_with_matching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test_stale.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+        // Get current mtime and hash
+        use sha2::{Digest, Sha256};
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        let hash = hex::encode(Sha256::digest(content.as_bytes()));
+        let meta = std::fs::metadata(&file_path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let records = vec![StaleFileRecord {
+            path: file_path.to_string_lossy().to_string(),
+            content_hash: hash,
+            mtime_nanos: mtime,
+        }];
+        let stale = stale_paths(&records);
+        assert!(
+            stale.is_empty(),
+            "file should not be stale when hash and mtime match"
+        );
+    }
+
+    #[test]
+    fn session_line_result_roundtrip() {
+        let line = SessionLine::Result {
+            exit_status: "success".into(),
+            total_cost_usd: 0.01,
+            num_turns: 5,
+            duration_ms: 3000,
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        let back: SessionLine = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionLine::Result {
+                exit_status,
+                num_turns,
+                total_cost_usd,
+                duration_ms,
+            } => {
+                assert_eq!(exit_status, "success");
+                assert_eq!(num_turns, 5);
+                assert!((total_cost_usd - 0.01).abs() < 0.001);
+                assert_eq!(duration_ms, 3000);
+            }
+            _ => panic!("expected Result variant"),
+        }
+    }
+
+    #[test]
+    fn session_line_system_roundtrip() {
+        let line = SessionLine::System {
+            subtype: "compact".into(),
+            message: Some("history compacted".into()),
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        let back: SessionLine = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionLine::System { subtype, message } => {
+                assert_eq!(subtype, "compact");
+                assert_eq!(message.as_deref(), Some("history compacted"));
+            }
+            _ => panic!("expected System variant"),
+        }
+    }
+
+    /// Line 142: empty lines in session file are skipped.
+    #[test]
+    fn session_reader_skips_empty_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "empty-line-test";
+        // Create session manually with blank lines
+        let mut w = SessionWriter::create(project_path, id).unwrap();
+        // Write a user message, then manually add blank lines to file
+        w.write_line(&SessionLine::UserMessage {
+            role: "user".into(),
+            content: vec![serde_json::json!({"type": "text", "text": "hello"})],
+        })
+        .unwrap();
+        drop(w);
+        // Append a blank line directly
+        let path = paths::session_file_path(project_path, id).unwrap();
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "   ").unwrap();
+        drop(file);
+        // Loading should succeed and not include the blank lines
+        let lines = SessionReader::load(project_path, id).unwrap();
+        assert!(lines.len() >= 2); // meta + user message (blank lines skipped)
+    }
+
+    /// Line 148: schema_version too new returns error.
+    #[test]
+    fn session_reader_rejects_future_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "future-schema-test";
+        // Write a session file with schema_version = SCHEMA_VERSION + 1
+        let future_meta = SessionLine::Meta {
+            session_id: id.into(),
+            schema_version: SCHEMA_VERSION + 1,
+            start_time: "2026-01-01T00:00:00Z".into(),
+            project_path: project_path.to_string_lossy().to_string(),
+        };
+        let path = paths::session_file_path(project_path, id).unwrap();
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let mut f = std::fs::File::create(&path).unwrap();
+        use std::io::Write as _;
+        writeln!(f, "{}", serde_json::to_string(&future_meta).unwrap()).unwrap();
+        drop(f);
+        let result = SessionReader::load(project_path, id);
+        assert!(result.is_err(), "expected error for future schema version");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("newer than supported"), "got: {}", msg);
+    }
+
+    /// Lines 199-200: stale_paths pushes path when file is unreadable as string (binary file).
+    #[cfg(unix)]
+    #[test]
+    fn stale_paths_unreadable_file_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write a file with non-UTF8 bytes so read_to_string fails
+        let file_path = dir.path().join("binary.bin");
+        std::fs::write(&file_path, &[0xFF, 0xFE, 0x00, 0x01]).unwrap();
+        let records = vec![StaleFileRecord {
+            path: file_path.to_string_lossy().to_string(),
+            content_hash: "irrelevant".into(),
+            mtime_nanos: 0,
+        }];
+        let stale = stale_paths(&records);
+        assert_eq!(stale.len(), 1);
+    }
+
+    /// Line 205: stale_paths detects hash mismatch even when mtime matches.
+    #[test]
+    fn stale_paths_hash_mismatch_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("changed.txt");
+        std::fs::write(&file_path, "current content").unwrap();
+        let meta = std::fs::metadata(&file_path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let records = vec![StaleFileRecord {
+            path: file_path.to_string_lossy().to_string(),
+            content_hash: "wrong_hash_that_does_not_match".into(),
+            mtime_nanos: mtime, // same mtime but wrong hash
+        }];
+        let stale = stale_paths(&records);
+        assert_eq!(stale.len(), 1, "hash mismatch should report stale");
+    }
+
+    /// Line 237: sessions with no user turns are skipped in list_sessions.
+    #[test]
+    fn list_sessions_skips_zero_turn_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "empty-session";
+        // Create a session with no user messages (just meta)
+        let _w = SessionWriter::create(project_path, id).unwrap();
+        drop(_w);
+        let sessions = list_sessions(project_path).unwrap();
+        assert!(sessions.is_empty(), "zero-turn sessions should be skipped");
+    }
+
+    /// Line 274: preview is truncated with ellipsis for text > 80 chars.
+    #[test]
+    fn summarize_lines_preview_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "long-preview-test";
+        let long_text = "a".repeat(90); // 90 chars
+        let mut w = SessionWriter::create(project_path, id).unwrap();
+        w.write_line(&SessionLine::UserMessage {
+            role: "user".into(),
+            content: vec![serde_json::json!({"type": "text", "text": long_text})],
+        })
+        .unwrap();
+        drop(w);
+        let sessions = list_sessions(project_path).unwrap();
+        assert_eq!(sessions.len(), 1);
+        // Preview should be truncated with ellipsis
+        assert!(
+            sessions[0].preview.contains('…'),
+            "expected ellipsis in truncated preview"
+        );
+        assert!(sessions[0].preview.len() <= 100); // should be shorter than 90 chars
+    }
+
+    #[test]
+    fn session_writer_write_impl() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        let id = "write-impl-test";
+        let mut w = SessionWriter::create(project_path, id).unwrap();
+        // Test the Write trait impl
+        use std::io::Write;
+        w.write_all(b"raw bytes").unwrap();
+        w.flush().unwrap();
+    }
 }

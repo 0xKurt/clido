@@ -345,4 +345,12 @@ mod tests {
         editor.set_status("t1", TaskStatus::Done).unwrap();
         assert_eq!(editor.plan.tasks[0].status, TaskStatus::Done);
     }
+
+    /// Line 96: delete_task returns TaskNotFound for nonexistent task ID.
+    #[test]
+    fn test_delete_task_not_found() {
+        let mut editor = PlanEditor::new(make_test_plan());
+        let result = editor.delete_task("nonexistent_task");
+        assert!(matches!(result, Err(PlanEditError::TaskNotFound(_))));
+    }
 }

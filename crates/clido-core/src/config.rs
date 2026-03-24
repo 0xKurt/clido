@@ -101,6 +101,27 @@ pub struct ProviderConfig {
     pub model: String,
 }
 
+/// Configuration for a single agent slot (main, worker, or reviewer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSlotConfig {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Tiered agents config: main (required for use), worker + reviewer (optional, fall back to main).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    pub main: Option<AgentSlotConfig>,
+    pub worker: Option<AgentSlotConfig>,
+    pub reviewer: Option<AgentSlotConfig>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +141,99 @@ mod tests {
         assert_eq!(c.max_budget_usd, Some(1.0));
         assert_eq!(c.model, "claude-3-5-sonnet");
         assert_eq!(c.permission_mode, PermissionMode::PlanOnly);
+    }
+
+    #[test]
+    fn agent_config_defaults() {
+        let c = AgentConfig::default();
+        assert_eq!(c.max_turns, 200);
+        assert_eq!(c.max_budget_usd, Some(5.0));
+        assert_eq!(c.permission_mode, PermissionMode::Default);
+        assert!(!c.use_planner);
+        assert!(!c.use_index);
+        assert!(!c.quiet);
+        assert_eq!(c.max_parallel_tools, 4);
+        assert!(!c.no_rules);
+        assert!(c.system_prompt.is_none());
+        assert!(c.max_context_tokens.is_none());
+        assert!(c.compaction_threshold.is_none());
+        assert!(c.rules_file.is_none());
+    }
+
+    #[test]
+    fn permission_mode_serialization() {
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::Default).unwrap(),
+            "\"default\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::AcceptAll).unwrap(),
+            "\"accept-all\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::PlanOnly).unwrap(),
+            "\"plan-only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::DiffReview).unwrap(),
+            "\"diff-review\""
+        );
+    }
+
+    #[test]
+    fn permission_mode_default_is_default() {
+        assert_eq!(PermissionMode::default(), PermissionMode::Default);
+    }
+
+    #[test]
+    fn permission_mode_roundtrip() {
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptAll,
+            PermissionMode::PlanOnly,
+            PermissionMode::DiffReview,
+        ] {
+            let s = serde_json::to_string(&mode).unwrap();
+            let back: PermissionMode = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    #[test]
+    fn hooks_config_default_is_empty() {
+        let h = HooksConfig::default();
+        assert!(h.pre_tool_use.is_none());
+        assert!(h.post_tool_use.is_none());
+    }
+
+    #[test]
+    fn agent_config_json_with_all_fields() {
+        let json = r#"{
+            "max_turns": 50,
+            "max_budget_usd": 2.5,
+            "model": "gpt-4o",
+            "system_prompt": "You are an expert.",
+            "permission_mode": "accept-all",
+            "use_planner": true,
+            "use_index": true,
+            "max_context_tokens": 100000,
+            "compaction_threshold": 0.8,
+            "quiet": true,
+            "max_parallel_tools": 8,
+            "no_rules": true,
+            "rules_file": "RULES.md"
+        }"#;
+        let c: AgentConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(c.max_turns, 50);
+        assert_eq!(c.permission_mode, PermissionMode::AcceptAll);
+        assert!(c.use_planner);
+        assert!(c.use_index);
+        assert_eq!(c.max_context_tokens, Some(100000));
+        assert_eq!(c.compaction_threshold, Some(0.8));
+        assert!(c.quiet);
+        assert_eq!(c.max_parallel_tools, 8);
+        assert!(c.no_rules);
+        assert_eq!(c.rules_file.as_deref(), Some("RULES.md"));
+        assert_eq!(c.system_prompt.as_deref(), Some("You are an expert."));
     }
 }

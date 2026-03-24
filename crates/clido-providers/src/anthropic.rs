@@ -358,6 +358,311 @@ fn parse_content_block(v: &serde_json::Value) -> Result<ContentBlock> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clido_core::{ContentBlock, Role};
+
+    // ── backoff helpers ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_backoff_increases_and_caps() {
+        assert_eq!(rate_limit_backoff_secs(1), 15);
+        assert_eq!(rate_limit_backoff_secs(2), 30);
+        assert_eq!(rate_limit_backoff_secs(3), 60);
+        assert_eq!(rate_limit_backoff_secs(4), 120);
+        assert_eq!(rate_limit_backoff_secs(5), 120); // capped
+        assert_eq!(rate_limit_backoff_secs(10), 120); // still capped
+    }
+
+    #[test]
+    fn server_error_backoff_exponential() {
+        assert_eq!(server_error_backoff_secs(1), 1);
+        assert_eq!(server_error_backoff_secs(2), 2);
+        assert_eq!(server_error_backoff_secs(3), 4);
+        assert_eq!(server_error_backoff_secs(4), 8);
+        assert_eq!(server_error_backoff_secs(5), 16);
+        assert_eq!(server_error_backoff_secs(6), 16); // capped at 16
+    }
+
+    #[test]
+    fn network_backoff_exponential() {
+        assert_eq!(network_backoff_secs(1), 1);
+        assert_eq!(network_backoff_secs(2), 2);
+        assert_eq!(network_backoff_secs(3), 4);
+        assert_eq!(network_backoff_secs(4), 4); // capped at 4
+    }
+
+    // ── extract_api_error ──────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_api_error_from_json_body() {
+        let status = reqwest::StatusCode::from_u16(401).unwrap();
+        let body = r#"{"error":{"message":"invalid api key","type":"authentication_error"}}"#;
+        let msg = extract_api_error(status, body);
+        assert!(msg.contains("401"));
+        assert!(msg.contains("invalid api key"));
+    }
+
+    #[test]
+    fn extract_api_error_non_json_body() {
+        let status = reqwest::StatusCode::from_u16(500).unwrap();
+        let body = "Internal Server Error";
+        let msg = extract_api_error(status, body);
+        assert!(msg.contains("500"));
+        assert!(msg.contains("Internal Server Error"));
+    }
+
+    #[test]
+    fn extract_api_error_truncates_long_body() {
+        let status = reqwest::StatusCode::from_u16(400).unwrap();
+        let long_body = "x".repeat(500);
+        let msg = extract_api_error(status, &long_body);
+        // Should not panic and should include status
+        assert!(msg.contains("400"));
+    }
+
+    // ── message_to_anthropic ───────────────────────────────────────────────────
+
+    #[test]
+    fn message_to_anthropic_user_role() {
+        let m = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        };
+        let v = message_to_anthropic(&m).unwrap();
+        assert_eq!(v["role"], "user");
+        assert!(v["content"].is_array());
+    }
+
+    #[test]
+    fn message_to_anthropic_assistant_role() {
+        let m = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }],
+        };
+        let v = message_to_anthropic(&m).unwrap();
+        assert_eq!(v["role"], "assistant");
+    }
+
+    #[test]
+    fn message_to_anthropic_system_role() {
+        let m = Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text {
+                text: "sys".to_string(),
+            }],
+        };
+        let v = message_to_anthropic(&m).unwrap();
+        assert_eq!(v["role"], "system");
+    }
+
+    // ── content_block_to_anthropic ─────────────────────────────────────────────
+
+    #[test]
+    fn content_block_text_to_anthropic() {
+        let b = ContentBlock::Text {
+            text: "hello".to_string(),
+        };
+        let v = content_block_to_anthropic(&b).unwrap();
+        assert_eq!(v["type"], "text");
+        assert_eq!(v["text"], "hello");
+    }
+
+    #[test]
+    fn content_block_tool_use_to_anthropic() {
+        let b = ContentBlock::ToolUse {
+            id: "tu_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"path": "foo.rs"}),
+        };
+        let v = content_block_to_anthropic(&b).unwrap();
+        assert_eq!(v["type"], "tool_use");
+        assert_eq!(v["id"], "tu_1");
+        assert_eq!(v["name"], "Read");
+    }
+
+    #[test]
+    fn content_block_tool_result_to_anthropic() {
+        let b = ContentBlock::ToolResult {
+            tool_use_id: "tu_1".to_string(),
+            content: "file content".to_string(),
+            is_error: false,
+        };
+        let v = content_block_to_anthropic(&b).unwrap();
+        assert_eq!(v["type"], "tool_result");
+        assert_eq!(v["tool_use_id"], "tu_1");
+        assert_eq!(v["is_error"], false);
+    }
+
+    #[test]
+    fn content_block_thinking_to_anthropic() {
+        let b = ContentBlock::Thinking {
+            thinking: "hmm".to_string(),
+        };
+        let v = content_block_to_anthropic(&b).unwrap();
+        assert_eq!(v["type"], "thinking");
+        assert_eq!(v["thinking"], "hmm");
+    }
+
+    #[test]
+    fn content_block_image_to_anthropic() {
+        let b = ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            base64_data: "abc123".to_string(),
+        };
+        let v = content_block_to_anthropic(&b).unwrap();
+        assert_eq!(v["type"], "image");
+        assert_eq!(v["source"]["type"], "base64");
+        assert_eq!(v["source"]["media_type"], "image/png");
+        assert_eq!(v["source"]["data"], "abc123");
+    }
+
+    // ── parse_anthropic_response ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_anthropic_response_end_turn() {
+        let json = serde_json::json!({
+            "id": "msg_1",
+            "model": "claude-3-5-sonnet",
+            "content": [{"type": "text", "text": "Hello!"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let resp = parse_anthropic_response(&json).unwrap();
+        assert_eq!(resp.id, "msg_1");
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn parse_anthropic_response_tool_use() {
+        let json = serde_json::json!({
+            "id": "msg_2",
+            "model": "claude-3-5-sonnet",
+            "content": [{"type": "tool_use", "id": "tu_1", "name": "Read", "input": {"path": "x"}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 20, "output_tokens": 8}
+        });
+        let resp = parse_anthropic_response(&json).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert_eq!(resp.content.len(), 1);
+    }
+
+    #[test]
+    fn parse_anthropic_response_max_tokens() {
+        let json = serde_json::json!({
+            "id": "msg_3",
+            "model": "m",
+            "content": [{"type": "text", "text": "cut off"}],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        });
+        let resp = parse_anthropic_response(&json).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn parse_anthropic_response_stop_sequence() {
+        let json = serde_json::json!({
+            "id": "msg_4",
+            "model": "m",
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "stop_sequence",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        });
+        let resp = parse_anthropic_response(&json).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::StopSequence);
+    }
+
+    #[test]
+    fn parse_anthropic_response_unknown_stop_reason_defaults_to_end_turn() {
+        let json = serde_json::json!({
+            "id": "msg_5",
+            "model": "m",
+            "content": [{"type": "text", "text": "x"}],
+            "stop_reason": "some_new_reason",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        });
+        let resp = parse_anthropic_response(&json).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn parse_anthropic_response_missing_content_is_error() {
+        let json = serde_json::json!({
+            "id": "msg_6",
+            "model": "m",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        });
+        let result = parse_anthropic_response(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_anthropic_response_with_cache_tokens() {
+        let json = serde_json::json!({
+            "id": "msg_7",
+            "model": "m",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 300
+            }
+        });
+        let resp = parse_anthropic_response(&json).unwrap();
+        assert_eq!(resp.usage.cache_creation_input_tokens, Some(200));
+        assert_eq!(resp.usage.cache_read_input_tokens, Some(300));
+    }
+
+    #[test]
+    fn parse_content_block_thinking() {
+        let v = serde_json::json!({"type": "thinking", "thinking": "hmm"});
+        let b = parse_content_block(&v).unwrap();
+        assert!(matches!(b, ContentBlock::Thinking { .. }));
+    }
+
+    #[test]
+    fn parse_content_block_image_becomes_empty_text() {
+        let v = serde_json::json!({"type": "image", "source": {}});
+        let b = parse_content_block(&v).unwrap();
+        // Image API blocks are mapped to empty Text
+        assert!(matches!(b, ContentBlock::Text { text } if text.is_empty()));
+    }
+
+    #[test]
+    fn parse_content_block_unknown_type_is_error() {
+        let v = serde_json::json!({"type": "unknown_type"});
+        let result = parse_content_block(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_content_block_missing_type_is_error() {
+        let v = serde_json::json!({"no_type_field": "x"});
+        let result = parse_content_block(&v);
+        assert!(result.is_err());
+    }
+
+    // ── AnthropicProvider::new ─────────────────────────────────────────────────
+
+    #[test]
+    fn anthropic_provider_new() {
+        let p = AnthropicProvider::new("sk-ant-fake".to_string(), "claude-3-haiku".to_string());
+        // Just assert it constructs without panic.
+        let _ = p;
+    }
+}
+
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn complete(
@@ -376,5 +681,32 @@ impl ModelProvider for AnthropicProvider {
         _config: &AgentConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         Ok(Box::pin(stream::empty()))
+    }
+
+    async fn list_models(&self) -> Vec<crate::provider::ModelEntry> {
+        let Ok(resp) = self
+            .client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+        else {
+            return vec![];
+        };
+        if !resp.status().is_success() {
+            return vec![];
+        }
+        let Ok(json) = resp.json::<serde_json::Value>().await else {
+            return vec![];
+        };
+        let mut models: Vec<crate::provider::ModelEntry> = json["data"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|m| m["id"].as_str().map(crate::provider::ModelEntry::available))
+            .collect();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
     }
 }

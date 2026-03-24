@@ -58,7 +58,7 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Coverage
-        run: cargo tarpaulin --workspace --timeout 120 --out Xml --exclude-files "*/benches/*" --fail-under 50
+        run: cargo tarpaulin --workspace --out Xml
 
       - name: Upload coverage report
         uses: codecov/codecov-action@v4

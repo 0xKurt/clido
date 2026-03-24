@@ -15,6 +15,7 @@ use crate::cli::Cli;
 use crate::errors::CliError;
 use crate::git_context::GitContext;
 use crate::provider::{make_provider, StdinAskUser};
+use crate::spawn_tools::{SpawnReviewerTool, SpawnWorkerTool};
 
 pub struct AgentSetup {
     pub provider: Arc<dyn clido_providers::ModelProvider>,
@@ -66,6 +67,76 @@ impl AgentSetup {
         )
         .map_err(|e| CliError::Usage(e.to_string()))?;
 
+        // Override with [agents.main] if present (newer config format).
+        let provider = if let Some(main_slot) = &loaded.agents.main {
+            let new_provider = build_provider_from_slot(main_slot).map_err(CliError::Usage)?;
+            config.model = main_slot.model.clone();
+            new_provider
+        } else {
+            provider
+        };
+
+        // Build worker provider if configured (per-profile slot takes priority over global).
+        let worker_provider: Option<Arc<dyn clido_providers::ModelProvider>> = loaded
+            .effective_slot_for_profile("worker", profile_name)
+            .and_then(|slot| {
+                build_provider_from_slot(slot)
+                    .map_err(|e| {
+                        eprintln!("Warning: worker provider failed to build: {}", e);
+                    })
+                    .ok()
+            });
+
+        let reviewer_provider: Option<Arc<dyn clido_providers::ModelProvider>> = loaded
+            .effective_slot_for_profile("reviewer", profile_name)
+            .and_then(|slot| {
+                build_provider_from_slot(slot)
+                    .map_err(|e| {
+                        eprintln!("Warning: reviewer provider failed to build: {}", e);
+                    })
+                    .ok()
+            });
+
+        // Register sub-agent tools if configured.
+        if let Some(ref wp) = worker_provider {
+            let worker_config = if let Some(ws) = &loaded.agents.worker {
+                let mut wc = config.clone();
+                wc.model = ws.model.clone();
+                wc
+            } else {
+                config.clone()
+            };
+            registry.register(SpawnWorkerTool::new(
+                wp.clone(),
+                worker_config,
+                workspace_root.to_path_buf(),
+            ));
+        }
+        if let Some(ref rp) = reviewer_provider {
+            let reviewer_config = if let Some(rs) = &loaded.agents.reviewer {
+                let mut rc = config.clone();
+                rc.model = rs.model.clone();
+                rc
+            } else {
+                config.clone()
+            };
+            registry.register(SpawnReviewerTool::new(
+                rp.clone(),
+                reviewer_config,
+                workspace_root.to_path_buf(),
+            ));
+        }
+
+        // Inject sub-agent routing instructions if sub-agents are configured.
+        let has_worker = loaded.agents.worker.is_some();
+        let has_reviewer = loaded.agents.reviewer.is_some();
+        if has_worker || has_reviewer {
+            let routing = build_routing_instructions(has_worker, has_reviewer);
+            if let Some(ref mut sp) = config.system_prompt {
+                *sp = format!("{}\n\n{}", sp, routing);
+            }
+        }
+
         // Inject project rules into system prompt
         let rules_file_path = cli
             .rules_file
@@ -112,6 +183,50 @@ impl AgentSetup {
             pricing_table,
         })
     }
+}
+
+fn build_provider_from_slot(
+    slot: &clido_core::AgentSlotConfig,
+) -> Result<Arc<dyn clido_providers::ModelProvider>, String> {
+    let api_key = slot
+        .api_key
+        .clone()
+        .or_else(|| {
+            slot.api_key_env
+                .as_ref()
+                .and_then(|e| std::env::var(e).ok())
+        })
+        .unwrap_or_default();
+    clido_providers::build_provider(
+        &slot.provider,
+        api_key,
+        slot.model.clone(),
+        slot.base_url.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn build_routing_instructions(has_worker: bool, has_reviewer: bool) -> String {
+    let mut lines = vec!["## Sub-Agent Routing".to_string(), String::new()];
+    if has_worker {
+        lines.push("You have access to `SpawnWorker` tool. Use it for mechanical subtasks:".into());
+        lines.push("- Selecting relevant files from a list".into());
+        lines.push("- Summarizing file content or chunks".into());
+        lines.push("- Extracting structured fields from text".into());
+        lines.push("- Formatting or normalizing output".into());
+        lines.push("Pass only the minimal context needed — never the full conversation.".into());
+        lines.push(String::new());
+    }
+    if has_reviewer {
+        lines.push("You have access to `SpawnReviewer` tool. Use it when:".into());
+        lines.push("- The task is complete and a final quality check is warranted.".into());
+        lines.push("Only invoke if you are uncertain about the output quality.".into());
+        lines.push(String::new());
+    }
+    lines.push("Sub-agent rules:".into());
+    lines.push("- Pass only the context slice the sub-agent needs.".into());
+    lines.push("- If a sub-agent fails, retry the task yourself without it.".into());
+    lines.join("\n")
 }
 
 /// Compute the clido config file path (mirrors setup.rs logic).
@@ -216,6 +331,98 @@ pub fn parse_permission_mode(s: Option<&str>) -> PermissionMode {
         Some("accept-all") => PermissionMode::AcceptAll,
         Some("diff-review") => PermissionMode::DiffReview,
         _ => PermissionMode::Default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_permission_mode ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_permission_mode_plan() {
+        assert_eq!(
+            parse_permission_mode(Some("plan")),
+            PermissionMode::PlanOnly
+        );
+        assert_eq!(
+            parse_permission_mode(Some("plan-only")),
+            PermissionMode::PlanOnly
+        );
+    }
+
+    #[test]
+    fn parse_permission_mode_accept_all() {
+        assert_eq!(
+            parse_permission_mode(Some("accept-all")),
+            PermissionMode::AcceptAll
+        );
+    }
+
+    #[test]
+    fn parse_permission_mode_diff_review() {
+        assert_eq!(
+            parse_permission_mode(Some("diff-review")),
+            PermissionMode::DiffReview
+        );
+    }
+
+    #[test]
+    fn parse_permission_mode_default_on_none() {
+        assert_eq!(parse_permission_mode(None), PermissionMode::Default);
+    }
+
+    #[test]
+    fn parse_permission_mode_default_on_unknown() {
+        assert_eq!(
+            parse_permission_mode(Some("garbage")),
+            PermissionMode::Default
+        );
+    }
+
+    // ── build_routing_instructions ────────────────────────────────────────
+
+    #[test]
+    fn routing_instructions_worker_only_mentions_spawn_worker() {
+        let s = build_routing_instructions(true, false);
+        assert!(s.contains("SpawnWorker"), "should mention SpawnWorker");
+        assert!(
+            !s.contains("SpawnReviewer"),
+            "should not mention SpawnReviewer"
+        );
+        assert!(s.contains("Sub-Agent Routing"));
+        assert!(s.contains("Sub-agent rules:"));
+    }
+
+    #[test]
+    fn routing_instructions_reviewer_only_mentions_spawn_reviewer() {
+        let s = build_routing_instructions(false, true);
+        assert!(!s.contains("SpawnWorker"), "should not mention SpawnWorker");
+        assert!(s.contains("SpawnReviewer"), "should mention SpawnReviewer");
+    }
+
+    #[test]
+    fn routing_instructions_both_mentions_both() {
+        let s = build_routing_instructions(true, true);
+        assert!(s.contains("SpawnWorker"));
+        assert!(s.contains("SpawnReviewer"));
+        assert!(s.contains("Sub-agent rules:"));
+    }
+
+    #[test]
+    fn routing_instructions_neither_still_has_header_and_rules() {
+        let s = build_routing_instructions(false, false);
+        assert!(s.contains("Sub-Agent Routing"));
+        assert!(s.contains("Sub-agent rules:"));
+        assert!(!s.contains("SpawnWorker"));
+        assert!(!s.contains("SpawnReviewer"));
+    }
+
+    #[test]
+    fn routing_instructions_has_retry_guidance() {
+        let s = build_routing_instructions(true, true);
+        assert!(s.contains("retry"), "should include retry guidance");
     }
 }
 

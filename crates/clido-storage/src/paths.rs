@@ -68,4 +68,57 @@ mod tests {
         let p = Path::new("/foo/bar");
         assert_eq!(sanitize_project_path(p), "_foo_bar");
     }
+
+    #[test]
+    fn sanitize_plain_name_unchanged() {
+        let p = Path::new("myproject");
+        assert_eq!(sanitize_project_path(p), "myproject");
+    }
+
+    #[test]
+    fn sanitize_for_audit_same_as_internal() {
+        let p = Path::new("/home/user/project");
+        assert_eq!(sanitize_for_audit(p), sanitize_project_path(p));
+    }
+
+    #[test]
+    fn session_file_path_contains_session_id_and_jsonl() {
+        let p = Path::new("/tmp/myproject");
+        let path = session_file_path(p, "sess-001").unwrap();
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(name, "sess-001.jsonl");
+    }
+
+    #[test]
+    fn session_dir_for_project_ends_with_sanitized_path() {
+        let p = Path::new("/tmp/myproject");
+        let dir = session_dir_for_project(p).unwrap();
+        // Should end with sessions/...
+        let dir_str = dir.to_string_lossy().to_string();
+        assert!(
+            dir_str.contains("sessions"),
+            "expected 'sessions' in path: {}",
+            dir_str
+        );
+    }
+
+    #[test]
+    fn workflow_run_path_contains_workflow_name_and_run_id() {
+        let path = workflow_run_path("my-workflow", "run-001").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+        assert!(path_str.contains("my-workflow"), "path: {}", path_str);
+        assert!(path_str.ends_with("run-001.json"), "path: {}", path_str);
+    }
+
+    #[test]
+    fn workflow_run_path_sanitizes_separators_in_name() {
+        let path = workflow_run_path("a/b", "r1").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+        // The slash in "a/b" should be replaced with "_"
+        assert!(
+            !path_str.contains("a/b"),
+            "slash should be sanitized: {}",
+            path_str
+        );
+    }
 }

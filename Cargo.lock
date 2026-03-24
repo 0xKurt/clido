@@ -538,6 +538,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -549,6 +550,7 @@ version = "0.1.0"
 dependencies = [
  "clido-core",
  "directories",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
@@ -651,6 +653,7 @@ dependencies = [
  "glob",
  "hex",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "serde",

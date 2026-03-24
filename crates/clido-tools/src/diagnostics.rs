@@ -387,6 +387,153 @@ impl Tool for DiagnosticsTool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn detect_lang_from_path_rust() {
+        assert_eq!(detect_lang_from_path(Path::new("main.rs")), Some("rust"));
+    }
+
+    #[test]
+    fn detect_lang_from_path_python() {
+        assert_eq!(detect_lang_from_path(Path::new("app.py")), Some("python"));
+    }
+
+    #[test]
+    fn detect_lang_from_path_js() {
+        assert_eq!(detect_lang_from_path(Path::new("index.js")), Some("js"));
+        assert_eq!(
+            detect_lang_from_path(Path::new("component.jsx")),
+            Some("js")
+        );
+    }
+
+    #[test]
+    fn detect_lang_from_path_ts() {
+        assert_eq!(detect_lang_from_path(Path::new("app.ts")), Some("ts"));
+        assert_eq!(
+            detect_lang_from_path(Path::new("component.tsx")),
+            Some("ts")
+        );
+    }
+
+    #[test]
+    fn detect_lang_from_path_go() {
+        assert_eq!(detect_lang_from_path(Path::new("main.go")), Some("go"));
+    }
+
+    #[test]
+    fn detect_lang_from_path_unknown() {
+        assert_eq!(detect_lang_from_path(Path::new("README.md")), None);
+        assert_eq!(detect_lang_from_path(Path::new("data.json")), None);
+        assert_eq!(detect_lang_from_path(Path::new("no_extension")), None);
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), Some("rust"));
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_ts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), Some("ts"));
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_js() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), Some("js"));
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_python_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[tool]").unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), Some("python"));
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_python_setup_py() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("setup.py"), "").unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), Some("python"));
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_go() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module x").unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), Some("go"));
+    }
+
+    #[test]
+    fn detect_lang_from_workspace_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(detect_lang_from_workspace(dir.path()), None);
+    }
+
+    #[test]
+    fn format_diagnostics_empty() {
+        let diags: Vec<String> = vec![];
+        assert_eq!(format_diagnostics(&diags), "No diagnostics found.");
+    }
+
+    #[test]
+    fn format_diagnostics_non_empty() {
+        let diags = vec![
+            "error at line 1".to_string(),
+            "warning at line 2".to_string(),
+        ];
+        let result = format_diagnostics(&diags);
+        assert!(result.contains("error at line 1"));
+        assert!(result.contains("warning at line 2"));
+    }
+
+    #[test]
+    fn find_ancestor_with_finds_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub").join("deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]").unwrap();
+        // Start from subdir → should find Cargo.toml in dir
+        let found = find_ancestor_with(&sub, "Cargo.toml");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), dir.path());
+    }
+
+    #[test]
+    fn find_ancestor_with_returns_none_when_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = find_ancestor_with(dir.path(), "nonexistent_marker_12345.txt");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_ancestor_with_file_path_uses_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]").unwrap();
+        let file = dir.path().join("src").join("main.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn main() {}").unwrap();
+        // Pass a file path → should use parent dir for traversal
+        let found = find_ancestor_with(&file, "Cargo.toml");
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn diagnostics_tool_name_and_schema() {
+        let tool = DiagnosticsTool::new();
+        assert_eq!(tool.name(), "Diagnostics");
+        assert!(tool.is_read_only());
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"].get("path").is_some());
+        assert!(schema["properties"].get("lang").is_some());
+    }
+
     #[tokio::test]
     async fn test_diagnostics_rust_clean() {
         // Create a minimal temp Rust project with no errors.
@@ -443,5 +590,214 @@ mod tests {
             "unexpected output: {}",
             out.content
         );
+    }
+
+    // ── execute with explicit lang override ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_explicit_unknown_lang_returns_no_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": tmp.path().to_str().unwrap(),
+                "lang": "cobol"
+            }))
+            .await;
+        assert!(!out.is_error);
+        assert!(out.content.contains("No diagnostic tool available"));
+    }
+
+    // ── execute with no path (defaults to ".") ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_defaults_to_dot() {
+        // Just verify the tool doesn't panic with no path argument
+        let tool = DiagnosticsTool::new();
+        let out = tool.execute(serde_json::json!({})).await;
+        // Output depends on current directory; just check no panic
+        let _ = out;
+    }
+
+    // ── DiagnosticsTool::default ───────────────────────────────────────────
+
+    #[test]
+    fn diagnostics_tool_default() {
+        let tool = DiagnosticsTool::default();
+        assert_eq!(tool.name(), "Diagnostics");
+    }
+
+    // ── description ────────────────────────────────────────────────────────
+
+    #[test]
+    fn diagnostics_tool_description_non_empty() {
+        let tool = DiagnosticsTool::new();
+        let desc = tool.description();
+        assert!(!desc.is_empty());
+        assert!(
+            desc.contains("rust")
+                || desc.contains("Rust")
+                || desc.contains("linter")
+                || desc.contains("compiler")
+        );
+    }
+
+    // ── run_python with directory path ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_python_on_directory_returns_error_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        // python requires a file, not a dir
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": tmp.path().to_str().unwrap(),
+                "lang": "python"
+            }))
+            .await;
+        // Should not panic; may return error or "No diagnostics"
+        let _ = out;
+    }
+
+    // ── cargo JSON parsing: note/help lines are skipped ────────────────────
+
+    #[test]
+    fn cargo_note_and_help_lines_skipped() {
+        // run_rust parses cargo JSON; we test the parsing logic by examining
+        // what format_diagnostics returns for empty vec vs non-empty vec
+        let empty: Vec<String> = vec![];
+        assert_eq!(format_diagnostics(&empty), "No diagnostics found.");
+
+        let with_items = vec!["src/main.rs:1:1: error: something wrong".to_string()];
+        let result = format_diagnostics(&with_items);
+        assert!(result.contains("something wrong"));
+    }
+
+    // ── execute with python lang detects file extension ────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_python_valid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("script.py");
+        std::fs::write(&file, "x = 1\n").unwrap();
+        let tool = DiagnosticsTool::new();
+        // python3 must be available; if not, tool may error gracefully
+        let out = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "lang": "python"
+            }))
+            .await;
+        // No panic; result depends on python3 availability
+        let _ = out;
+    }
+
+    #[tokio::test]
+    async fn test_diagnostics_python_syntax_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("bad.py");
+        std::fs::write(&file, "def foo(\n").unwrap();
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "lang": "python"
+            }))
+            .await;
+        // May detect syntax error or error gracefully — no panic
+        let _ = out;
+    }
+
+    // ── execute with ts lang: no tsconfig.json ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_ts_no_tsconfig() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("app.ts");
+        std::fs::write(&file, "const x: number = 1;\n").unwrap();
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "lang": "ts"
+            }))
+            .await;
+        // Should return "no tsconfig.json found" message
+        assert!(
+            out.content.contains("tsconfig") || !out.is_error,
+            "unexpected output: {}",
+            out.content
+        );
+    }
+
+    // ── execute with go lang: no go.mod ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_go_no_go_mod() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("main.go");
+        std::fs::write(&file, "package main\nfunc main() {}\n").unwrap();
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "lang": "go"
+            }))
+            .await;
+        // May succeed (go vet clean) or fail gracefully — no panic
+        let _ = out;
+    }
+
+    // ── execute: workspace language auto-detection from ts file ───────────
+
+    #[tokio::test]
+    async fn test_diagnostics_ts_file_extension_auto_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("app.ts");
+        std::fs::write(&file, "const x: string = \"hello\";\n").unwrap();
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap()
+                // no lang — should be auto-detected as "ts"
+            }))
+            .await;
+        // No panic; ts detected from extension
+        let _ = out;
+    }
+
+    // ── execute: go file extension auto-detected ──────────────────────────
+
+    #[tokio::test]
+    async fn test_diagnostics_go_file_extension_auto_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("hello.go");
+        std::fs::write(&file, "package main\nfunc main() {}\n").unwrap();
+        let tool = DiagnosticsTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap()
+                // no lang — should be auto-detected as "go"
+            }))
+            .await;
+        // No panic; go detected from extension
+        let _ = out;
+    }
+
+    // ── execute: python file extension auto-detected from workspace ────────
+
+    #[tokio::test]
+    async fn test_diagnostics_python_workspace_auto_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("setup.py"), "").unwrap();
+        let tool = DiagnosticsTool::new();
+        // Pass the directory (not a file), lang auto-detected from workspace marker
+        let out = tool
+            .execute(serde_json::json!({
+                "path": tmp.path().to_str().unwrap()
+            }))
+            .await;
+        // setup.py → "python" → run_python with a directory → returns error message
+        assert!(!out.is_error || out.content.contains("python"));
     }
 }

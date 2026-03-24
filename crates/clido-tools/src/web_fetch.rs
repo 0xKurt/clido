@@ -181,6 +181,20 @@ impl Tool for WebFetchTool {
 mod tests {
     use super::*;
 
+    /// Lines 21-22: Default impl.
+    #[test]
+    fn web_fetch_tool_default() {
+        let tool = WebFetchTool::default();
+        assert_eq!(tool.name(), "WebFetch");
+    }
+
+    /// Lines 98-99: is_read_only returns true.
+    #[test]
+    fn web_fetch_tool_is_read_only() {
+        let tool = WebFetchTool::new();
+        assert!(tool.is_read_only());
+    }
+
     #[test]
     fn test_validate_url_http() {
         assert!(validate_url("http://example.com").is_ok());

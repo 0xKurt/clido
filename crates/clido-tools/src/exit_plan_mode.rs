@@ -35,3 +35,22 @@ impl Tool for ExitPlanModeTool {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_read_only_returns_true() {
+        let tool = ExitPlanModeTool;
+        assert!(tool.is_read_only());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_ok() {
+        let tool = ExitPlanModeTool;
+        let out = tool.execute(serde_json::json!({})).await;
+        assert!(!out.is_error);
+        assert!(out.content.contains("agent mode"));
+    }
+}
