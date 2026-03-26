@@ -46,6 +46,9 @@ pub struct AgentConfig {
     /// Use a specific rules file instead of the standard hierarchical lookup.
     #[serde(default)]
     pub rules_file: Option<String>,
+    /// Maximum tokens the model may produce per response. None = provider default (8192).
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 fn default_max_parallel_tools() -> u32 {
@@ -68,6 +71,7 @@ impl Default for AgentConfig {
             max_parallel_tools: 4,
             no_rules: false,
             rules_file: None,
+            max_output_tokens: None,
         }
     }
 }

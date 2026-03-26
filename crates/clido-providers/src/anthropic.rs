@@ -5,7 +5,6 @@ use clido_core::{
     AgentConfig, ContentBlock, Message, ModelResponse, Role, StopReason, ToolSchema, Usage,
 };
 use clido_core::{ClidoError, Result};
-use futures::stream;
 use futures::Stream;
 use std::pin::Pin;
 use std::time::Duration;
@@ -27,7 +26,7 @@ impl AnthropicProvider {
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(15))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build reqwest::Client — TLS backend unavailable");
         Self {
             client,
             api_key,
@@ -80,9 +79,10 @@ impl AnthropicProvider {
             "cache_control": {"type": "ephemeral"}
         }]);
 
+        let max_tokens = config.max_output_tokens.unwrap_or(8192);
         let body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens,
             "system": system_blocks,
             "messages": anthropic_messages,
             "tools": anthropic_tools
@@ -225,7 +225,7 @@ fn extract_api_error(status: reqwest::StatusCode, text: &str) -> String {
             return format!("API error ({}): {}", status.as_u16(), msg);
         }
     }
-    let preview = &text[..text.len().min(300)];
+    let preview: String = text.chars().take(300).collect();
     format!("API error ({}): {}", status.as_u16(), preview)
 }
 
@@ -355,6 +355,149 @@ fn parse_content_block(v: &serde_json::Value) -> Result<ContentBlock> {
             "unknown content type: {}",
             typ
         ))),
+    }
+}
+
+/// Parse Anthropic SSE byte stream into a stream of `StreamEvent`.
+///
+/// Spawns a tokio task that reads chunks, splits on newlines, and assembles
+/// `event:`/`data:` pairs. Each blank line terminates an event.
+fn parse_anthropic_sse(
+    byte_stream: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<StreamEvent>> + Send {
+    use futures::channel::mpsc;
+    use futures::SinkExt;
+    use futures::StreamExt;
+
+    let (mut tx, rx) = mpsc::unbounded::<Result<StreamEvent>>();
+
+    tokio::spawn(async move {
+        let mut line_buf = String::new();
+        let mut event_type = String::new();
+        let mut data_buf = String::new();
+        // index → tool_use_id (needed because content_block_delta only carries index)
+        let mut index_to_id: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::new();
+
+        let mut stream = std::pin::pin!(byte_stream);
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    let err: Result<StreamEvent> = Err(ClidoError::Provider(e.to_string()));
+                    let _ = tx.send(err).await;
+                    return;
+                }
+            };
+
+            // Append chunk bytes to the line buffer and process complete lines.
+            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            loop {
+                let Some(pos) = line_buf.find('\n') else {
+                    break;
+                };
+                let line = line_buf[..pos].trim_end_matches('\r').to_string();
+                line_buf = line_buf[pos + 1..].to_string();
+
+                if line.is_empty() {
+                    // Blank line = end of SSE event; process event + data.
+                    if !data_buf.is_empty() {
+                        if let Some(events) =
+                            decode_anthropic_event(&event_type, &data_buf, &mut index_to_id)
+                        {
+                            for ev in events {
+                                if tx.send(Ok(ev)).await.is_err() {
+                                    return; // receiver dropped
+                                }
+                            }
+                        }
+                    }
+                    event_type.clear();
+                    data_buf.clear();
+                } else if let Some(rest) = line.strip_prefix("event:") {
+                    event_type = rest.trim().to_string();
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    if !data_buf.is_empty() {
+                        data_buf.push('\n');
+                    }
+                    data_buf.push_str(rest.trim());
+                }
+            }
+        }
+    });
+
+    rx
+}
+
+/// Decode one Anthropic SSE event into zero or more `StreamEvent` values.
+fn decode_anthropic_event(
+    event_type: &str,
+    data: &str,
+    index_to_id: &mut std::collections::HashMap<u64, String>,
+) -> Option<Vec<StreamEvent>> {
+    let json: serde_json::Value = serde_json::from_str(data).ok()?;
+    let mut out = Vec::new();
+
+    match event_type {
+        "content_block_start" => {
+            let block = &json["content_block"];
+            let index = json["index"].as_u64().unwrap_or(0);
+            if block["type"].as_str() == Some("tool_use") {
+                let id = block["id"].as_str().unwrap_or("").to_string();
+                let name = block["name"].as_str().unwrap_or("").to_string();
+                index_to_id.insert(index, id.clone());
+                out.push(StreamEvent::ToolUseStart { id, name });
+            }
+        }
+        "content_block_delta" => {
+            let delta = &json["delta"];
+            let index = json["index"].as_u64().unwrap_or(0);
+            match delta["type"].as_str() {
+                Some("text_delta") => {
+                    let text = delta["text"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        out.push(StreamEvent::TextDelta(text));
+                    }
+                }
+                Some("input_json_delta") => {
+                    if let Some(id) = index_to_id.get(&index).cloned() {
+                        let partial_json = delta["partial_json"].as_str().unwrap_or("").to_string();
+                        out.push(StreamEvent::ToolUseDelta { id, partial_json });
+                    }
+                }
+                _ => {}
+            }
+        }
+        "content_block_stop" => {
+            let index = json["index"].as_u64().unwrap_or(0);
+            if let Some(id) = index_to_id.get(&index).cloned() {
+                out.push(StreamEvent::ToolUseEnd { id });
+            }
+        }
+        "message_delta" => {
+            let stop_reason = match json["delta"]["stop_reason"].as_str().unwrap_or("end_turn") {
+                "tool_use" => StopReason::ToolUse,
+                "max_tokens" => StopReason::MaxTokens,
+                "stop_sequence" => StopReason::StopSequence,
+                _ => StopReason::EndTurn,
+            };
+            let usage = Usage {
+                input_tokens: 0,
+                output_tokens: json["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            };
+            out.push(StreamEvent::MessageDelta { stop_reason, usage });
+        }
+        // "message_start", "message_stop", "ping" — no StreamEvent to emit
+        _ => {}
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -676,29 +819,106 @@ impl ModelProvider for AnthropicProvider {
 
     async fn complete_stream(
         &self,
-        _messages: &[Message],
-        _tools: &[ToolSchema],
-        _config: &AgentConfig,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        config: &AgentConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        Ok(Box::pin(stream::empty()))
+        // Build the same body as complete_impl, but with "stream": true.
+        let mut system = config
+            .system_prompt
+            .as_deref()
+            .unwrap_or("You are a helpful coding assistant.")
+            .to_string();
+        for m in messages.iter() {
+            if m.role == Role::System {
+                for b in &m.content {
+                    if let ContentBlock::Text { text } = b {
+                        system.push('\n');
+                        system.push_str(text);
+                    }
+                }
+            }
+        }
+        let anthropic_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(message_to_anthropic)
+            .collect::<Result<Vec<_>>>()?;
+
+        let anthropic_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema
+                })
+            })
+            .collect();
+
+        let system_blocks = serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"}
+        }]);
+
+        let max_tokens = config.max_output_tokens.unwrap_or(8192);
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system_blocks,
+            "messages": anthropic_messages,
+            "tools": anthropic_tools,
+            "stream": true
+        });
+
+        let response = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ClidoError::Provider(format!("stream request failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ClidoError::Provider(extract_api_error(status, &text)));
+        }
+
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(parse_anthropic_sse(byte_stream)))
     }
 
     async fn list_models(&self) -> Vec<crate::provider::ModelEntry> {
-        let Ok(resp) = self
+        let resp = match self
             .client
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .send()
             .await
-        else {
-            return vec![];
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("list_models: request failed: {}", e);
+                return vec![];
+            }
         };
         if !resp.status().is_success() {
+            warn!("list_models: API returned status {}", resp.status());
             return vec![];
         }
-        let Ok(json) = resp.json::<serde_json::Value>().await else {
-            return vec![];
+        let json = match resp.json::<serde_json::Value>().await {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("list_models: failed to parse response: {}", e);
+                return vec![];
+            }
         };
         let mut models: Vec<crate::provider::ModelEntry> = json["data"]
             .as_array()

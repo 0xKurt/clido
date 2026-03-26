@@ -1,6 +1,7 @@
 //! Single-shot agent execution.
 
-use clido_agent::{session_lines_to_messages, AgentLoop};
+use async_trait::async_trait;
+use clido_agent::{session_lines_to_messages, AgentLoop, EventEmitter};
 use clido_core::ClidoError;
 use clido_storage::{
     list_sessions, stale_paths, AuditLog, SessionLine, SessionReader, SessionWriter,
@@ -14,6 +15,46 @@ use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
 use crate::errors::CliError;
 use crate::ui::{ansi, cli_use_color};
+
+/// EventEmitter that writes stream-json events to stdout as the agent runs.
+/// Attached to the agent loop when --output-format stream-json is active.
+struct StreamJsonEmitter;
+
+#[async_trait]
+impl EventEmitter for StreamJsonEmitter {
+    async fn on_tool_start(&self, tool_use_id: &str, name: &str, input: &serde_json::Value) {
+        let ev = serde_json::json!({
+            "type": "tool_use",
+            "id": tool_use_id,
+            "name": name,
+            "input": input,
+        });
+        println!("{}", serde_json::to_string(&ev).unwrap());
+    }
+
+    async fn on_tool_done(
+        &self,
+        tool_use_id: &str,
+        _name: &str,
+        is_error: bool,
+        _diff: Option<String>,
+    ) {
+        let ev = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "is_error": is_error,
+        });
+        println!("{}", serde_json::to_string(&ev).unwrap());
+    }
+
+    async fn on_assistant_text(&self, text: &str) {
+        let ev = serde_json::json!({
+            "type": "text",
+            "text": text,
+        });
+        println!("{}", serde_json::to_string(&ev).unwrap());
+    }
+}
 
 pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
     if cli.sandbox && !cli.quiet {
@@ -37,6 +78,37 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
         }
     };
 
+    // Capture model name and tool names before the registry is consumed by AgentLoop.
+    let model = setup.config.model.clone();
+    let tool_names: Vec<String> = setup
+        .registry
+        .schemas()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+
+    // For stream-json: emit the init event before the agent loop starts.
+    // Omit if --quiet (SDK consumers relying on session_id can pass --session).
+    if cli.output_format == "stream-json" && !cli.quiet {
+        let init = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": &session_id,
+            "tools": &tool_names,
+            "model": &model,
+        });
+        println!("{}", serde_json::to_string(&init).unwrap());
+    }
+
+    // Build stream-json emitter (attaches to agent loop for live events).
+    // Not attached when quiet — tool events are suppressed.
+    let stream_emitter: Option<Arc<dyn EventEmitter>> =
+        if cli.output_format == "stream-json" && !cli.quiet {
+            Some(Arc::new(StreamJsonEmitter))
+        } else {
+            None
+        };
+
     // Set up audit log.
     let audit = AuditLog::open(&workspace_root)
         .ok()
@@ -52,7 +124,7 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
     let cancel = make_cancel_token();
     let start = std::time::Instant::now();
 
-    let (result, num_turns, total_cost_usd) = match &resume_lines {
+    let (result, num_turns, total_cost_usd, input_tokens, output_tokens) = match &resume_lines {
         Some(lines) => {
             let history = session_lines_to_messages(lines);
             if history.is_empty() {
@@ -64,6 +136,9 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
                 if let Some(h) = hooks.clone() {
                     loop_ = loop_.with_hooks(h);
                 }
+                if let Some(ref e) = stream_emitter {
+                    loop_ = loop_.with_emitter(e.clone());
+                }
                 let r = loop_
                     .run(
                         &cli.prompt_str(),
@@ -72,7 +147,13 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
                         Some(cancel),
                     )
                     .await;
-                (r, loop_.turn_count(), loop_.cumulative_cost_usd)
+                (
+                    r,
+                    loop_.turn_count(),
+                    loop_.cumulative_cost_usd,
+                    loop_.cumulative_input_tokens,
+                    loop_.cumulative_output_tokens,
+                )
             } else {
                 let mut loop_ = AgentLoop::new_with_history(
                     setup.provider,
@@ -87,10 +168,19 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
                 if let Some(h) = hooks.clone() {
                     loop_ = loop_.with_hooks(h);
                 }
+                if let Some(ref e) = stream_emitter {
+                    loop_ = loop_.with_emitter(e.clone());
+                }
                 let r = loop_
                     .run_continue(Some(&mut writer), Some(&setup.pricing_table), Some(cancel))
                     .await;
-                (r, loop_.turn_count(), loop_.cumulative_cost_usd)
+                (
+                    r,
+                    loop_.turn_count(),
+                    loop_.cumulative_cost_usd,
+                    loop_.cumulative_input_tokens,
+                    loop_.cumulative_output_tokens,
+                )
             }
         }
         None => {
@@ -102,6 +192,9 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
             }
             if let Some(h) = hooks {
                 loop_ = loop_.with_hooks(h);
+            }
+            if let Some(ref e) = stream_emitter {
+                loop_ = loop_.with_emitter(e.clone());
             }
             // If --planner is set, make a real LLM planning call before the agent loop.
             // The plan is printed to stdout as an informational prefix; if planning fails
@@ -144,12 +237,23 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
                     Some(cancel),
                 )
                 .await;
-            (r, loop_.turn_count(), loop_.cumulative_cost_usd)
+            (
+                r,
+                loop_.turn_count(),
+                loop_.cumulative_cost_usd,
+                loop_.cumulative_input_tokens,
+                loop_.cumulative_output_tokens,
+            )
         }
     };
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let exit_status = if result.is_ok() { "completed" } else { "error" };
+    let exit_status = match &result {
+        Ok(_) => "completed",
+        Err(ClidoError::MaxTurnsExceeded) => "max_turns_reached",
+        Err(ClidoError::BudgetExceeded) => "budget_exceeded",
+        Err(_) => "error",
+    };
 
     if let Err(ClidoError::Interrupted) = &result {
         let _ = writer.flush();
@@ -170,12 +274,17 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
 
     emit_result(
         result,
-        &cli.output_format,
-        &session_id,
-        num_turns,
-        duration_ms,
-        total_cost_usd,
-        cli.quiet,
+        EmitResultParams {
+            output_format: &cli.output_format,
+            session_id: &session_id,
+            num_turns,
+            duration_ms,
+            total_cost_usd,
+            quiet: cli.quiet,
+            model: &model,
+            input_tokens,
+            output_tokens,
+        },
     )
 }
 
@@ -250,15 +359,37 @@ fn make_cancel_token() -> Arc<AtomicBool> {
     cancel
 }
 
+pub(crate) struct EmitResultParams<'a> {
+    pub output_format: &'a str,
+    pub session_id: &'a str,
+    pub num_turns: u32,
+    pub duration_ms: u64,
+    pub total_cost_usd: f64,
+    pub quiet: bool,
+    pub model: &'a str,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 pub(crate) fn emit_result(
     result: clido_core::Result<String>,
-    output_format: &str,
-    session_id: &str,
-    num_turns: u32,
-    duration_ms: u64,
-    total_cost_usd: f64,
-    quiet: bool,
+    p: EmitResultParams<'_>,
 ) -> Result<(), anyhow::Error> {
+    let EmitResultParams {
+        output_format,
+        session_id,
+        num_turns,
+        duration_ms,
+        total_cost_usd,
+        quiet,
+        model,
+        input_tokens,
+        output_tokens,
+    } = p;
+    let usage = serde_json::json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    });
     match result {
         Ok(text) => {
             if output_format == "json" {
@@ -271,35 +402,25 @@ pub(crate) fn emit_result(
                     "num_turns": num_turns,
                     "duration_ms": duration_ms,
                     "total_cost_usd": total_cost_usd,
-                    "is_error": false
+                    "is_error": false,
+                    "usage": usage,
                 });
                 println!("{}", serde_json::to_string(&out).unwrap());
             } else if output_format == "stream-json" {
-                let init = serde_json::json!({
-                    "type": "system",
-                    "subtype": "init",
-                    "session_id": session_id,
-                    "tools": [],
-                    "model": ""
-                });
-                println!("{}", serde_json::to_string(&init).unwrap());
-                let msg = serde_json::json!({
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": text}]
-                    }
-                });
-                println!("{}", serde_json::to_string(&msg).unwrap());
+                // Init and live events are emitted before/during the loop by run_agent.
+                // Only the final result line is needed here.
                 let result_line = serde_json::json!({
+                    "schema_version": 1,
                     "type": "result",
-                    "subtype": "success",
+                    "exit_status": "completed",
                     "result": text,
                     "session_id": session_id,
+                    "model": model,
                     "num_turns": num_turns,
                     "total_cost_usd": total_cost_usd,
                     "duration_ms": duration_ms,
-                    "is_error": false
+                    "is_error": false,
+                    "usage": usage,
                 });
                 println!("{}", serde_json::to_string(&result_line).unwrap());
             } else {
@@ -320,37 +441,39 @@ pub(crate) fn emit_result(
         }
         Err(e) => {
             let msg = e.to_string();
+            let exit_status = match &e {
+                ClidoError::MaxTurnsExceeded => "max_turns_reached",
+                ClidoError::BudgetExceeded => "budget_exceeded",
+                _ => "error",
+            };
             if output_format == "json" {
                 let out = serde_json::json!({
                     "schema_version": 1,
                     "type": "result",
-                    "exit_status": "error",
+                    "exit_status": exit_status,
                     "result": msg,
                     "session_id": session_id,
                     "num_turns": num_turns,
                     "duration_ms": duration_ms,
                     "total_cost_usd": total_cost_usd,
-                    "is_error": true
+                    "is_error": true,
+                    "usage": usage,
                 });
                 println!("{}", serde_json::to_string(&out).unwrap());
             } else if output_format == "stream-json" {
-                let init = serde_json::json!({
-                    "type": "system",
-                    "subtype": "init",
-                    "session_id": session_id,
-                    "tools": [],
-                    "model": ""
-                });
-                println!("{}", serde_json::to_string(&init).unwrap());
+                // Init already emitted by run_agent. Just emit the result line.
                 let result_line = serde_json::json!({
+                    "schema_version": 1,
                     "type": "result",
-                    "subtype": "error",
+                    "exit_status": exit_status,
                     "result": msg,
                     "session_id": session_id,
+                    "model": model,
                     "num_turns": num_turns,
                     "total_cost_usd": total_cost_usd,
                     "duration_ms": duration_ms,
-                    "is_error": true
+                    "is_error": true,
+                    "usage": usage,
                 });
                 println!("{}", serde_json::to_string(&result_line).unwrap());
             }
@@ -368,7 +491,7 @@ pub(crate) fn emit_result(
 
 #[cfg(test)]
 mod tests {
-    use super::emit_result;
+    use super::{emit_result, EmitResultParams};
     use clido_core::ClidoError;
 
     #[test]
@@ -422,46 +545,48 @@ mod tests {
     }
 
     #[test]
-    fn emit_stream_json_produces_three_lines() {
-        let session_id = "sess-abc";
-        let text = "done";
-        let init = serde_json::json!({"type": "system", "subtype": "init", "session_id": session_id, "tools": [], "model": ""});
-        let msg = serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}});
-        let result_line = serde_json::json!({"type": "result", "subtype": "success", "result": text, "session_id": session_id, "num_turns": 2u32, "total_cost_usd": 0.0f64, "duration_ms": 200u64, "is_error": false});
-        let lines = [
-            serde_json::to_string(&init).unwrap(),
-            serde_json::to_string(&msg).unwrap(),
-            serde_json::to_string(&result_line).unwrap(),
-        ];
-        assert_eq!(lines.len(), 3);
-        for line in &lines {
-            let v: serde_json::Value = serde_json::from_str(line).unwrap();
-            assert!(v["type"].is_string());
-        }
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&lines[0]).unwrap()["subtype"],
-            "init"
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&lines[2]).unwrap()["subtype"],
-            "success"
-        );
+    fn emit_stream_json_result_line_has_model_and_schema_version() {
+        // emit_result for stream-json emits only the result line (init is in run_agent).
+        // The result line must have schema_version, exit_status (not subtype), and model.
+        let result_line = serde_json::json!({
+            "schema_version": 1,
+            "type": "result",
+            "exit_status": "completed",
+            "result": "done",
+            "session_id": "sess-abc",
+            "model": "claude-sonnet-4-6",
+            "num_turns": 2u32,
+            "total_cost_usd": 0.0f64,
+            "duration_ms": 200u64,
+            "is_error": false,
+            "usage": {"input_tokens": 100u64, "output_tokens": 50u64},
+        });
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result_line).unwrap()).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["type"], "result");
+        assert_eq!(v["exit_status"], "completed");
+        assert!(v.get("subtype").is_none(), "subtype must not be present");
+        assert_eq!(v["model"], "claude-sonnet-4-6");
+        assert!(v["usage"]["input_tokens"].is_number());
+        assert!(v["usage"]["output_tokens"].is_number());
     }
 
     #[test]
     fn emit_result_text_quiet_suppresses_footer() {
-        // When quiet=true, emit_result should not print the cost footer.
-        // We verify this by confirming the function returns Ok for a zero-cost/zero-turn run
-        // that normally wouldn't print the footer anyway, and separately that quiet suppresses it.
-        // Since the footer goes to stderr and we can't capture it here, we just ensure Ok is returned.
         let result = emit_result(
             Ok("output".to_string()),
-            "text",
-            "session-quiet",
-            0,
-            10,
-            0.0,
-            true, // quiet
+            EmitResultParams {
+                output_format: "text",
+                session_id: "session-quiet",
+                num_turns: 0,
+                duration_ms: 10,
+                total_cost_usd: 0.0,
+                quiet: true,
+                model: "claude-sonnet-4-6",
+                input_tokens: 0,
+                output_tokens: 0,
+            },
         );
         assert!(result.is_ok());
     }
@@ -470,12 +595,17 @@ mod tests {
     fn emit_result_text_nonquiet_ok() {
         let result = emit_result(
             Ok("output".to_string()),
-            "text",
-            "session-nq",
-            2,
-            100,
-            0.001,
-            false, // not quiet — footer would go to stderr
+            EmitResultParams {
+                output_format: "text",
+                session_id: "session-nq",
+                num_turns: 2,
+                duration_ms: 100,
+                total_cost_usd: 0.001,
+                quiet: false,
+                model: "claude-sonnet-4-6",
+                input_tokens: 1500,
+                output_tokens: 45,
+            },
         );
         assert!(result.is_ok());
     }
@@ -484,12 +614,17 @@ mod tests {
     fn emit_result_json_ok_returns_ok() {
         let result = emit_result(
             Ok("some result".to_string()),
-            "json",
-            "session-json",
-            1,
-            50,
-            0.0005,
-            false,
+            EmitResultParams {
+                output_format: "json",
+                session_id: "session-json",
+                num_turns: 1,
+                duration_ms: 50,
+                total_cost_usd: 0.0005,
+                quiet: false,
+                model: "claude-sonnet-4-6",
+                input_tokens: 800,
+                output_tokens: 30,
+            },
         );
         assert!(result.is_ok());
     }
@@ -498,12 +633,17 @@ mod tests {
     fn emit_result_json_budget_exceeded_returns_err() {
         let result = emit_result(
             Err(ClidoError::BudgetExceeded),
-            "json",
-            "session-budget",
-            5,
-            300,
-            1.5,
-            false,
+            EmitResultParams {
+                output_format: "json",
+                session_id: "session-budget",
+                num_turns: 5,
+                duration_ms: 300,
+                total_cost_usd: 1.5,
+                quiet: false,
+                model: "claude-sonnet-4-6",
+                input_tokens: 50000,
+                output_tokens: 2000,
+            },
         );
         assert!(result.is_err());
     }
@@ -512,12 +652,17 @@ mod tests {
     fn emit_result_stream_json_ok_returns_ok() {
         let result = emit_result(
             Ok("streamed".to_string()),
-            "stream-json",
-            "session-stream",
-            1,
-            80,
-            0.0002,
-            false,
+            EmitResultParams {
+                output_format: "stream-json",
+                session_id: "session-stream",
+                num_turns: 1,
+                duration_ms: 80,
+                total_cost_usd: 0.0002,
+                quiet: false,
+                model: "claude-sonnet-4-6",
+                input_tokens: 500,
+                output_tokens: 20,
+            },
         );
         assert!(result.is_ok());
     }

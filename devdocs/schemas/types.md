@@ -67,8 +67,12 @@ pub enum ContentBlock {
         is_error: bool,
     },
     Image {
-        source: ImageSource,
+        media_type: String,
+        base64_data: String,
     },
+    /// Extended thinking block returned by models that support it (e.g. claude-3-7-sonnet).
+    /// Not sent back to the model; used only for display and token estimation.
+    Thinking { thinking: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

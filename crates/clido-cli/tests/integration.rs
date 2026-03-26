@@ -367,6 +367,194 @@ fn cli_json_output_error_has_schema() {
     assert!(v["exit_status"].is_string(), "exit_status must be string");
     assert!(v["is_error"].is_boolean(), "is_error must be boolean");
     assert!(v["session_id"].is_string(), "session_id must be string");
+    assert!(v["usage"].is_object(), "usage must be an object");
+    assert!(
+        v["usage"]["input_tokens"].is_number(),
+        "usage.input_tokens must be a number"
+    );
+    assert!(
+        v["usage"]["output_tokens"].is_number(),
+        "usage.output_tokens must be a number"
+    );
+}
+
+/// Run clido with --output-format stream-json against a fake config.
+/// The API call will fail (bad key), but the binary must emit valid NDJSON:
+/// each line must be valid JSON, the first line must be the init system message,
+/// and the last line must be the result record with required fields.
+#[test]
+fn cli_stream_json_output_emits_ndjson() {
+    let tmp = std::env::temp_dir().join(format!("clido_stream_json_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let config_path = tmp.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "default_profile = \"default\"\n[profile.default]\nprovider = \"anthropic\"\nmodel = \"claude-3-5-haiku-20241022\"\napi_key = \"sk-ant-fake-key-for-test\"\n",
+    ).unwrap();
+    let out = clido_bin()
+        .env("CLIDO_CONFIG", &config_path)
+        .env("NO_COLOR", "1")
+        .args(["--output-format", "stream-json", "say hello"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::fs::remove_dir(&tmp);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.trim().is_empty(),
+        "expected NDJSON on stdout; got empty"
+    );
+    // Every non-empty line must be valid JSON.
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            serde_json::from_str(l)
+                .unwrap_or_else(|e| panic!("line is not valid JSON: {e}\nline: {l}"))
+        })
+        .collect();
+    assert!(!lines.is_empty(), "expected at least one JSON line");
+    // First line must be the system init record.
+    let first = &lines[0];
+    assert_eq!(first["type"], "system", "first line type must be 'system'");
+    assert_eq!(
+        first["subtype"], "init",
+        "first line subtype must be 'init'"
+    );
+    assert!(
+        first["session_id"].is_string(),
+        "init line must have session_id"
+    );
+    // Last line must be the result record with full schema.
+    let last = &lines[lines.len() - 1];
+    assert_eq!(last["type"], "result", "last line type must be 'result'");
+    assert_eq!(
+        last["schema_version"], 1,
+        "result must have schema_version=1"
+    );
+    assert!(
+        last["exit_status"].is_string(),
+        "result must have exit_status"
+    );
+    assert!(last["is_error"].is_boolean(), "result must have is_error");
+    assert!(
+        last["session_id"].is_string(),
+        "result must have session_id"
+    );
+    assert!(last["usage"].is_object(), "result must have usage object");
+    assert!(
+        last["usage"]["input_tokens"].is_number(),
+        "usage must have input_tokens"
+    );
+    assert!(
+        last["usage"]["output_tokens"].is_number(),
+        "usage must have output_tokens"
+    );
+    // subtype must NOT appear on result lines (exit_status carries that info).
+    assert!(
+        last.get("subtype").is_none() || last["subtype"].is_null(),
+        "result must not have subtype field; got: {last}"
+    );
+}
+
+/// --input-format stream-json is a V2 feature; in V1 it must exit non-zero with
+/// a clear usage error message so users know it is not yet supported.
+#[test]
+fn cli_input_format_stream_json_errors_in_v1() {
+    let tmp = std::env::temp_dir().join(format!("clido_infmt_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let config_path = tmp.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "default_profile = \"default\"\n[profile.default]\nprovider = \"anthropic\"\nmodel = \"claude-3-5-haiku-20241022\"\napi_key = \"sk-ant-fake-key-for-test\"\n",
+    ).unwrap();
+    let out = clido_bin()
+        .env("CLIDO_CONFIG", &config_path)
+        .env("NO_COLOR", "1")
+        .args(["--input-format", "stream-json", "say hello"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::fs::remove_dir(&tmp);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for unsupported --input-format stream-json"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("stream-json") || stderr.contains("not yet supported"),
+        "stderr must explain the feature is unsupported; got: {stderr}"
+    );
+}
+
+/// stream-json result line must include the model field.
+#[test]
+fn cli_stream_json_result_has_model_field() {
+    let tmp = std::env::temp_dir().join(format!("clido_stream_model_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let config_path = tmp.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "default_profile = \"default\"\n[profile.default]\nprovider = \"anthropic\"\nmodel = \"claude-3-5-haiku-20241022\"\napi_key = \"sk-ant-fake-key-for-test\"\n",
+    ).unwrap();
+    let out = clido_bin()
+        .env("CLIDO_CONFIG", &config_path)
+        .env("NO_COLOR", "1")
+        .args(["--output-format", "stream-json", "say hello"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::fs::remove_dir(&tmp);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Find the result line (last non-empty JSON line).
+    let last: serde_json::Value = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("expected at least one JSON line on stdout");
+    assert_eq!(last["type"], "result", "last line must be result");
+    assert_eq!(
+        last["schema_version"], 1,
+        "result must have schema_version=1"
+    );
+    assert!(
+        last["exit_status"].is_string(),
+        "result must have exit_status"
+    );
+    assert!(
+        last["model"].is_string(),
+        "result must have model; got: {last}"
+    );
+    assert!(last["usage"].is_object(), "result must have usage object");
+    assert!(
+        last["usage"]["input_tokens"].is_number(),
+        "usage must have input_tokens"
+    );
+    assert!(
+        last["usage"]["output_tokens"].is_number(),
+        "usage must have output_tokens"
+    );
+    // Find the init line (first non-empty JSON line).
+    let first: serde_json::Value = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .next()
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("expected init line");
+    assert_eq!(first["type"], "system");
+    assert_eq!(first["subtype"], "init");
+    assert!(
+        first["model"].is_string(),
+        "init line must have model field; got: {}",
+        first
+    );
+    // tools must be an array (may be non-empty now).
+    assert!(
+        first["tools"].is_array(),
+        "init line must have tools array; got: {}",
+        first
+    );
 }
 
 /// Cost footer: emit_result in text mode with nonzero cost writes footer to stderr.

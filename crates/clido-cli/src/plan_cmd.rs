@@ -35,8 +35,8 @@ fn run_plan_list(workspace_root: &Path) -> anyhow::Result<()> {
             s.task_count,
             s.done,
             s.failed,
-            if s.goal.len() > 60 {
-                format!("{}…", &s.goal[..59])
+            if s.goal.chars().count() > 60 {
+                format!("{}…", s.goal.chars().take(59).collect::<String>())
             } else {
                 s.goal.clone()
             }

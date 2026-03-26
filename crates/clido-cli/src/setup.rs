@@ -28,6 +28,11 @@ use crate::ui::{setup_use_color, setup_use_rich_ui, SETUP_BANNER_ASCII};
 
 use clido_providers::ModelEntry;
 
+/// Border accent for setup text inputs — matches main TUI soft blue (`tui.rs` `TUI_SOFT_ACCENT`).
+const SETUP_INPUT_ACCENT: Color = Color::Rgb(150, 200, 255);
+
+const PROFILE_NAME_PREFIX: &str = "  Profile name: ";
+
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
 /// (display name, internal provider ID, description)
@@ -71,6 +76,75 @@ const PROVIDER_KEY_ENV: [&str; 7] = [
     "", // local: no key
 ];
 
+fn char_byte_pos(s: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| s.len())
+}
+
+fn insert_char_at_cursor(s: &mut String, cursor: &mut usize, c: char) {
+    let idx = char_byte_pos(s, *cursor);
+    s.insert(idx, c);
+    *cursor += 1;
+}
+
+fn delete_before_cursor(s: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let end = char_byte_pos(s, *cursor);
+    let start = char_byte_pos(s, *cursor - 1);
+    s.drain(start..end);
+    *cursor -= 1;
+}
+
+fn delete_at_cursor(s: &mut String, cursor: &mut usize) {
+    let len = s.chars().count();
+    if *cursor >= len {
+        return;
+    }
+    let start = char_byte_pos(s, *cursor);
+    let end = char_byte_pos(s, *cursor + 1);
+    s.drain(start..end);
+}
+
+/// Build reuse offers from profiles with plaintext `api_key` (deduped by key value).
+fn build_saved_key_catalog(
+    loaded: &clido_core::LoadedConfig,
+    exclude_profile: Option<&str>,
+) -> Vec<SavedApiKeyOffer> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    let mut keys: Vec<&String> = loaded.profiles.keys().collect();
+    keys.sort();
+    for name in keys {
+        if exclude_profile == Some(name.as_str()) {
+            continue;
+        }
+        let entry = &loaded.profiles[name];
+        let Some(ref k) = entry.api_key else {
+            continue;
+        };
+        if k.is_empty() {
+            continue;
+        }
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        out.push(SavedApiKeyOffer {
+            source_profile: name.clone(),
+            provider_id: entry.provider.clone(),
+            api_key: k.clone(),
+        });
+    }
+    out
+}
+
 /// Current config values passed to the setup wizard when re-running from TUI (/init).
 /// Each field is optional — empty string = nothing known.
 pub struct SetupPreFill {
@@ -86,6 +160,16 @@ pub struct SetupPreFill {
     pub profile_name: String,
     /// True when creating a brand-new named profile (shows ProfileName step first).
     pub is_new_profile: bool,
+    /// Plaintext API keys from other profiles (profile create / reuse flow).
+    pub saved_api_keys: Vec<SavedApiKeyOffer>,
+}
+
+/// A stored API key offered for reuse (same provider only in the UI).
+#[derive(Debug, Clone)]
+pub struct SavedApiKeyOffer {
+    pub source_profile: String,
+    pub provider_id: String,
+    pub api_key: String,
 }
 
 // ── TUI setup state ───────────────────────────────────────────────────────────
@@ -162,6 +246,21 @@ struct SetupState {
     current_credential: Option<String>,
     /// Current model ID from pre-fill (used to pre-select after model fetch).
     current_model: String,
+    /// True when wizard began with the "new profile name" step (`/profile new`).
+    started_with_profile_name: bool,
+    /// Character cursor into `input` for line editing (Unicode scalar index).
+    input_cursor: usize,
+    /// Saved keys from config (profile create); filter by provider in credential step.
+    saved_api_keys: Vec<SavedApiKeyOffer>,
+    /// When true, credential step shows ↑↓ picker for `saved_api_keys` (non-local).
+    credential_pick_active: bool,
+    credential_pick_index: usize,
+}
+
+/// Result of the interactive setup TUI: finished configuration or user cancelled.
+enum SetupOutcome {
+    Cancelled,
+    Finished(Box<SetupState>),
 }
 
 /// Which field is being edited in the roles step.
@@ -216,6 +315,11 @@ impl SetupState {
             error: None,
             current_credential: None,
             current_model: String::new(),
+            started_with_profile_name: false,
+            input_cursor: 0,
+            saved_api_keys: Vec::new(),
+            credential_pick_active: false,
+            credential_pick_index: 0,
         }
     }
 
@@ -276,7 +380,36 @@ impl SetupState {
             error: None,
             current_credential,
             current_model: pre_fill.model,
+            started_with_profile_name: pre_fill.is_new_profile,
+            input_cursor: 0,
+            saved_api_keys: pre_fill.saved_api_keys.clone(),
+            credential_pick_active: false,
+            credential_pick_index: 0,
         }
+    }
+
+    fn clear_typed_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    fn init_credential_step(&mut self) {
+        self.clear_typed_input();
+        if self.is_local() {
+            self.credential_pick_active = false;
+            return;
+        }
+        let n = self.saved_keys_for_current_provider().len();
+        self.credential_pick_active = n > 0;
+        self.credential_pick_index = 0;
+    }
+
+    fn saved_keys_for_current_provider(&self) -> Vec<&SavedApiKeyOffer> {
+        let pid = PROVIDERS[self.provider].1;
+        self.saved_api_keys
+            .iter()
+            .filter(|o| o.provider_id == pid)
+            .collect()
     }
 
     fn is_local(&self) -> bool {
@@ -437,18 +570,33 @@ fn draw_setup(f: &mut Frame, s: &SetupState) {
         );
     } else {
         let hint = match s.step {
-            SetupStep::Provider => "  ↑↓ navigate   Enter select   Ctrl+C cancel",
-            SetupStep::Credential => "  Enter confirm   Backspace edit   Esc back   Ctrl+C cancel",
+            SetupStep::ProfileName => "  ←→ move   Home/End   Enter confirm   Esc cancel wizard   Ctrl+C cancel",
+            SetupStep::Provider => {
+                if s.started_with_profile_name {
+                    "  ↑↓ navigate   Enter select   Esc edit name   Ctrl+C cancel"
+                } else {
+                    "  ↑↓ navigate   Enter select   Esc cancel wizard   Ctrl+C cancel"
+                }
+            }
+            SetupStep::Credential => {
+                if s.credential_pick_active && !s.saved_keys_for_current_provider().is_empty() {
+                    "  ↑↓ saved key   Enter use   n type new   Esc back   Ctrl+C cancel"
+                } else {
+                    "  Enter confirm   ←→ edit   Esc back   Ctrl+C cancel"
+                }
+            }
             SetupStep::FetchingModels | SetupStep::FetchingWorkerModels | SetupStep::FetchingReviewerModels => "",
             SetupStep::Model if s.model_list_mode() => {
                 "  ↑↓ navigate   Enter select   type to search   Backspace erase   Esc back   Ctrl+C cancel"
             }
-            SetupStep::SubAgentIntro => "  ↑↓ navigate   Enter select   Ctrl+C cancel",
+            SetupStep::SubAgentIntro => {
+                "  ↑↓ navigate   Enter select   Esc back   Ctrl+C cancel"
+            }
             SetupStep::WorkerProvider | SetupStep::ReviewerProvider => {
                 "  ↑↓ navigate   Enter select   Esc skip this sub-agent   Ctrl+C cancel"
             }
             SetupStep::WorkerCredential | SetupStep::ReviewerCredential => {
-                "  Enter confirm   Backspace edit   Esc skip sub-agent   Ctrl+C cancel"
+                "  Enter confirm   ←→ edit   Esc skip sub-agent   Ctrl+C cancel"
             }
             SetupStep::WorkerModel if s.worker_model_list_mode() => {
                 "  ↑↓ navigate   Enter select   type to search   Backspace erase   Esc back   Ctrl+C cancel"
@@ -483,11 +631,12 @@ fn draw_profile_name(f: &mut Frame, area: Rect, s: &SetupState) {
 
     let [_pad, input_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-    let display = format!("  {}", s.input);
-    let cursor_col = input_area.x + 2 + s.input.chars().count() as u16;
+    let prefix_w = PROFILE_NAME_PREFIX.chars().count() as u16;
+    let cc = s.input_cursor.min(s.input.chars().count()) as u16;
+    let cursor_col = input_area.x + prefix_w + cc;
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  Profile name: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(PROFILE_NAME_PREFIX, Style::default().fg(Color::DarkGray)),
             Span::styled(
                 s.input.clone(),
                 Style::default()
@@ -497,8 +646,7 @@ fn draw_profile_name(f: &mut Frame, area: Rect, s: &SetupState) {
         ])),
         input_area,
     );
-    let _ = display;
-    f.set_cursor_position((cursor_col, input_area.y));
+    f.set_cursor_position((cursor_col, input_area.y + 1));
 }
 
 fn draw_provider(f: &mut Frame, area: Rect, s: &SetupState) {
@@ -554,6 +702,98 @@ fn draw_provider(f: &mut Frame, area: Rect, s: &SetupState) {
 }
 
 fn draw_credential(f: &mut Frame, area: Rect, s: &SetupState) {
+    let (pname, _, _) = PROVIDERS[s.provider];
+    let offers = s.saved_keys_for_current_provider();
+
+    if s.is_local() {
+        let [info_area, input_area, _] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::from(vec![
+                    Span::raw("  Provider: "),
+                    Span::styled(
+                        pname.to_string(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ]),
+            info_area,
+        );
+        draw_text_input(f, input_area, " Base URL ", &s.input, s.input_cursor, false);
+        return;
+    }
+
+    if s.credential_pick_active && !offers.is_empty() {
+        let [info_area, pick_area, _] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::from(vec![
+                    Span::raw("  Provider: "),
+                    Span::styled(
+                        pname.to_string(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ]),
+            info_area,
+        );
+        let mut lines: Vec<Line> = vec![
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  Reuse a saved key", Style::default().fg(Color::DarkGray)),
+                Span::styled("  (↑↓  Enter  n=new)", Style::default().fg(Color::DarkGray)),
+            ]),
+        ];
+        for (i, o) in offers.iter().enumerate() {
+            let mark = if i == s.credential_pick_index {
+                Span::styled(
+                    " ▶ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("   ")
+            };
+            let preview = anonymize_key(&o.api_key);
+            let fg = if i == s.credential_pick_index {
+                Color::White
+            } else {
+                Color::DarkGray
+            };
+            lines.push(Line::from(vec![
+                mark,
+                Span::styled(
+                    format!("{}  (profile \"{}\")", preview, o.source_profile),
+                    Style::default().fg(fg),
+                ),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        let block = Block::default()
+            .title(" Saved keys ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SETUP_INPUT_ACCENT));
+        f.render_widget(Paragraph::new(lines).block(block), pick_area);
+        return;
+    }
+
     let [info_area, input_area, _] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(3),
@@ -561,7 +801,6 @@ fn draw_credential(f: &mut Frame, area: Rect, s: &SetupState) {
     ])
     .areas(area);
 
-    let (pname, _, _) = PROVIDERS[s.provider];
     f.render_widget(
         Paragraph::new(vec![
             Line::raw(""),
@@ -578,39 +817,39 @@ fn draw_credential(f: &mut Frame, area: Rect, s: &SetupState) {
         info_area,
     );
 
-    if s.is_local() {
-        draw_text_input(f, input_area, " Base URL ", &s.input, false);
-    } else {
-        let title = format!(" {} ", s.key_env());
-        let masked: String = s.input.chars().map(|_| '•').collect();
-        let display = if s.input.is_empty() {
-            let placeholder = if let Some(ref k) = s.current_credential {
-                let masked_key: String = k
-                    .chars()
-                    .enumerate()
-                    .map(|(i, c)| if i < 4 || i + 4 >= k.len() { c } else { '•' })
-                    .collect();
-                format!(" Enter to keep: {}", masked_key)
-            } else {
-                " paste key here".to_string()
-            };
-            Line::from(vec![Span::styled(
-                placeholder,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )])
+    let title = format!(" {} ", s.key_env());
+    let masked: String = s.input.chars().map(|_| '•').collect();
+    let display = if s.input.is_empty() {
+        let placeholder = if let Some(ref k) = s.current_credential {
+            let masked_key: String = k
+                .chars()
+                .enumerate()
+                .map(|(i, c)| if i < 4 || i + 4 >= k.len() { c } else { '•' })
+                .collect();
+            format!(" Enter to keep: {}", masked_key)
         } else {
-            Line::from(vec![Span::styled(
-                format!(" {}", masked),
-                Style::default().fg(Color::White),
-            )])
+            " paste key here".to_string()
         };
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue));
-        f.render_widget(Paragraph::new(display).block(block), input_area);
+        Line::from(vec![Span::styled(
+            placeholder,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )])
+    } else {
+        Line::from(vec![Span::styled(
+            format!(" {}", masked),
+            Style::default().fg(Color::White),
+        )])
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SETUP_INPUT_ACCENT));
+    f.render_widget(Paragraph::new(display).block(block), input_area);
+    if !s.input.is_empty() {
+        let cc = s.input_cursor.min(s.input.chars().count()) as u16;
+        f.set_cursor_position((input_area.x + 2 + cc, input_area.y + 1));
     }
 }
 
@@ -818,15 +1057,22 @@ fn draw_model(f: &mut Frame, area: Rect, s: &SetupState) {
         } else {
             " Model ID "
         };
-        draw_text_input(f, list_area, title, &s.input, false);
+        draw_text_input(f, list_area, title, &s.input, s.input_cursor, false);
     }
 }
 
-fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, _masked: bool) {
+fn draw_text_input(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    value: &str,
+    cursor: usize,
+    _masked: bool,
+) {
     let block = Block::default()
         .title(title.to_string())
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(Style::default().fg(SETUP_INPUT_ACCENT));
     let display = if value.is_empty() {
         Line::from(vec![Span::styled(
             " ",
@@ -836,7 +1082,8 @@ fn draw_text_input(f: &mut Frame, area: Rect, title: &str, value: &str, _masked:
         Line::from(format!(" {}", value))
     };
     f.render_widget(Paragraph::new(display).block(block), area);
-    f.set_cursor_position((area.x + 2 + value.chars().count() as u16, area.y + 1));
+    let cc = cursor.min(value.chars().count()) as u16;
+    f.set_cursor_position((area.x + 2 + cc, area.y + 1));
 }
 
 /// Options shown on the sub-agent intro screen.
@@ -1047,8 +1294,12 @@ fn draw_subagent_credential(f: &mut Frame, area: Rect, s: &SetupState, is_review
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(Style::default().fg(SETUP_INPUT_ACCENT));
     f.render_widget(Paragraph::new(display).block(block), input_area);
+    if !s.input.is_empty() {
+        let cc = s.input_cursor.min(s.input.chars().count()) as u16;
+        f.set_cursor_position((input_area.x + 2 + cc, input_area.y + 1));
+    }
 }
 
 fn draw_worker_model(f: &mut Frame, area: Rect, s: &SetupState) {
@@ -1248,7 +1499,7 @@ fn draw_subagent_model(f: &mut Frame, area: Rect, s: &SetupState, is_reviewer: b
             ])),
             info_area,
         );
-        draw_text_input(f, list_area, " Model ID ", &s.input, false);
+        draw_text_input(f, list_area, " Model ID ", &s.input, s.input_cursor, false);
     }
 }
 
@@ -1257,7 +1508,7 @@ fn draw_subagent_model(f: &mut Frame, area: Rect, s: &SetupState, is_reviewer: b
 fn setup_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     pre_fill: Option<SetupPreFill>,
-) -> Result<SetupState, anyhow::Error> {
+) -> Result<SetupOutcome, anyhow::Error> {
     let mut s = match pre_fill {
         Some(pf) => SetupState::new_with_prefill(pf),
         None => SetupState::new(),
@@ -1297,7 +1548,7 @@ fn setup_event_loop(
                 }
             }
             s.model_search.clear();
-            s.input.clear();
+            s.clear_typed_input();
             s.step = SetupStep::Model;
             continue;
         }
@@ -1322,7 +1573,7 @@ fn setup_event_loop(
             s.worker_model_cursor = 0;
             s.worker_model_scroll = 0;
             s.worker_model_search.clear();
-            s.input.clear();
+            s.clear_typed_input();
             s.step = SetupStep::WorkerModel;
             continue;
         }
@@ -1347,7 +1598,7 @@ fn setup_event_loop(
             s.reviewer_model_cursor = 0;
             s.reviewer_model_scroll = 0;
             s.reviewer_model_search.clear();
-            s.input.clear();
+            s.clear_typed_input();
             s.step = SetupStep::ReviewerModel;
             continue;
         }
@@ -1357,11 +1608,11 @@ fn setup_event_loop(
         }
 
         if let Event::Key(key) = event::read()? {
-            // Ctrl+C / Ctrl+Q → cancel
+            // Ctrl+C / Ctrl+Q → cancel wizard (same as Esc on first screens)
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('q'))
             {
-                return Err(anyhow::anyhow!("Setup cancelled."));
+                return Ok(SetupOutcome::Cancelled);
             }
 
             s.error = None;
@@ -1369,6 +1620,9 @@ fn setup_event_loop(
             match s.step {
                 // ── Profile name input (new named profiles only) ──────────
                 SetupStep::ProfileName => match key.code {
+                    KeyCode::Esc => {
+                        return Ok(SetupOutcome::Cancelled);
+                    }
                     KeyCode::Enter => {
                         let name = s.input.trim().to_string();
                         if name.is_empty() {
@@ -1378,21 +1632,49 @@ fn setup_event_loop(
                             s.error = Some("Profile name must not contain spaces or '/'".into());
                         } else {
                             s.profile_name = name;
-                            s.input.clear();
+                            s.clear_typed_input();
                             s.step = SetupStep::Provider;
                         }
                     }
                     KeyCode::Backspace => {
-                        s.input.pop();
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Delete => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End => {
+                        s.input_cursor = s.input.chars().count();
                     }
                     KeyCode::Char(c) => {
-                        s.input.push(c);
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
                     }
                     _ => {}
                 },
 
                 // ── Provider selection ────────────────────────────────────
                 SetupStep::Provider => match key.code {
+                    KeyCode::Esc => {
+                        if s.started_with_profile_name {
+                            s.step = SetupStep::ProfileName;
+                            s.input.clone_from(&s.profile_name);
+                            s.input_cursor = s.input.chars().count();
+                        } else {
+                            return Ok(SetupOutcome::Cancelled);
+                        }
+                    }
                     KeyCode::Up => {
                         if s.provider_cursor > 0 {
                             s.provider_cursor -= 1;
@@ -1405,7 +1687,7 @@ fn setup_event_loop(
                     }
                     KeyCode::Enter => {
                         s.provider = s.provider_cursor;
-                        s.input.clear();
+                        s.init_credential_step();
                         s.step = SetupStep::Credential;
                     }
                     _ => {}
@@ -1413,11 +1695,29 @@ fn setup_event_loop(
 
                 // ── Credential input ──────────────────────────────────────
                 SetupStep::Credential => match key.code {
+                    KeyCode::Esc => {
+                        s.step = SetupStep::Provider;
+                        s.credential_pick_active = false;
+                        s.clear_typed_input();
+                    }
                     KeyCode::Enter => {
+                        if s.credential_pick_active {
+                            let offers = s.saved_keys_for_current_provider();
+                            if offers.is_empty() {
+                                s.credential_pick_active = false;
+                                continue;
+                            }
+                            let idx = s.credential_pick_index.min(offers.len().saturating_sub(1));
+                            s.credential = offers[idx].api_key.clone();
+                            s.clear_typed_input();
+                            s.step = SetupStep::FetchingModels;
+                            s.needs_fetch = true;
+                            continue;
+                        }
                         if !s.is_local() && s.input.is_empty() {
                             if let Some(k) = s.current_credential.clone() {
                                 s.credential = k;
-                                s.input.clear();
+                                s.clear_typed_input();
                                 s.step = SetupStep::FetchingModels;
                                 s.needs_fetch = true;
                             } else {
@@ -1427,20 +1727,50 @@ fn setup_event_loop(
                             }
                         } else {
                             s.credential = s.input.clone();
-                            s.input.clear();
+                            s.clear_typed_input();
                             s.step = SetupStep::FetchingModels;
                             s.needs_fetch = true;
                         }
                     }
-                    KeyCode::Backspace => {
-                        s.input.pop();
+                    KeyCode::Up if s.credential_pick_active => {
+                        if s.credential_pick_index > 0 {
+                            s.credential_pick_index -= 1;
+                        }
                     }
-                    KeyCode::Esc => {
-                        s.step = SetupStep::Provider;
-                        s.input.clear();
+                    KeyCode::Down if s.credential_pick_active => {
+                        let max = s.saved_keys_for_current_provider().len().saturating_sub(1);
+                        if s.credential_pick_index < max {
+                            s.credential_pick_index += 1;
+                        }
                     }
-                    KeyCode::Char(c) => {
-                        s.input.push(c);
+                    KeyCode::Char('n') if s.credential_pick_active => {
+                        s.credential_pick_active = false;
+                        s.clear_typed_input();
+                    }
+                    KeyCode::Backspace if !s.credential_pick_active => {
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Delete if !s.credential_pick_active => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left if !s.credential_pick_active => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right if !s.credential_pick_active => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home if !s.credential_pick_active => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End if !s.credential_pick_active => {
+                        s.input_cursor = s.input.chars().count();
+                    }
+                    KeyCode::Char(c) if !s.credential_pick_active => {
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
                     }
                     _ => {}
                 },
@@ -1475,7 +1805,7 @@ fn setup_event_loop(
                             if s.model_cursor == filtered.len() {
                                 // "Custom…" selected
                                 s.custom_model = true;
-                                s.input.clear();
+                                s.clear_typed_input();
                             } else if s.model_cursor < filtered.len() {
                                 let entry = filtered[s.model_cursor];
                                 if !entry.available {
@@ -1502,6 +1832,8 @@ fn setup_event_loop(
                             } else {
                                 s.step = SetupStep::Credential;
                                 s.input = s.credential.clone();
+                                s.input_cursor = s.input.chars().count();
+                                s.credential_pick_active = false;
                             }
                         }
                         KeyCode::Char(c) => {
@@ -1524,21 +1856,42 @@ fn setup_event_loop(
                         }
                     }
                     KeyCode::Backspace => {
-                        s.input.pop();
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
                     }
                     KeyCode::Esc => {
                         if !s.fetched_models.is_empty() {
                             // Back to list
                             s.custom_model = false;
-                            s.input.clear();
+                            s.clear_typed_input();
                         } else {
                             // Back to credential
                             s.step = SetupStep::Credential;
                             s.input = s.credential.clone();
+                            s.input_cursor = s.input.chars().count();
+                            s.credential_pick_active = false;
                         }
                     }
                     KeyCode::Char(c) => {
-                        s.input.push(c);
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
+                    }
+                    KeyCode::Delete => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End => {
+                        s.input_cursor = s.input.chars().count();
                     }
                     _ => {}
                 },
@@ -1603,7 +1956,7 @@ fn setup_event_loop(
                             s.worker_needs_fetch = true;
                             s.step = SetupStep::FetchingWorkerModels;
                         } else {
-                            s.input.clear();
+                            s.clear_typed_input();
                             s.step = SetupStep::WorkerCredential;
                         }
                     }
@@ -1631,11 +1984,30 @@ fn setup_event_loop(
                             s.worker_credential = s.input.clone();
                         }
                         s.worker_needs_fetch = true;
-                        s.input.clear();
+                        s.clear_typed_input();
                         s.step = SetupStep::FetchingWorkerModels;
                     }
                     KeyCode::Backspace => {
-                        s.input.pop();
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Delete => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End => {
+                        s.input_cursor = s.input.chars().count();
                     }
                     KeyCode::Esc => {
                         s.configure_worker = false;
@@ -1645,7 +2017,7 @@ fn setup_event_loop(
                         s.role_edit_field = RoleEditField::None;
                     }
                     KeyCode::Char(c) => {
-                        s.input.push(c);
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
                     }
                     _ => {}
                 },
@@ -1673,7 +2045,7 @@ fn setup_event_loop(
                             let filtered = s.filtered_worker_models();
                             if s.worker_model_cursor == filtered.len() {
                                 s.worker_custom_model = true;
-                                s.input.clear();
+                                s.clear_typed_input();
                             } else if s.worker_model_cursor < filtered.len() {
                                 let entry = filtered[s.worker_model_cursor];
                                 if !entry.available {
@@ -1736,7 +2108,7 @@ fn setup_event_loop(
                             s.error = Some("Model ID required — type a model name".into());
                         } else {
                             s.worker_model = s.input.clone();
-                            s.input.clear();
+                            s.clear_typed_input();
                             if s.configure_reviewer {
                                 s.reviewer_provider = s.provider;
                                 s.step = SetupStep::ReviewerProvider;
@@ -1748,18 +2120,37 @@ fn setup_event_loop(
                         }
                     }
                     KeyCode::Backspace => {
-                        s.input.pop();
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Delete => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End => {
+                        s.input_cursor = s.input.chars().count();
                     }
                     KeyCode::Esc => {
                         if !s.worker_fetched_models.is_empty() {
                             s.worker_custom_model = false;
-                            s.input.clear();
+                            s.clear_typed_input();
                         } else {
                             s.step = SetupStep::WorkerProvider;
                         }
                     }
                     KeyCode::Char(c) => {
-                        s.input.push(c);
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
                     }
                     _ => {}
                 },
@@ -1782,7 +2173,7 @@ fn setup_event_loop(
                             s.reviewer_needs_fetch = true;
                             s.step = SetupStep::FetchingReviewerModels;
                         } else {
-                            s.input.clear();
+                            s.clear_typed_input();
                             s.step = SetupStep::ReviewerCredential;
                         }
                     }
@@ -1809,11 +2200,30 @@ fn setup_event_loop(
                             s.reviewer_credential = s.input.clone();
                         }
                         s.reviewer_needs_fetch = true;
-                        s.input.clear();
+                        s.clear_typed_input();
                         s.step = SetupStep::FetchingReviewerModels;
                     }
                     KeyCode::Backspace => {
-                        s.input.pop();
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Delete => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End => {
+                        s.input_cursor = s.input.chars().count();
                     }
                     KeyCode::Esc => {
                         s.configure_reviewer = false;
@@ -1822,7 +2232,7 @@ fn setup_event_loop(
                         s.role_edit_field = RoleEditField::None;
                     }
                     KeyCode::Char(c) => {
-                        s.input.push(c);
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
                     }
                     _ => {}
                 },
@@ -1850,7 +2260,7 @@ fn setup_event_loop(
                             let filtered = s.filtered_reviewer_models();
                             if s.reviewer_model_cursor == filtered.len() {
                                 s.reviewer_custom_model = true;
-                                s.input.clear();
+                                s.clear_typed_input();
                             } else if s.reviewer_model_cursor < filtered.len() {
                                 let entry = filtered[s.reviewer_model_cursor];
                                 if !entry.available {
@@ -1908,25 +2318,44 @@ fn setup_event_loop(
                             s.error = Some("Model ID required — type a model name".into());
                         } else {
                             s.reviewer_model = s.input.clone();
-                            s.input.clear();
+                            s.clear_typed_input();
                             s.step = SetupStep::Roles;
                             s.role_cursor = 0;
                             s.role_edit_field = RoleEditField::None;
                         }
                     }
                     KeyCode::Backspace => {
-                        s.input.pop();
+                        delete_before_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Delete => {
+                        delete_at_cursor(&mut s.input, &mut s.input_cursor);
+                    }
+                    KeyCode::Left => {
+                        if s.input_cursor > 0 {
+                            s.input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if s.input_cursor < s.input.chars().count() {
+                            s.input_cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        s.input_cursor = 0;
+                    }
+                    KeyCode::End => {
+                        s.input_cursor = s.input.chars().count();
                     }
                     KeyCode::Esc => {
                         if !s.reviewer_fetched_models.is_empty() {
                             s.reviewer_custom_model = false;
-                            s.input.clear();
+                            s.clear_typed_input();
                         } else {
                             s.step = SetupStep::ReviewerProvider;
                         }
                     }
                     KeyCode::Char(c) => {
-                        s.input.push(c);
+                        insert_char_at_cursor(&mut s.input, &mut s.input_cursor, c);
                     }
                     _ => {}
                 },
@@ -1937,7 +2366,7 @@ fn setup_event_loop(
                         RoleEditField::None => match key.code {
                             // Tab or Ctrl+Enter: finish setup
                             KeyCode::Tab | KeyCode::BackTab => {
-                                return Ok(s);
+                                return Ok(SetupOutcome::Finished(Box::new(s)));
                             }
                             // Enter on a row: begin editing the model for that role
                             KeyCode::Enter => {
@@ -1947,7 +2376,7 @@ fn setup_event_loop(
                                     s.role_edit_field = RoleEditField::Model(s.role_cursor);
                                 } else {
                                     // Cursor on "Done" row
-                                    return Ok(s);
+                                    return Ok(SetupOutcome::Finished(Box::new(s)));
                                 }
                             }
                             KeyCode::Up => {
@@ -2395,17 +2824,7 @@ fn build_toml_impl(s: &SetupState, profile_name: Option<&str>) -> String {
 
 // ── TUI entry point ───────────────────────────────────────────────────────────
 
-fn run_tui_setup_blocking(
-    pre_fill: Option<SetupPreFill>,
-) -> Result<(PathBuf, String), anyhow::Error> {
-    let config_path = if let Ok(p) = std::env::var("CLIDO_CONFIG") {
-        PathBuf::from(p)
-    } else {
-        let dir = directories::ProjectDirs::from("", "", "clido")
-            .ok_or_else(|| CliError::Usage("Could not determine config directory.".into()))?;
-        dir.config_dir().join("config.toml")
-    };
-
+fn run_tui_setup_blocking(pre_fill: Option<SetupPreFill>) -> Result<SetupOutcome, anyhow::Error> {
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(std::io::stdout());
@@ -2417,10 +2836,10 @@ fn run_tui_setup_blocking(
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
 
-    result.map(|state| (config_path, build_full_config_toml(&state)))
+    result
 }
 
-async fn run_tui_setup(pre_fill: Option<SetupPreFill>) -> Result<(PathBuf, String), anyhow::Error> {
+async fn run_tui_setup(pre_fill: Option<SetupPreFill>) -> Result<SetupOutcome, anyhow::Error> {
     tokio::task::spawn_blocking(move || run_tui_setup_blocking(pre_fill))
         .await
         .map_err(|e| anyhow::anyhow!("setup join: {}", e))?
@@ -2595,6 +3014,17 @@ pub async fn run_reinit(pre_fill: SetupPreFill) -> Result<(), anyhow::Error> {
 
 /// Create a new named profile via the guided wizard.
 pub async fn run_create_profile(initial_name: Option<String>) -> Result<(), anyhow::Error> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let saved_api_keys = clido_core::load_config(&cwd)
+        .ok()
+        .map(|c| {
+            let ex = initial_name
+                .as_deref()
+                .filter(|n| c.profiles.contains_key(*n));
+            build_saved_key_catalog(&c, ex)
+        })
+        .unwrap_or_default();
+
     let pre_fill = SetupPreFill {
         provider: String::new(),
         api_key: String::new(),
@@ -2602,20 +3032,19 @@ pub async fn run_create_profile(initial_name: Option<String>) -> Result<(), anyh
         roles: Vec::new(),
         profile_name: initial_name.clone().unwrap_or_default(),
         is_new_profile: initial_name.is_none(), // show ProfileName step if no name given
+        saved_api_keys,
     };
 
-    let config_path = if let Ok(p) = std::env::var("CLIDO_CONFIG") {
-        std::path::PathBuf::from(p)
-    } else {
-        let dir = directories::ProjectDirs::from("", "", "clido")
-            .ok_or_else(|| CliError::Usage("Could not determine config directory.".into()))?;
-        dir.config_dir().join("config.toml")
-    };
+    let config_path = setup_default_config_path()?;
 
     let state = if setup_use_rich_ui() {
-        tokio::task::spawn_blocking(move || run_tui_setup_state_blocking(Some(pre_fill)))
+        match tokio::task::spawn_blocking(move || run_tui_setup_state_blocking(Some(pre_fill)))
             .await
             .map_err(|e| anyhow::anyhow!("setup join: {}", e))??
+        {
+            SetupOutcome::Cancelled => return Ok(()),
+            SetupOutcome::Finished(s) => *s,
+        }
     } else {
         return Err(anyhow::anyhow!(
             "Profile creation requires an interactive terminal. Run in a TTY."
@@ -2677,6 +3106,12 @@ pub async fn run_edit_profile(
         })
         .unwrap_or_default();
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let saved_api_keys = clido_core::load_config(&cwd)
+        .ok()
+        .map(|c| build_saved_key_catalog(&c, Some(name.as_str())))
+        .unwrap_or_default();
+
     let pre_fill = SetupPreFill {
         provider: entry.provider.clone(),
         api_key,
@@ -2684,20 +3119,19 @@ pub async fn run_edit_profile(
         roles: Vec::new(),
         profile_name: name.clone(),
         is_new_profile: false,
+        saved_api_keys,
     };
 
-    let config_path = if let Ok(p) = std::env::var("CLIDO_CONFIG") {
-        std::path::PathBuf::from(p)
-    } else {
-        let dir = directories::ProjectDirs::from("", "", "clido")
-            .ok_or_else(|| CliError::Usage("Could not determine config directory.".into()))?;
-        dir.config_dir().join("config.toml")
-    };
+    let config_path = setup_default_config_path()?;
 
     let state = if setup_use_rich_ui() {
-        tokio::task::spawn_blocking(move || run_tui_setup_state_blocking(Some(pre_fill)))
+        match tokio::task::spawn_blocking(move || run_tui_setup_state_blocking(Some(pre_fill)))
             .await
             .map_err(|e| anyhow::anyhow!("setup join: {}", e))??
+        {
+            SetupOutcome::Cancelled => return Ok(()),
+            SetupOutcome::Finished(s) => *s,
+        }
     } else {
         return Err(anyhow::anyhow!(
             "Profile editing requires an interactive terminal. Run in a TTY."
@@ -2797,10 +3231,10 @@ fn state_to_profile_entry(s: &SetupState) -> clido_core::ProfileEntry {
     }
 }
 
-/// Run the TUI setup and return the final `SetupState` (for profile create/edit callers).
+/// Run the TUI setup and return finished state or cancellation (profile create/edit).
 fn run_tui_setup_state_blocking(
     pre_fill: Option<SetupPreFill>,
-) -> Result<SetupState, anyhow::Error> {
+) -> Result<SetupOutcome, anyhow::Error> {
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(std::io::stdout());
@@ -2815,12 +3249,27 @@ fn run_tui_setup_state_blocking(
     result
 }
 
+fn setup_default_config_path() -> Result<PathBuf, anyhow::Error> {
+    if let Ok(p) = std::env::var("CLIDO_CONFIG") {
+        Ok(PathBuf::from(p))
+    } else {
+        let dir = directories::ProjectDirs::from("", "", "clido")
+            .ok_or_else(|| CliError::Usage("Could not determine config directory.".into()))?;
+        Ok(dir.config_dir().join("config.toml"))
+    }
+}
+
 async fn write_setup_config(
     use_stdout: bool,
     pre_fill: Option<SetupPreFill>,
 ) -> Result<(), anyhow::Error> {
     let (config_path, toml) = if setup_use_rich_ui() {
-        run_tui_setup(pre_fill).await?
+        match run_tui_setup(pre_fill).await? {
+            SetupOutcome::Cancelled => return Ok(()),
+            SetupOutcome::Finished(state) => {
+                (setup_default_config_path()?, build_full_config_toml(&state))
+            }
+        }
     } else {
         tokio::task::spawn_blocking(|| run_interactive_setup_blocking(None))
             .await
@@ -2863,6 +3312,27 @@ async fn write_setup_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_name_prefix_matches_draw_constant() {
+        assert_eq!(PROFILE_NAME_PREFIX, "  Profile name: ");
+    }
+
+    #[test]
+    fn insert_and_delete_at_cursor_utf8() {
+        let mut s = "aéb".to_string();
+        let mut c = 1;
+        insert_char_at_cursor(&mut s, &mut c, 'x');
+        assert_eq!(s, "axéb");
+        assert_eq!(c, 2);
+        delete_before_cursor(&mut s, &mut c);
+        assert_eq!(s, "aéb");
+        assert_eq!(c, 1);
+        let mut c = 2;
+        delete_at_cursor(&mut s, &mut c);
+        assert_eq!(s, "aé");
+        assert_eq!(c, 2);
+    }
 
     #[test]
     fn anonymize_key_short_returns_dots() {

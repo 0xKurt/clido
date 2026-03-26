@@ -614,6 +614,7 @@ name = "clido-providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "clido-core",
  "futures",
  "reqwest",

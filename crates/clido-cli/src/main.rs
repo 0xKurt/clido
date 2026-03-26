@@ -90,7 +90,41 @@ async fn main() {
                 tracing_subscriber::EnvFilter::new("info")
             }
         });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // In TUI mode the alternate screen owns the terminal; writing to stderr
+    // corrupts the display. Redirect logs to a file instead.
+    let tui_mode = !cli.print
+        && cli.prompt_str().is_empty()
+        && sessions::is_stdin_tty()
+        && cli.output_format == "text"
+        && io::stdout().is_terminal();
+    if tui_mode {
+        if let Some(log_path) = directories::ProjectDirs::from("", "", "clido")
+            .map(|d| d.config_dir().join("clido.log"))
+        {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .init();
+            } else {
+                tracing_subscriber::fmt()
+                    .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
+                    .init();
+            }
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
+                .init();
+        }
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     let exit = match dispatch(cli).await {
         Ok(()) => 0,
@@ -152,6 +186,15 @@ fn config_ready_for_use(cli: &cli::Cli, workspace_root: &std::path::Path) -> boo
 }
 
 async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
+    // --input-format stream-json is a V2 feature (SDK subprocess integration).
+    // Error early so users get a clear message instead of silent ignore.
+    if cli.input_format == "stream-json" {
+        return Err(CliError::Usage(
+            "--input-format stream-json is not yet supported in V1. Use V2 or later, or pipe a plain-text prompt via stdin.".into(),
+        )
+        .into());
+    }
+
     match &cli.subcommand {
         Some(cli::Subcommand::Version) => {
             println!("clido {}", VERSION);

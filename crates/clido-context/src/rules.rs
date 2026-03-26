@@ -86,6 +86,9 @@ fn global_rules_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "clido").map(|d| d.config_dir().join("rules.md"))
 }
 
+/// Max characters allowed per rules file (including imports). ~6000 tokens at 4 chars/token.
+const MAX_RULES_CHARS: usize = 24_000;
+
 /// Load a rules file, processing import directives. Returns None if the file cannot be read.
 fn load_rules_file(path: &Path) -> Option<RulesFile> {
     let raw = std::fs::read_to_string(path).ok()?;
@@ -93,6 +96,22 @@ fn load_rules_file(path: &Path) -> Option<RulesFile> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     seen.insert(canonical);
     let content = process_imports(&raw, path, &mut seen, 0);
+    // Enforce size cap to prevent unbounded system prompt growth from large rules files.
+    let content = if content.chars().count() > MAX_RULES_CHARS {
+        tracing::warn!(
+            path = %path.display(),
+            limit = MAX_RULES_CHARS,
+            "rules file exceeds {} chars; truncating to prevent context overflow",
+            MAX_RULES_CHARS
+        );
+        let truncated: String = content.chars().take(MAX_RULES_CHARS).collect();
+        format!(
+            "{}\n<!-- clido: rules file truncated at {} chars -->\n",
+            truncated, MAX_RULES_CHARS
+        )
+    } else {
+        content
+    };
     Some(RulesFile {
         path: path.to_path_buf(),
         content,

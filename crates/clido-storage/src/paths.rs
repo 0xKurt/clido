@@ -3,7 +3,15 @@
 use std::path::{Path, PathBuf};
 
 /// Data directory (e.g. ~/.local/share/clido on Linux).
+///
+/// Overridden by `CLIDO_DATA_DIR` if set, e.g.:
+/// `CLIDO_DATA_DIR=/mnt/fast/clido clido <prompt>`
 pub fn data_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(val) = std::env::var("CLIDO_DATA_DIR") {
+        if !val.is_empty() {
+            return Ok(PathBuf::from(val));
+        }
+    }
     let dir = directories::ProjectDirs::from("", "", "clido")
         .ok_or_else(|| anyhow::anyhow!("Could not determine project data directory"))?;
     Ok(dir.data_dir().to_path_buf())
@@ -29,7 +37,15 @@ fn sanitize_project_path(project_path: &Path) -> String {
 }
 
 /// Session directory for a project: `{data_dir}/sessions/{sanitized_project_path}`.
+///
+/// Overridden by `CLIDO_SESSION_DIR` if set. When set, all sessions for all
+/// projects share that single directory (no per-project subdirectory is appended).
 pub fn session_dir_for_project(project_path: &Path) -> anyhow::Result<PathBuf> {
+    if let Ok(val) = std::env::var("CLIDO_SESSION_DIR") {
+        if !val.is_empty() {
+            return Ok(PathBuf::from(val));
+        }
+    }
     let base = data_dir()?;
     let sanitized = sanitize_project_path(project_path);
     Ok(base.join("sessions").join(sanitized))
@@ -91,15 +107,45 @@ mod tests {
 
     #[test]
     fn session_dir_for_project_ends_with_sanitized_path() {
+        // Unset env override so we hit the default XDG path.
+        std::env::remove_var("CLIDO_DATA_DIR");
+        std::env::remove_var("CLIDO_SESSION_DIR");
         let p = Path::new("/tmp/myproject");
         let dir = session_dir_for_project(p).unwrap();
-        // Should end with sessions/...
         let dir_str = dir.to_string_lossy().to_string();
         assert!(
             dir_str.contains("sessions"),
             "expected 'sessions' in path: {}",
             dir_str
         );
+    }
+
+    #[test]
+    fn clido_data_dir_env_overrides_default() {
+        std::env::set_var("CLIDO_DATA_DIR", "/tmp/clido-test-data");
+        std::env::remove_var("CLIDO_SESSION_DIR");
+        let d = data_dir().unwrap();
+        std::env::remove_var("CLIDO_DATA_DIR");
+        assert_eq!(d, PathBuf::from("/tmp/clido-test-data"));
+    }
+
+    #[test]
+    fn clido_session_dir_env_overrides_project_subdir() {
+        std::env::remove_var("CLIDO_DATA_DIR");
+        std::env::set_var("CLIDO_SESSION_DIR", "/tmp/clido-test-sessions");
+        let dir = session_dir_for_project(Path::new("/any/project")).unwrap();
+        std::env::remove_var("CLIDO_SESSION_DIR");
+        assert_eq!(dir, PathBuf::from("/tmp/clido-test-sessions"));
+    }
+
+    #[test]
+    fn clido_data_dir_empty_falls_back_to_default() {
+        std::env::set_var("CLIDO_DATA_DIR", "");
+        std::env::remove_var("CLIDO_SESSION_DIR");
+        // Should not error — falls back to XDG default.
+        let result = data_dir();
+        std::env::remove_var("CLIDO_DATA_DIR");
+        assert!(result.is_ok());
     }
 
     #[test]

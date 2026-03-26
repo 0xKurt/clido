@@ -58,6 +58,9 @@ pub struct AgentSection {
     /// Maximum number of checkpoints retained per session (0 = unlimited). Default: 50.
     #[serde(default = "default_max_checkpoints")]
     pub max_checkpoints_per_session: usize,
+    /// Maximum tokens the model may produce per response. None = provider default (8192).
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl Default for AgentSection {
@@ -72,6 +75,7 @@ impl Default for AgentSection {
             notify: false,
             auto_checkpoint: true,
             max_checkpoints_per_session: 50,
+            max_output_tokens: None,
         }
     }
 }
@@ -380,6 +384,10 @@ fn merge(base: ConfigFile, later: ConfigFile) -> ConfigFile {
         } else {
             base.agent.max_checkpoints_per_session
         },
+        max_output_tokens: later
+            .agent
+            .max_output_tokens
+            .or(base.agent.max_output_tokens),
     };
     let tools = ToolsSection {
         allowed: if later.tools.allowed.is_empty() {
@@ -637,6 +645,7 @@ pub fn agent_config_from_loaded(
         max_parallel_tools,
         no_rules: loaded.agent.no_rules,
         rules_file: loaded.agent.rules_file.clone(),
+        max_output_tokens: loaded.agent.max_output_tokens,
     })
 }
 

@@ -52,9 +52,10 @@ Tests: [testing-strategy-and-master-test-plan.md](testing-strategy-and-master-te
 
 ## 6. Permission model semantics
 
-- **Modes:** `Default` (prompt for state-changing tools), `AcceptAll` (no prompt; all tools allowed), `PlanOnly` (only Read, Glob, Grep; no Bash, Write, Edit).
+- **Modes:** `Default` (prompt for state-changing tools), `AcceptAll` (no prompt; all tools allowed), `PlanOnly` (only Read, Glob, Grep; no Bash, Write, Edit), `DiffReview` (show a unified diff before each Write/Edit and require approval).
 - **State-changing tools:** Write, Edit, Bash. Read, Glob, Grep are read-only.
-- **Default behavior:** For state-changing tools, the permission checker returns `AskUser`. The CLI then prompts: allow once, always for session, or deny. In non-interactive mode (`--print` or no TTY), `AskUser` is treated as deny (with a warning to stderr).
+- **Default behavior:** For state-changing tools, the permission checker returns `AskUser`. The CLI then prompts: allow once, always for session, or deny. In non-interactive mode (`--print` or no TTY), `AskUser` is treated as deny with an error message instructing the user to re-run with `--permission-mode accept-all`.
+- **DiffReview mode:** Before each Write or Edit, a unified diff of the proposed change is shown. The user may Allow, Deny, or open the proposed content in an editor (EditInEditor). Useful for reviewing LLM-generated writes before they land on disk. Enable with `--permission-mode diff-review`.
 - **Serialization:** Only one permission prompt is visible at a time (shared mutex across concurrent tool calls and subagents). No parallel stdin reads.
 - **Allow/disallow lists:** Config can restrict which tools are allowed or disallowed; see [config.md](../schemas/config.md) `[tools]`.
 
@@ -75,9 +76,10 @@ Reference: [development-plan.md](../plans/development-plan.md) Phase 3.4.2.; sec
 
 ## 8. Sandbox behavior by OS
 
-- **V1:** No OS-level sandbox. Bash runs in the same environment as the Clido process, with sensitive env vars stripped (see Phase 7.1.1). Path traversal is prevented for file tools.
-- **V2 — macOS:** When `--sandbox` is set, Bash can be wrapped in `sandbox-exec` with a restrictive profile (read/write only under cwd, no network, no access to `~/.ssh`, etc.). Note: `sandbox-exec` is deprecated on macOS 14+; behavior is best-effort.
-- **V2 — Linux:** When `--sandbox` is set, use `seccomp-bpf` to restrict syscalls in the child process, or optionally run inside a minimal Docker container if `--docker-sandbox` is set.
+- **V1 (current):** Bash runs in the same environment as the Clido process. Sensitive env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, etc.) are stripped before spawning any shell command. Path traversal is prevented for file tools. No OS-level syscall sandbox at this tier.
+- **V1.5 — `--sandbox` (macOS):** When `--sandbox` is set, Bash is wrapped in `sandbox-exec` with a profile that allows file reads, file writes only under `/tmp`, and outbound network connections. **Note:** `network-outbound` is still allowed in the current profile; this is a file-write guardrail, not full network isolation. `sandbox-exec` is also deprecated on macOS 14+; behavior is best-effort.
+- **V1.5 — `--sandbox` (Linux):** When `--sandbox` is set and `bwrap` (Bubblewrap) is installed, Bash runs inside a mount namespace with `--unshare-net` (no network). Falls back to unsandboxed with a warning if `bwrap` is not found.
+- **V2 target:** Full network isolation on macOS (drop `network-outbound` from the sandbox profile) and verified bwrap-based isolation on Linux. Docker sandbox (`--docker-sandbox`) as a future option.
 - **Windows:** Bash is not guaranteed (no POSIX shell by default). When no shell is found, BashTool returns an error. No sandbox in V1/V2 for Windows; PowerShell or sandbox options are future work.
 
 Reference: [development-plan.md](../plans/development-plan.md) Phase 7.1 and 9.5.2 (Windows).

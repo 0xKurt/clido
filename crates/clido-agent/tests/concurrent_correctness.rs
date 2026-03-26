@@ -77,6 +77,7 @@ fn test_config(model: &str) -> AgentConfig {
         use_index: false,
         no_rules: false,
         rules_file: None,
+        max_output_tokens: None,
     }
 }
 

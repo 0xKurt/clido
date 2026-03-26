@@ -19,7 +19,7 @@ use similar::TextDiff;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// The result of a permission request — what the user decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,9 +57,15 @@ pub trait AskUser: Send + Sync {
 /// Callback for observing tool calls in real time (used by the TUI to show progress).
 #[async_trait]
 pub trait EventEmitter: Send + Sync {
-    async fn on_tool_start(&self, name: &str, input: &serde_json::Value);
+    async fn on_tool_start(&self, tool_use_id: &str, name: &str, input: &serde_json::Value);
     /// Called after a tool completes. `diff` is set for Edit operations.
-    async fn on_tool_done(&self, name: &str, is_error: bool, diff: Option<String>);
+    async fn on_tool_done(
+        &self,
+        tool_use_id: &str,
+        name: &str,
+        is_error: bool,
+        diff: Option<String>,
+    );
     /// Called for any text the model emits while it's still calling tools (thinking aloud).
     /// Default impl is a no-op so existing code compiles without changes.
     async fn on_assistant_text(&self, _text: &str) {}
@@ -147,6 +153,10 @@ pub struct AgentLoop {
     hooks: Option<HooksConfig>,
     /// Optional long-term memory store for context injection.
     memory: Option<Arc<Mutex<MemoryStore>>>,
+    /// The original system prompt from config, captured at construction time.
+    /// Used as the base for memory injection so repeated turns don't accumulate
+    /// memory blocks on top of an already-injected prompt.
+    base_system_prompt: Option<String>,
     /// When true, the agent will emit a planning step on the first turn (--planner flag).
     /// The plan is purely informational: the reactive loop still drives execution.
     pub planner_mode: bool,
@@ -159,6 +169,7 @@ impl AgentLoop {
         config: AgentConfig,
         ask_user: Option<Arc<dyn AskUser>>,
     ) -> Self {
+        let base_system_prompt = config.system_prompt.clone();
         Self {
             provider,
             tools,
@@ -175,6 +186,7 @@ impl AgentLoop {
             hooks: None,
             memory: None,
             planner_mode: false,
+            base_system_prompt,
         }
     }
 
@@ -192,6 +204,7 @@ impl AgentLoop {
         history: Vec<Message>,
         ask_user: Option<Arc<dyn AskUser>>,
     ) -> Self {
+        let base_system_prompt = config.system_prompt.clone();
         Self {
             provider,
             tools,
@@ -208,6 +221,7 @@ impl AgentLoop {
             hooks: None,
             memory: None,
             planner_mode: false,
+            base_system_prompt,
         }
     }
 
@@ -265,9 +279,11 @@ impl AgentLoop {
             .map(|e| format!("- {}", e.content))
             .collect::<Vec<_>>()
             .join("\n");
+        // Always inject relative to the original system prompt captured at construction,
+        // not config.system_prompt which may already contain injected memories from a
+        // prior turn and would cause unbounded growth across multi-turn sessions.
         let base = self
-            .config
-            .system_prompt
+            .base_system_prompt
             .as_deref()
             .unwrap_or("You are a helpful coding assistant.");
         Some(format!("{}\n\n[Relevant memories]\n{}", base, memory_text))
@@ -319,6 +335,16 @@ impl AgentLoop {
     /// Make a single LLM completion call with no tools — used for planning.
     /// Returns the first text block from the response, or an error.
     pub async fn complete_simple(&self, prompt: &str) -> clido_core::Result<String> {
+        self.complete_simple_with_usage(prompt)
+            .await
+            .map(|(text, _)| text)
+    }
+
+    /// Like [`complete_simple`](Self::complete_simple) but also returns provider token usage.
+    pub async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+    ) -> clido_core::Result<(String, clido_core::Usage)> {
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -337,7 +363,7 @@ impl AgentLoop {
                 }
             })
             .unwrap_or_default();
-        Ok(text)
+        Ok((text, response.usage))
     }
 
     /// Continue from existing history (resume). Does not push a new user message; runs the loop until EndTurn or max_turns.
@@ -477,8 +503,8 @@ impl AgentLoop {
 
                     let outputs: Vec<(ToolOutput, u64)> = if all_read_only && tool_uses.len() > 1 {
                         if let Some(ref e) = self.emit {
-                            for (_, name, input) in &tool_uses {
-                                e.on_tool_start(name, input).await;
+                            for (id, name, input) in &tool_uses {
+                                e.on_tool_start(id, name, input).await;
                             }
                         }
                         for (_, name, input) in &tool_uses {
@@ -501,8 +527,8 @@ impl AgentLoop {
                         let results = self.execute_tool_batch(&tool_uses).await;
                         let batch_ms = t0.elapsed().as_millis() as u64;
                         if let Some(ref e) = self.emit {
-                            for ((_, name, _), output) in tool_uses.iter().zip(results.iter()) {
-                                e.on_tool_done(name, output.is_error, output.diff.clone())
+                            for ((id, name, _), output) in tool_uses.iter().zip(results.iter()) {
+                                e.on_tool_done(id, name, output.is_error, output.diff.clone())
                                     .await;
                             }
                         }
@@ -539,9 +565,9 @@ impl AgentLoop {
                         results.into_iter().map(|o| (o, batch_ms)).collect()
                     } else {
                         let mut outputs = Vec::new();
-                        for (_, name, input) in &tool_uses {
+                        for (id, name, input) in &tool_uses {
                             if let Some(ref e) = self.emit {
-                                e.on_tool_start(name, input).await;
+                                e.on_tool_start(id, name, input).await;
                             }
                             if let Some(ref hooks) = self.hooks {
                                 if let Some(cmd) = &hooks.pre_tool_use {
@@ -561,7 +587,7 @@ impl AgentLoop {
                             let output = self.execute_tool_maybe_gated(name, input).await;
                             let duration_ms = t0.elapsed().as_millis() as u64;
                             if let Some(ref e) = self.emit {
-                                e.on_tool_done(name, output.is_error, output.diff.clone())
+                                e.on_tool_done(id, name, output.is_error, output.diff.clone())
                                     .await;
                             }
                             self.write_audit(name, input, &output, duration_ms);
@@ -946,8 +972,8 @@ impl AgentLoop {
 
                     let outputs: Vec<(ToolOutput, u64)> = if all_read_only && tool_uses.len() > 1 {
                         if let Some(ref e) = self.emit {
-                            for (_, name, input) in &tool_uses {
-                                e.on_tool_start(name, input).await;
+                            for (id, name, input) in &tool_uses {
+                                e.on_tool_start(id, name, input).await;
                             }
                         }
                         for (_, name, input) in &tool_uses {
@@ -970,8 +996,8 @@ impl AgentLoop {
                         let results = self.execute_tool_batch(&tool_uses).await;
                         let batch_ms = t0.elapsed().as_millis() as u64;
                         if let Some(ref e) = self.emit {
-                            for ((_, name, _), output) in tool_uses.iter().zip(results.iter()) {
-                                e.on_tool_done(name, output.is_error, output.diff.clone())
+                            for ((id, name, _), output) in tool_uses.iter().zip(results.iter()) {
+                                e.on_tool_done(id, name, output.is_error, output.diff.clone())
                                     .await;
                             }
                         }
@@ -1008,9 +1034,9 @@ impl AgentLoop {
                         results.into_iter().map(|o| (o, batch_ms)).collect()
                     } else {
                         let mut outputs = Vec::new();
-                        for (_, name, input) in &tool_uses {
+                        for (id, name, input) in &tool_uses {
                             if let Some(ref e) = self.emit {
-                                e.on_tool_start(name, input).await;
+                                e.on_tool_start(id, name, input).await;
                             }
                             if let Some(ref hooks) = self.hooks {
                                 if let Some(cmd) = &hooks.pre_tool_use {
@@ -1030,7 +1056,7 @@ impl AgentLoop {
                             let output = self.execute_tool_maybe_gated(name, input).await;
                             let duration_ms = t0.elapsed().as_millis() as u64;
                             if let Some(ref e) = self.emit {
-                                e.on_tool_done(name, output.is_error, output.diff.clone())
+                                e.on_tool_done(id, name, output.is_error, output.diff.clone())
                                     .await;
                             }
                             self.write_audit(name, input, &output, duration_ms);
@@ -1150,6 +1176,16 @@ impl AgentLoop {
                                 return ToolOutput::err("User denied the tool call.".to_string());
                             }
                         }
+                    } else {
+                        // Non-interactive (no TTY / no ask_user): auto-deny state-changing tools
+                        // in Default permission mode to prevent unattended writes.
+                        // Use --permission-mode accept-all to allow writes in non-interactive mode.
+                        return ToolOutput::err(format!(
+                            "Tool '{}' requires user approval but no interactive terminal is available. \
+                             Re-run with --permission-mode accept-all to allow state-changing tools \
+                             in non-interactive mode.",
+                            name
+                        ));
                     }
                 }
             }
@@ -1173,7 +1209,7 @@ impl AgentLoop {
                             PermGrant::Allow => {}
                             PermGrant::AllowAll => {}
                             PermGrant::Deny => {
-                                return ToolOutput::ok("Write rejected by user.".to_string());
+                                return ToolOutput::err("Write rejected by user.".to_string());
                             }
                             PermGrant::EditInEditor => {
                                 // Open editor, then re-route to write the edited content
@@ -1294,31 +1330,51 @@ async fn compute_diff_for_tool(
     tool_name: &str,
     input: &serde_json::Value,
 ) -> (Option<String>, Option<String>, Option<std::path::PathBuf>) {
-    let (path_key, content_key) = match tool_name {
-        "Write" | "write" => ("file_path", "content"),
-        "Edit" | "edit" => ("file_path", "new_string"),
-        _ => return (None, None, None),
-    };
-
-    let path_str = match input.get(path_key).and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return (None, None, None),
-    };
-    let proposed = match input.get(content_key).and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return (None, None, None),
-    };
-
-    let file_path = std::path::PathBuf::from(&path_str);
-    let old_content = std::fs::read_to_string(&file_path).unwrap_or_default();
-
-    let diff = TextDiff::from_lines(old_content.as_str(), proposed.as_str())
-        .unified_diff()
-        .header(&format!("a/{}", path_str), &format!("b/{}", path_str))
-        .to_string();
-
-    let diff = if diff.is_empty() { None } else { Some(diff) };
-    (diff, Some(proposed), Some(file_path))
+    match tool_name {
+        "Write" | "write" => {
+            let path_str = match input.get("file_path").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (None, None, None),
+            };
+            let proposed = match input.get("content").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (None, None, None),
+            };
+            let file_path = std::path::PathBuf::from(&path_str);
+            let old_content = std::fs::read_to_string(&file_path).unwrap_or_default();
+            let diff = TextDiff::from_lines(old_content.as_str(), proposed.as_str())
+                .unified_diff()
+                .header(&format!("a/{}", path_str), &format!("b/{}", path_str))
+                .to_string();
+            let diff = if diff.is_empty() { None } else { Some(diff) };
+            (diff, Some(proposed), Some(file_path))
+        }
+        "Edit" | "edit" => {
+            let path_str = match input.get("file_path").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return (None, None, None),
+            };
+            let old_str = match input.get("old_string").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return (None, None, None),
+            };
+            let new_str = match input.get("new_string").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return (None, None, None),
+            };
+            let file_path = std::path::PathBuf::from(&path_str);
+            let old_content = std::fs::read_to_string(&file_path).unwrap_or_default();
+            // Apply the edit to produce the full proposed file content.
+            let proposed = old_content.replacen(old_str, new_str, 1);
+            let diff = TextDiff::from_lines(old_content.as_str(), proposed.as_str())
+                .unified_diff()
+                .header(&format!("a/{}", path_str), &format!("b/{}", path_str))
+                .to_string();
+            let diff = if diff.is_empty() { None } else { Some(diff) };
+            (diff, Some(proposed), Some(file_path))
+        }
+        _ => (None, None, None),
+    }
 }
 
 /// Open proposed content in `$EDITOR` (fallback `$VISUAL`, then `vi`),
@@ -1489,8 +1545,14 @@ async fn summarize_messages(
                     } else {
                         "Tool result"
                     };
-                    let body = if content.len() > MAX_TOOL_RESULT_CHARS {
-                        format!("{}… (truncated)", &content[..MAX_TOOL_RESULT_CHARS])
+                    let body = if content.chars().count() > MAX_TOOL_RESULT_CHARS {
+                        format!(
+                            "{}… (truncated)",
+                            content
+                                .chars()
+                                .take(MAX_TOOL_RESULT_CHARS)
+                                .collect::<String>()
+                        )
                     } else {
                         content.clone()
                     };
@@ -1545,14 +1607,26 @@ async fn summarize_messages(
     Ok(text)
 }
 
-/// Fire-and-forget hook execution (blocking, errors silently ignored).
+/// Fire-and-forget hook execution.
+///
+/// stdio is redirected to /dev/null so hook output never corrupts the TUI's
+/// alternate screen. The spawned child is not waited on — it runs detached.
+/// Zombie reaping is handled by the OS when the parent process exits.
 fn run_hook(cmd: &str, env_vars: &[(&str, &str)]) {
+    use std::process::Stdio;
     let mut command = std::process::Command::new("sh");
-    command.arg("-c").arg(cmd);
+    command
+        .arg("-c")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     for (k, v) in env_vars {
         command.env(k, v);
     }
-    let _ = command.spawn();
+    if let Err(e) = command.spawn() {
+        warn!("hook spawn failed (cmd={:?}): {}", cmd, e);
+    }
 }
 
 #[cfg(test)]
@@ -1638,6 +1712,7 @@ mod tests {
             use_index: false,
             no_rules: false,
             rules_file: None,
+            max_output_tokens: None,
         }
     }
 
@@ -2059,10 +2134,12 @@ mod tests {
         let path_str = tmp.path().to_str().unwrap().to_string();
         let input = serde_json::json!({
             "file_path": path_str,
+            "old_string": "old\n",
             "new_string": "new\n"
         });
         let (diff, content, _) = compute_diff_for_tool("Edit", &input).await;
         assert!(diff.is_some());
+        // proposed_content is the full file after applying the edit
         assert_eq!(content.unwrap(), "new\n");
     }
 
@@ -2431,7 +2508,7 @@ mod tests {
     async fn run_with_hooks_config_executes_successfully() {
         use clido_core::HooksConfig;
         let provider = Arc::new(MockProvider::new("hooked response"));
-        let mut cfg = mock_config();
+        let cfg = mock_config();
         let hooks = HooksConfig {
             pre_tool_use: Some("true".to_string()),
             post_tool_use: Some("true".to_string()),
@@ -2517,10 +2594,21 @@ mod tests {
 
         #[async_trait]
         impl EventEmitter for RecordingEmitter {
-            async fn on_tool_start(&self, name: &str, _input: &serde_json::Value) {
+            async fn on_tool_start(
+                &self,
+                _tool_use_id: &str,
+                name: &str,
+                _input: &serde_json::Value,
+            ) {
                 self.starts.lock().unwrap().push(name.to_string());
             }
-            async fn on_tool_done(&self, name: &str, _is_error: bool, _diff: Option<String>) {
+            async fn on_tool_done(
+                &self,
+                _tool_use_id: &str,
+                name: &str,
+                _is_error: bool,
+                _diff: Option<String>,
+            ) {
                 self.dones.lock().unwrap().push(name.to_string());
             }
         }

@@ -1,6 +1,6 @@
 //! Full-screen ratatui TUI: scrollable conversation + persistent input bar.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::io::{stdout, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +36,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
 use crate::image_input::ImageAttachment;
+use clido_index::RepoIndex;
+use clido_memory::MemoryStore;
 use clido_planner::{Complexity, Plan, PlanEditor, TaskStatus};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -112,10 +114,16 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "Context",
         &[
-            ("/cost", "show session cost so far"),
-            ("/tokens", "show token usage so far"),
+            ("/cost", "show cumulative session cost (TUI session)"),
+            (
+                "/tokens",
+                "show cumulative input/output tokens (TUI session)",
+            ),
             ("/compact", "compact context window now (summarise history)"),
-            ("/memory", "search long-term memory. Usage: /memory <query>"),
+            (
+                "/memory",
+                "search saved memories (FTS). Usage: /memory <query>",
+            ),
         ],
     ),
     (
@@ -166,113 +174,19 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "/copy",
                 "copy last assistant message to clipboard (OSC 52 sequence)",
             ),
-            ("/index", "show repo index stats"),
+            ("/index", "show repo index stats (or run clido index build)"),
         ],
     ),
 ];
 
-/// Flat list derived from sections — used for autocomplete and command matching.
-/// Must stay in the same order as SLASH_COMMAND_SECTIONS.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
-    // Session
-    ("/clear", "clear the conversation"),
-    ("/help", "show key bindings and all slash commands"),
-    ("/quit", "exit clido"),
-    ("/sessions", "list & resume recent sessions"),
-    ("/session", "show current session ID"),
-    (
-        "/init",
-        "re-run setup wizard — reconfigure provider, model, API key, roles",
-    ),
-    // Git
-    ("/ship", "stage → commit → push. Usage: /ship [message]"),
-    (
-        "/save",
-        "stage → commit locally, no push. Usage: /save [message]",
-    ),
-    ("/pr", "create a pull request. Usage: /pr [title]"),
-    (
-        "/branch",
-        "create + switch to a new branch. Usage: /branch <name>",
-    ),
-    ("/undo", "undo last committed change (git reset HEAD~1)"),
-    (
-        "/rollback",
-        "restore to a checkpoint. Usage: /rollback [id]",
-    ),
-    (
-        "/sync",
-        "pull --rebase from upstream, resolve conflicts if needed",
-    ),
-    // Model
-    (
-        "/models",
-        "open interactive model picker (search, filter, favorites)",
-    ),
-    ("/model", "show or switch model. Usage: /model [model-name]"),
-    ("/fast", "switch to fast (cheap) model for this session"),
-    (
-        "/smart",
-        "switch to smart (powerful) model for this session",
-    ),
-    (
-        "/role",
-        "switch to model assigned to a role. Usage: /role <name>",
-    ),
-    ("/fav", "toggle favorite on current model"),
-    (
-        "/reviewer",
-        "toggle reviewer sub-agent on/off. Usage: /reviewer [on|off]",
-    ),
-    // Context
-    ("/cost", "show session cost so far"),
-    ("/tokens", "show token usage so far"),
-    ("/compact", "compact context window now (summarise history)"),
-    ("/memory", "search long-term memory. Usage: /memory <query>"),
-    // Plan
-    (
-        "/plan",
-        "show current plan, or: /plan <task> to have agent plan before executing",
-    ),
-    ("/plan edit", "open plan editor for the current plan"),
-    ("/plan save", "save current plan to .clido/plans/"),
-    ("/plan list", "list all saved plans"),
-    // Project
-    (
-        "/agents",
-        "show current agent configuration (main, worker, reviewer)",
-    ),
-    ("/profiles", "list all profiles with active model per slot"),
-    (
-        "/profile",
-        "open profile picker — switch, create, or edit profiles",
-    ),
-    ("/profile new", "create a new profile via the guided wizard"),
-    (
-        "/profile edit",
-        "edit a profile via the guided wizard. Usage: /profile edit [name]",
-    ),
-    ("/check", "run diagnostics on current project"),
-    ("/rules", "show active project rules files (CLIDO.md)"),
-    (
-        "/settings",
-        "open settings editor (roles, default model) — changes saved to config.toml",
-    ),
-    (
-        "/image",
-        "attach an image to the next message. Usage: /image <path>",
-    ),
-    (
-        "/workdir",
-        "show or set working directory. Usage: /workdir [path]",
-    ),
-    ("/stop", "interrupt current run without sending a message"),
-    (
-        "/copy",
-        "copy last assistant message to clipboard (OSC 52 sequence)",
-    ),
-    ("/index", "show repo index stats"),
-];
+/// Flat list of all slash commands derived from SLASH_COMMAND_SECTIONS.
+/// Used for autocomplete and command matching.
+fn slash_commands() -> Vec<(&'static str, &'static str)> {
+    SLASH_COMMAND_SECTIONS
+        .iter()
+        .flat_map(|(_, cmds)| cmds.iter().copied())
+        .collect()
+}
 
 // ── Permission grant options ───────────────────────────────────────────────────
 
@@ -302,11 +216,12 @@ struct PermsState {
 
 enum AgentEvent {
     ToolStart {
+        tool_use_id: String,
         name: String,
         detail: String,
     },
     ToolDone {
-        name: String,
+        tool_use_id: String,
         is_error: bool,
         diff: Option<String>,
     },
@@ -668,16 +583,23 @@ struct TuiEmitter {
 
 #[async_trait]
 impl EventEmitter for TuiEmitter {
-    async fn on_tool_start(&self, name: &str, input: &serde_json::Value) {
+    async fn on_tool_start(&self, tool_use_id: &str, name: &str, input: &serde_json::Value) {
         let detail = format_tool_input(name, input);
         let _ = self.tx.send(AgentEvent::ToolStart {
+            tool_use_id: tool_use_id.to_string(),
             name: name.to_string(),
             detail,
         });
     }
-    async fn on_tool_done(&self, name: &str, is_error: bool, diff: Option<String>) {
+    async fn on_tool_done(
+        &self,
+        tool_use_id: &str,
+        _name: &str,
+        is_error: bool,
+        diff: Option<String>,
+    ) {
         let _ = self.tx.send(AgentEvent::ToolDone {
-            name: name.to_string(),
+            tool_use_id: tool_use_id.to_string(),
             is_error,
             diff,
         });
@@ -711,8 +633,8 @@ fn format_tool_input(name: &str, input: &serde_json::Value) -> String {
         ),
         _ => input.to_string(),
     };
-    if s.len() > 72 {
-        format!("{}…", &s[..72])
+    if s.chars().count() > 72 {
+        format!("{}…", s.chars().take(72).collect::<String>())
     } else {
         s
     }
@@ -737,8 +659,8 @@ impl AskUser for TuiAskUser {
             }
         }
 
-        let preview = if req.description.len() > 120 {
-            format!("{}…", &req.description[..120])
+        let preview = if req.description.chars().count() > 120 {
+            format!("{}…", req.description.chars().take(120).collect::<String>())
         } else {
             req.description.clone()
         };
@@ -776,6 +698,7 @@ impl AskUser for TuiAskUser {
 // ── Status strip ─────────────────────────────────────────────────────────────
 
 struct StatusEntry {
+    tool_use_id: String,
     name: String,
     detail: String,
     done: bool,
@@ -792,6 +715,7 @@ enum ChatLine {
     /// Intermediate text emitted by the model while still calling tools (dim, no label).
     Thinking(String),
     ToolCall {
+        tool_use_id: String,
         name: String,
         detail: String,
         done: bool,
@@ -823,9 +747,9 @@ struct App {
     input: String,
     cursor: usize,
     /// Current scroll offset (logical lines from top). Updated by handle_key; clamped in render.
-    scroll: u16,
+    scroll: u32,
     /// Max scroll as computed during the last render — used by handle_key to scroll up correctly.
-    max_scroll: u16,
+    max_scroll: u32,
     following: bool,
     busy: bool,
     spinner_tick: usize,
@@ -839,8 +763,8 @@ struct App {
     model_switch_tx: mpsc::UnboundedSender<String>,
     /// Channel to update tool workspace in agent_task.
     workdir_tx: mpsc::UnboundedSender<std::path::PathBuf>,
-    /// Queued input typed while agent was busy — sent automatically when agent finishes.
-    queued: Option<String>,
+    /// Inputs queued while agent was busy — drained FIFO when agent finishes.
+    queued: VecDeque<String>,
     /// Session picker popup state (Some = popup visible).
     session_picker: Option<SessionPickerState>,
     /// Model picker popup state (Some = popup visible).
@@ -890,10 +814,14 @@ struct App {
     history_draft: String,
     /// Horizontal scroll offset for the input field (in chars), so long inputs stay visible.
     input_scroll: usize,
-    /// Cumulative tokens for current session (updated after each turn).
+    /// Last completed agent invocation's token totals (for context % in header).
     session_input_tokens: u64,
     session_output_tokens: u64,
     session_cost_usd: f64,
+    /// Running totals across all completed turns in this TUI session (including planning calls).
+    session_total_input_tokens: u64,
+    session_total_output_tokens: u64,
+    session_total_cost_usd: f64,
     /// Max context window in tokens for the current model (0 = unknown).
     context_max_tokens: u64,
     /// Channel to trigger immediate context compaction in agent_task.
@@ -979,7 +907,7 @@ impl App {
             resume_tx,
             model_switch_tx,
             workdir_tx,
-            queued: None,
+            queued: VecDeque::new(),
             session_picker: None,
             model_picker: None,
             profile_picker: None,
@@ -1009,6 +937,9 @@ impl App {
             session_input_tokens: 0,
             session_output_tokens: 0,
             session_cost_usd: 0.0,
+            session_total_input_tokens: 0,
+            session_total_output_tokens: 0,
+            session_total_cost_usd: 0.0,
             context_max_tokens: 0,
             compact_now_tx,
             last_plan: None,
@@ -1062,29 +993,36 @@ impl App {
             }
         }
         // Check for per-turn @model-name prefix.
-        if let Some((per_turn_model, actual_prompt)) = parse_per_turn_model(&text) {
-            // Save current model so we can revert after this turn.
+        let send_result = if let Some((per_turn_model, actual_prompt)) = parse_per_turn_model(&text)
+        {
             self.per_turn_prev_model = Some(self.model.clone());
-            // Switch to the per-turn model.
             self.model = per_turn_model.clone();
             let _ = self.model_switch_tx.send(per_turn_model.clone());
             self.push(ChatLine::Info(format!(
                 "  [one turn] using {} (will revert after response)",
                 per_turn_model
             )));
-            // Send the actual prompt (without the @model prefix).
             self.push(ChatLine::User(actual_prompt.clone()));
-            let _ = self.prompt_tx.send(actual_prompt.clone());
             if self.input_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
                 self.input_history.push(text);
             }
+            self.prompt_tx.send(actual_prompt)
         } else {
             self.push(ChatLine::User(text.clone()));
-            let _ = self.prompt_tx.send(text.clone());
             if self.input_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
-                self.input_history.push(text);
+                self.input_history.push(text.clone());
             }
+            self.prompt_tx.send(text)
+        };
+
+        if send_result.is_err() {
+            // Agent task channel closed — can't send; stay idle and surface an error.
+            self.push(ChatLine::Info(
+                "  error: agent is not running. Try restarting clido.".into(),
+            ));
+            return;
         }
+
         self.input.clear();
         self.cursor = 0;
         self.busy = true;
@@ -1092,6 +1030,54 @@ impl App {
         self.turn_start = Some(std::time::Instant::now());
         self.history_idx = None;
         self.history_draft.clear();
+    }
+
+    /// Execute a slash command or send chat to the agent (single user line).
+    fn dispatch_user_input(&mut self, text: String) {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        if trimmed == "/" {
+            self.push(ChatLine::Info(
+                "  type a command or message (bare '/' not sent)".into(),
+            ));
+            return;
+        }
+        if is_known_slash_cmd(&trimmed) {
+            execute_slash(self, &trimmed);
+        } else {
+            self.send_now(trimmed);
+        }
+    }
+
+    /// After the agent is idle, drain the FIFO queue: slash commands run in order until one
+    /// submits a new turn (`busy`) or `/quit` is seen.
+    fn drain_input_queue(&mut self) {
+        while let Some(next) = self.queued.pop_front() {
+            let trimmed = next.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed == "/" {
+                self.push(ChatLine::Info(
+                    "  type a command or message (bare '/' not sent)".into(),
+                ));
+                continue;
+            }
+            if is_known_slash_cmd(&trimmed) {
+                execute_slash(self, &trimmed);
+                if self.quit {
+                    return;
+                }
+                if self.busy {
+                    return;
+                }
+            } else {
+                self.send_now(trimmed);
+                return;
+            }
+        }
     }
 
     /// Normal Enter: send if idle, queue if busy.
@@ -1103,13 +1089,21 @@ impl App {
         if text.is_empty() {
             return;
         }
+        if text == "/" {
+            self.push(ChatLine::Info(
+                "  type a command or message (bare '/' not sent)".into(),
+            ));
+            self.input.clear();
+            self.cursor = 0;
+            return;
+        }
         if self.busy {
-            // Queue for after the current run finishes.
-            self.queued = Some(text);
+            // Enqueue for after the current run finishes (FIFO).
+            self.queued.push_back(text);
             self.input.clear();
             self.cursor = 0;
         } else {
-            self.send_now(text);
+            self.dispatch_user_input(text);
         }
     }
 
@@ -1126,12 +1120,12 @@ impl App {
             // Cancel the running agent turn, then queue this as next prompt.
             self.cancel
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            self.queued = Some(text);
+            self.queued.push_back(text);
             self.input.clear();
             self.cursor = 0;
             self.push(ChatLine::Info("  (interrupted — sending next)".into()));
         } else {
-            self.send_now(text);
+            self.dispatch_user_input(text);
         }
     }
 
@@ -1145,8 +1139,9 @@ impl App {
         self.push(ChatLine::Info("  (interrupted)".into()));
     }
 
-    fn push_status(&mut self, name: String, detail: String) {
+    fn push_status(&mut self, tool_use_id: String, name: String, detail: String) {
         self.status_log.push_back(StatusEntry {
+            tool_use_id,
             name,
             detail,
             done: false,
@@ -1160,10 +1155,9 @@ impl App {
         }
     }
 
-    fn finish_status(&mut self, name: &str, is_error: bool) {
-        // Mark the most recent in-progress entry with this name as done.
+    fn finish_status(&mut self, tool_use_id: &str, is_error: bool) {
         for entry in self.status_log.iter_mut().rev() {
-            if entry.name == name && !entry.done {
+            if entry.tool_use_id == tool_use_id && !entry.done {
                 entry.done = true;
                 entry.is_error = is_error;
                 entry.elapsed_ms = Some(entry.start.elapsed().as_millis() as u64);
@@ -1275,9 +1269,7 @@ impl App {
                 }
             }
         }
-        if let Some(queued) = self.queued.take() {
-            self.send_now(queued);
-        }
+        self.drain_input_queue();
     }
 
     fn tick_spinner(&mut self) {
@@ -1361,21 +1353,25 @@ fn render(frame: &mut Frame, app: &mut App) {
         format!("  cwd:{}", app.workspace_root.display()),
         dim,
     )];
-    if app.session_cost_usd > 0.0 {
-        let in_tok = app.session_input_tokens;
-        let tok_str = if in_tok >= 1000 {
-            format!("{:.1}k tok", in_tok as f64 / 1000.0)
+    if app.session_total_cost_usd > 0.0 {
+        let sum_in = app.session_total_input_tokens;
+        let tok_str = if sum_in >= 1000 {
+            format!("{:.1}k tok Σ", sum_in as f64 / 1000.0)
         } else {
-            format!("{} tok", in_tok)
+            format!("{} tok Σ", sum_in)
         };
-        let ctx_str = if app.context_max_tokens > 0 {
-            let pct = (in_tok as f64 / app.context_max_tokens as f64 * 100.0).min(100.0);
-            format!("  {:.0}% ctx", pct)
+        let last_in = app.session_input_tokens;
+        let ctx_str = if app.context_max_tokens > 0 && last_in > 0 {
+            let pct = (last_in as f64 / app.context_max_tokens as f64 * 100.0).min(100.0);
+            format!("  last {:.0}% ctx", pct)
         } else {
             String::new()
         };
         hline2.push(Span::styled(
-            format!("   ${:.4}  {}{}", app.session_cost_usd, tok_str, ctx_str),
+            format!(
+                "   ${:.4}  {}{}",
+                app.session_total_cost_usd, tok_str, ctx_str
+            ),
             dim,
         ));
     }
@@ -1418,8 +1414,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         // Use ratatui's own line_count() so the scroll calculation matches actual rendering.
         let lines = build_lines(app);
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let total_height = para.line_count(chat_area.width) as u16;
-        let max_scroll = total_height.saturating_sub(chat_area.height);
+        let total_height = para.line_count(chat_area.width) as u32;
+        let max_scroll = total_height.saturating_sub(chat_area.height as u32);
         // Store for use in handle_key (Up/PageUp need the current max_scroll).
         app.max_scroll = max_scroll;
         let scroll = if app.following {
@@ -1427,7 +1423,11 @@ fn render(frame: &mut Frame, app: &mut App) {
         } else {
             app.scroll.min(max_scroll)
         };
-        frame.render_widget(para.scroll((scroll, 0)), chat_area);
+        // ratatui's scroll() takes (u16, u16); clamp to u16::MAX before casting.
+        frame.render_widget(
+            para.scroll((scroll.min(u16::MAX as u32) as u16, 0)),
+            chat_area,
+        );
     }
 
     // ── Status strip ──
@@ -1482,15 +1482,22 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     // ── Queue strip ──
     {
-        let queue_line = if let Some(ref q) = app.queued {
-            let preview = if q.chars().count() > 60 {
-                format!("{}…", q.chars().take(60).collect::<String>())
+        let queue_line = if !app.queued.is_empty() {
+            let n = app.queued.len();
+            let first = app.queued.front().unwrap();
+            let preview = if first.chars().count() > 50 {
+                format!("{}…", first.chars().take(50).collect::<String>())
             } else {
-                q.clone()
+                first.clone()
+            };
+            let label = if n == 1 {
+                "  ⟳ queued  ".to_string()
+            } else {
+                format!("  ⟳ queued ({})  ", n)
             };
             Line::from(vec![
                 Span::styled(
-                    "  ⟳ queued  ",
+                    label,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::DIM),
@@ -1539,6 +1546,9 @@ fn render(frame: &mut Frame, app: &mut App) {
         .collect();
     let cursor_col = (app.cursor - app.input_scroll) as u16;
 
+    // Always clear the input area first — prevents any bleed-through from overlapping widgets.
+    frame.render_widget(Clear, input_area);
+
     if app.busy || app.pending_perm.is_some() {
         let spinner = SPINNER[app.spinner_tick];
         let title_line = if app.pending_perm.is_some() {
@@ -1549,7 +1559,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     Style::default().fg(Color::LightMagenta),
                 ),
             ])
-        } else if app.queued.is_some() {
+        } else if !app.queued.is_empty() {
             Line::from(vec![
                 Span::styled(
                     format!("{} ", spinner),
@@ -1629,12 +1639,12 @@ fn render(frame: &mut Frame, app: &mut App) {
         Span::styled(" quit  ", hint_dim),
         Span::styled("Ctrl+L", Style::default().fg(Color::DarkGray)),
         Span::styled(" redraw  ", hint_dim),
-        Span::styled("Shift+drag", Style::default().fg(Color::DarkGray)),
-        Span::styled(" copy", hint_dim),
+        Span::styled("Shift+select", Style::default().fg(Color::DarkGray)),
+        Span::styled(" terminal copy  ", hint_dim),
     ];
-    if app.session_cost_usd > 0.0 {
+    if app.session_total_cost_usd > 0.0 {
         hint_spans.push(Span::styled(
-            format!("  ${:.4}", app.session_cost_usd),
+            format!("  ${:.4} Σ", app.session_total_cost_usd),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -1642,7 +1652,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     }
     // Scroll position indicator when not following.
     if app.max_scroll > 0 && !app.following {
-        let pct = (app.scroll as u32 * 100 / app.max_scroll as u32).min(100);
+        let pct = (app.scroll * 100 / app.max_scroll).min(100);
         hint_spans.push(Span::styled(
             format!("  [{}%]", pct),
             Style::default()
@@ -2507,7 +2517,7 @@ fn render_plan_text_editor(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" Plan Editor  (Ctrl+S save · Esc close) ")
+        .title(" Plan text (Ctrl+S / Esc = save · Ctrl+C = discard) ")
         .borders(Borders::ALL)
         .border_style(
             Style::default()
@@ -2582,7 +2592,14 @@ fn render_plan_text_editor(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("Esc", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            " close",
+            " save+close  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("Ctrl+C", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " discard",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -2823,7 +2840,7 @@ fn render_settings(frame: &mut Frame, area: Rect, input_area: Rect, st: &Setting
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(" Settings ")
+                .title(" Settings (Esc close) ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         ),
@@ -2995,6 +3012,20 @@ fn modal_row_two_col(
     ])
 }
 
+/// Strip leading markdown noise so plan lines like `**Step 1:**` match.
+fn strip_plan_line_prefix(line: &str) -> String {
+    let mut t = line.trim();
+    loop {
+        let before = t;
+        t = t.trim_start_matches(['*', '#', '_', '>', '`']);
+        t = t.trim_start();
+        if t == before {
+            break;
+        }
+    }
+    t.to_string()
+}
+
 /// Truncate a string to at most `max_chars` characters, appending `…` if cut.
 /// Parse a numbered step list out of free-form agent text.
 /// Matches top-level step lines only — not sub-bullets or indented items.
@@ -3007,7 +3038,7 @@ fn parse_plan_from_text(text: &str) -> Vec<String> {
         if line.starts_with(' ') || line.starts_with('\t') {
             continue;
         }
-        let trimmed = line.trim();
+        let trimmed = strip_plan_line_prefix(line);
         if trimmed.is_empty() {
             continue;
         }
@@ -3022,8 +3053,10 @@ fn parse_plan_from_text(text: &str) -> Vec<String> {
             if let Some(content) = after_digits
                 .strip_prefix(": ")
                 .or_else(|| after_digits.strip_prefix(". "))
+                .or_else(|| after_digits.strip_prefix(":**"))
+                .or_else(|| after_digits.strip_prefix(':'))
             {
-                let content = content.trim();
+                let content = strip_plan_line_prefix(content);
                 if !content.is_empty() {
                     tasks.push(content.to_string());
                 }
@@ -3031,12 +3064,17 @@ fn parse_plan_from_text(text: &str) -> Vec<String> {
             }
         }
 
-        // "N. text" or "N) text"
+        // "N. text" or "N) text" or "N.text"
         if let Some(digit_end) = trimmed.find(|c: char| !c.is_ascii_digit()) {
             if digit_end > 0 {
-                let rest = &trimmed[digit_end..];
-                if let Some(content) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
-                    let content = content.trim();
+                let rest = trimmed[digit_end..].trim_start();
+                let content = rest
+                    .strip_prefix(". ")
+                    .or_else(|| rest.strip_prefix(") "))
+                    .or_else(|| rest.strip_prefix('.'))
+                    .or_else(|| rest.strip_prefix(')'))
+                    .map(str::trim);
+                if let Some(content) = content {
                     if !content.is_empty() {
                         tasks.push(content.to_string());
                     }
@@ -3050,9 +3088,9 @@ fn parse_plan_from_text(text: &str) -> Vec<String> {
 /// Scan text for a "Step N: ..." line and return the full step label if found.
 fn extract_current_step_full(text: &str) -> Option<(usize, String)> {
     for line in text.lines() {
-        let t = line.trim();
+        let t = strip_plan_line_prefix(line);
         // Match "Step N: ..." or "▶ Step N: ..."
-        let rest = t.strip_prefix("▶ ").unwrap_or(t);
+        let rest = t.strip_prefix("▶ ").unwrap_or(t.as_str());
         if let Some(after) = rest
             .strip_prefix("Step ")
             .or_else(|| rest.strip_prefix("step "))
@@ -3061,6 +3099,8 @@ fn extract_current_step_full(text: &str) -> Option<(usize, String)> {
             if let Some(label) = after_digits
                 .strip_prefix(": ")
                 .or_else(|| after_digits.strip_prefix(". "))
+                .or_else(|| after_digits.strip_prefix(":**"))
+                .or_else(|| after_digits.strip_prefix(':'))
             {
                 let label = label.trim();
                 if !label.is_empty() {
@@ -3153,19 +3193,18 @@ fn is_known_slash_cmd(input: &str) -> bool {
     if !input.starts_with('/') {
         return false;
     }
-    SLASH_COMMANDS
-        .iter()
-        .any(|(cmd, _)| input == *cmd || input.starts_with(&format!("{} ", cmd)))
+    slash_commands()
+        .into_iter()
+        .any(|(cmd, _)| input == cmd || input.starts_with(&format!("{} ", cmd)))
 }
 
 fn slash_completions(input: &str) -> Vec<(&'static str, &'static str)> {
     if !input.starts_with('/') {
         return vec![];
     }
-    SLASH_COMMANDS
-        .iter()
+    slash_commands()
+        .into_iter()
         .filter(|(cmd, _)| cmd.starts_with(input))
-        .map(|(cmd, desc)| (*cmd, *desc))
         .collect()
 }
 
@@ -3246,9 +3285,6 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("".into()));
             app.push(ChatLine::Section("Agent Controls".into()));
             app.push(ChatLine::Info("Ctrl+C             quit".into()));
-            app.push(ChatLine::Info(
-                "Ctrl+Enter         interrupt current run & send".into(),
-            ));
             app.push(ChatLine::Info(
                 "Ctrl+/             interrupt current run only".into(),
             ));
@@ -3484,6 +3520,10 @@ fn execute_slash(app: &mut App, cmd: &str) {
                         "  workdir set to {}",
                         path.display()
                     )));
+                    app.push(ChatLine::Info(
+                        "  note: session files & resume stay on the original project path until restart."
+                            .into(),
+                    ));
                 }
                 Err(e) => app.push(ChatLine::Info(format!("  workdir: {}", e))),
             }
@@ -3511,29 +3551,61 @@ fn execute_slash(app: &mut App, cmd: &str) {
             let query = cmd.trim_start_matches("/memory").trim();
             if query.is_empty() {
                 app.push(ChatLine::Info(
-                    "  memory: use /memory <query> to search, or `clido memory list` in a new terminal".into(),
+                    "  memory: usage: /memory <query>  |  or `clido memory list` in another terminal"
+                        .into(),
                 ));
             } else {
-                app.push(ChatLine::Info(format!(
-                    "  memory search: the agent uses memory automatically. Run `clido memory list` or ask the agent to recall \"{}\".",
-                    query
-                )));
+                match tui_memory_store_path() {
+                    Ok(path) => match MemoryStore::open(&path) {
+                        Ok(store) => match store.search_hybrid(query, 15) {
+                            Ok(entries) if entries.is_empty() => {
+                                app.push(ChatLine::Info(format!(
+                                    "  memory: no matches for {:?}",
+                                    query
+                                )));
+                            }
+                            Ok(entries) => {
+                                app.push(ChatLine::Info(format!(
+                                    "  memory: {} match(es) for {:?}",
+                                    entries.len(),
+                                    query
+                                )));
+                                for e in entries.iter().take(15) {
+                                    app.push(ChatLine::Info(format!(
+                                        "    · {}",
+                                        truncate_chars(&e.content, 100)
+                                    )));
+                                }
+                            }
+                            Err(e) => {
+                                app.push(ChatLine::Info(format!("  memory search error: {}", e)));
+                            }
+                        },
+                        Err(e) => app.push(ChatLine::Info(format!(
+                            "  memory: could not open store: {}",
+                            e
+                        ))),
+                    },
+                    Err(e) => app.push(ChatLine::Info(format!("  memory: {}", e))),
+                }
             }
         }
         "/cost" => {
-            if app.session_cost_usd == 0.0 {
-                app.push(ChatLine::Info("  cost: $0.0000 (no turns yet)".into()));
+            if app.session_total_cost_usd == 0.0 {
+                app.push(ChatLine::Info(
+                    "  cost: $0.0000 (no billed turns yet)".into(),
+                ));
             } else {
                 app.push(ChatLine::Info(format!(
-                    "  cost: ${:.4}",
-                    app.session_cost_usd
+                    "  cost (session total): ${:.4}",
+                    app.session_total_cost_usd
                 )));
             }
         }
         "/tokens" => {
             app.push(ChatLine::Info(format!(
-                "  tokens: {} input  {} output",
-                app.session_input_tokens, app.session_output_tokens
+                "  tokens (session total): {} input  {} output",
+                app.session_total_input_tokens, app.session_total_output_tokens
             )));
         }
         "/compact" => {
@@ -3822,9 +3894,30 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.send_now("Run diagnostics on the current project".to_string());
         }
         "/index" => {
-            app.push(ChatLine::Info(
-                "  index: run `clido index build` to build the repo index, then the agent can use SemanticSearch.".into(),
-            ));
+            let db_path = app.workspace_root.join(".clido").join("index.db");
+            if !db_path.exists() {
+                app.push(ChatLine::Info(
+                    "  index: no database — run `clido index build`. Then the agent can use SemanticSearch."
+                        .into(),
+                ));
+            } else {
+                match RepoIndex::open(&db_path) {
+                    Ok(index) => match index.stats() {
+                        Ok((files, symbols)) => {
+                            app.push(ChatLine::Info(format!(
+                                "  index: {} files, {} symbols  (rebuild: `clido index build`)",
+                                files, symbols
+                            )));
+                        }
+                        Err(e) => {
+                            app.push(ChatLine::Info(format!("  index stats: {}", e)));
+                        }
+                    },
+                    Err(e) => {
+                        app.push(ChatLine::Info(format!("  index: could not open: {}", e)));
+                    }
+                }
+            }
         }
         "/rules" => {
             let rules = clido_context::discover_rules(&app.workspace_root, false, None);
@@ -4015,11 +4108,12 @@ fn execute_slash(app: &mut App, cmd: &str) {
             let config_path = clido_core::global_config_path()
                 .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
             let roles = app.config_roles.clone();
+            let profile = app.current_profile.clone();
             app.settings = Some(SettingsState::new(
                 config_path,
                 roles,
                 app.model.clone(),
-                "default".to_string(),
+                profile,
             ));
         }
         "/init" => {
@@ -4073,6 +4167,7 @@ fn build_lines(app: &App) -> Vec<Line<'static>> {
                 detail,
                 done,
                 is_error,
+                ..
             } => {
                 let color = tool_color(name, *done, *is_error);
                 let style = Style::default().fg(color);
@@ -4487,7 +4582,7 @@ fn render_markdown(text: &str) -> Vec<Line<'static>> {
 
 // ── Scroll helpers ────────────────────────────────────────────────────────────
 
-fn scroll_up(app: &mut App, lines: u16) {
+fn scroll_up(app: &mut App, lines: u32) {
     if app.following {
         app.scroll = app.max_scroll;
     }
@@ -4495,7 +4590,7 @@ fn scroll_up(app: &mut App, lines: u16) {
     app.following = false;
 }
 
-fn scroll_down(app: &mut App, lines: u16) {
+fn scroll_down(app: &mut App, lines: u32) {
     let new_scroll = app.scroll.saturating_add(lines);
     if new_scroll >= app.max_scroll {
         app.following = true;
@@ -4990,6 +5085,7 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                             app.model = new_model.clone();
                             let _ = app.model_switch_tx.send(new_model);
                         }
+                        app.settings = None;
                     }
                 }
                 Esc => {
@@ -5117,7 +5213,11 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                         drop(filtered);
                         let config_path = clido_core::global_config_path()
                             .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
-                        match save_default_model_to_config(&config_path, &model_id, "default") {
+                        match save_default_model_to_config(
+                            &config_path,
+                            &model_id,
+                            &app.current_profile,
+                        ) {
                             Ok(()) => {
                                 app.push(ChatLine::Info(format!(
                                     "  ✓ {} saved as default model",
@@ -5595,6 +5695,15 @@ fn char_byte_pos(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+fn tui_memory_store_path() -> Result<std::path::PathBuf, String> {
+    if let Some(dirs) = directories::ProjectDirs::from("", "", "clido") {
+        let data = dirs.data_dir().to_path_buf();
+        std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+        return Ok(data.join("memory.db"));
+    }
+    Ok(std::path::PathBuf::from(".clido-memory.db"))
+}
+
 fn resolve_workdir_arg(arg: &str) -> Result<std::path::PathBuf, String> {
     let trimmed = arg.trim();
     if trimmed.is_empty() {
@@ -5867,7 +5976,20 @@ async fn agent_task(
                          Task: {}",
                         prompt
                     );
-                    if let Ok(plan_text) = agent.complete_simple(&planning_prompt).await {
+                    if let Ok((plan_text, plan_usage)) =
+                        agent.complete_simple_with_usage(&planning_prompt).await
+                    {
+                        let plan_cost = clido_core::pricing::compute_cost_usd(
+                            &plan_usage,
+                            agent.current_model(),
+                            &setup.pricing_table,
+                        );
+                        let _ = event_tx.send(AgentEvent::TokenUsage {
+                            input_tokens: plan_usage.input_tokens,
+                            output_tokens: plan_usage.output_tokens,
+                            cost_usd: plan_cost,
+                            context_max_tokens,
+                        });
                         // Try to parse as a full Plan with metadata first.
                         let plan_opt = clido_planner::parse_plan_with_meta(&plan_text).ok();
                         if let Some(plan) = plan_opt {
@@ -5969,6 +6091,8 @@ async fn agent_task(
                     context_max_tokens,
                 });
 
+                let mut session_exit: &str = "success";
+
                 match result {
                     Ok(text) => {
                         auto_continue_count = 0; // reset on clean completion
@@ -5976,6 +6100,7 @@ async fn agent_task(
                     }
                     Err(ClidoError::Interrupted) => {
                         auto_continue_count = 0;
+                        session_exit = "interrupted";
                         let _ = event_tx.send(AgentEvent::Interrupted);
                     }
                     Err(ClidoError::MaxTurnsExceeded) => {
@@ -6008,14 +6133,17 @@ async fn agent_task(
                                 }
                                 Err(ClidoError::Interrupted) => {
                                     auto_continue_count = 0;
+                                    session_exit = "interrupted";
                                     let _ = event_tx.send(AgentEvent::Interrupted);
                                 }
                                 Err(e) => {
+                                    session_exit = "error";
                                     let _ = event_tx.send(AgentEvent::Err(e.to_string()));
                                 }
                             }
                         } else {
                             // Hard cap hit: surface a friendly, actionable message.
+                            session_exit = "error";
                             let _ = event_tx.send(AgentEvent::Err(format!(
                                 "Reached the turn limit {} times without finishing.\n\
                                  History is intact — type \"continue\" to keep going,\n\
@@ -6035,12 +6163,13 @@ async fn agent_task(
                         ));
                     }
                     Err(e) => {
+                        session_exit = "error";
                         let _ = event_tx.send(AgentEvent::Err(e.to_string()));
                     }
                 }
 
                 let _ = writer.write_line(&clido_storage::SessionLine::Result {
-                    exit_status: "done".to_string(),
+                    exit_status: session_exit.to_string(),
                     total_cost_usd: agent.cumulative_cost_usd,
                     num_turns: agent.turn_count(),
                     duration_ms: 0,
@@ -6420,6 +6549,7 @@ async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                 roles,
                 profile_name: String::new(),
                 is_new_profile: false,
+                saved_api_keys: Vec::new(),
             }
         };
         // Run setup wizard with current values pre-filled.
@@ -6492,15 +6622,40 @@ async fn event_loop(
             }
             maybe = event_rx.recv() => {
                 match maybe {
-                    Some(AgentEvent::ToolStart { name, detail }) => {
-                        app.push_status(name.clone(), detail.clone());
-                        app.push(ChatLine::ToolCall { name, detail, done: false, is_error: false });
+                    Some(AgentEvent::ToolStart {
+                        tool_use_id,
+                        name,
+                        detail,
+                    }) => {
+                        app.push_status(
+                            tool_use_id.clone(),
+                            name.clone(),
+                            detail.clone(),
+                        );
+                        app.push(ChatLine::ToolCall {
+                            tool_use_id,
+                            name,
+                            detail,
+                            done: false,
+                            is_error: false,
+                        });
                     }
-                    Some(AgentEvent::ToolDone { name, is_error, diff }) => {
-                        app.finish_status(&name, is_error);
-                        for line in app.messages.iter_mut().rev() {
-                            if let ChatLine::ToolCall { name: n, done, is_error: e, .. } = line {
-                                if n == &name && !*done {
+                    Some(AgentEvent::ToolDone {
+                        tool_use_id,
+                        is_error,
+                        diff,
+                        ..
+                    }) => {
+                        app.finish_status(&tool_use_id, is_error);
+                        for line in app.messages.iter_mut() {
+                            if let ChatLine::ToolCall {
+                                tool_use_id: tid,
+                                done,
+                                is_error: e,
+                                ..
+                            } = line
+                            {
+                                if tid == &tool_use_id && !*done {
                                     *done = true;
                                     *e = is_error;
                                     break;
@@ -6540,7 +6695,7 @@ async fn event_loop(
                             crate::notify::notify_done(
                                 session_id,
                                 elapsed,
-                                app.session_cost_usd,
+                                app.session_total_cost_usd,
                             );
                         }
                         // Revert per-turn model override if active.
@@ -6596,6 +6751,9 @@ async fn event_loop(
                         app.session_input_tokens = input_tokens;
                         app.session_output_tokens = output_tokens;
                         app.session_cost_usd = cost_usd;
+                        app.session_total_input_tokens += input_tokens;
+                        app.session_total_output_tokens += output_tokens;
+                        app.session_total_cost_usd += cost_usd;
                         app.context_max_tokens = context_max_tokens;
                     }
                     Some(AgentEvent::Compacted { before, after }) => {
@@ -6723,7 +6881,7 @@ mod tests {
     #[test]
     fn completions_for_slash_only_returns_all_commands() {
         let c = slash_completions("/");
-        assert_eq!(c.len(), SLASH_COMMANDS.len());
+        assert_eq!(c.len(), slash_commands().len());
     }
 
     #[test]
@@ -6764,6 +6922,15 @@ mod tests {
     fn completions_empty_for_non_slash() {
         assert!(slash_completions("hello").is_empty());
         assert!(slash_completions("").is_empty());
+    }
+
+    #[test]
+    fn parse_plan_from_text_strips_markdown_wrapped_steps() {
+        let text = "### **Step 1:** Fix auth\n**Step 2:** Add tests\n";
+        let tasks = parse_plan_from_text(text);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0], "Fix auth");
+        assert_eq!(tasks[1], "Add tests");
     }
 
     #[test]
@@ -6891,16 +7058,16 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_and_sections_have_same_command_count() {
-        // SLASH_COMMANDS flat list must match total commands across all sections.
+    fn slash_commands_derived_matches_section_count() {
+        // slash_commands() must enumerate every command across all sections.
         let section_total: usize = SLASH_COMMAND_SECTIONS
             .iter()
             .map(|(_, cmds)| cmds.len())
             .sum();
         assert_eq!(
-            SLASH_COMMANDS.len(),
+            slash_commands().len(),
             section_total,
-            "SLASH_COMMANDS and SLASH_COMMAND_SECTIONS are out of sync"
+            "slash_commands() and SLASH_COMMAND_SECTIONS are out of sync"
         );
     }
 }

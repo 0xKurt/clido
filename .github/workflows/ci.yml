@@ -58,7 +58,7 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Coverage
-        run: cargo tarpaulin --workspace --out Xml
+        run: cargo tarpaulin --workspace --config tarpaulin.toml --out Xml
 
       - name: Upload coverage report
         uses: codecov/codecov-action@v4
@@ -66,3 +66,4 @@ jobs:
         with:
           files: cobertura.xml
           fail_ci_if_error: false
+

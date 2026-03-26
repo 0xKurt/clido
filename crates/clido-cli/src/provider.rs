@@ -18,8 +18,19 @@ impl AskUser for StdinAskUser {
     async fn ask(&self, req: PermRequest) -> PermGrant {
         let tool_name = req.tool_name.clone();
         let description = req.description.clone();
+        let diff = req.diff.clone();
         let prompt = format!("Allow {} with input {}? [y/N] ", tool_name, description);
         let result = tokio::task::spawn_blocking(move || {
+            // Show the unified diff before the permission prompt in diff-review mode.
+            if let Some(d) = &diff {
+                if !d.is_empty() {
+                    if cli_use_color() {
+                        eprintln!("{}{}{}", ansi::DIM, d, ansi::RESET);
+                    } else {
+                        eprintln!("{}", d);
+                    }
+                }
+            }
             if cli_use_color() {
                 eprint!("{}{}{}", ansi::DIM, prompt, ansi::RESET);
             } else {

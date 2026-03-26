@@ -13,6 +13,7 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/session` | Show the current session ID | `/session` | |
 | `/help` | Display all key bindings and slash commands | `/help` | Output appears in the chat pane |
 | `/quit` | Exit clido | `/quit` | Equivalent to pressing `Ctrl+C` when idle |
+| `/init` | Re-run setup wizard | `/init` | Reconfigure provider, model, API key, and roles |
 
 ### Model
 
@@ -24,6 +25,7 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/smart` | Switch to the smart (powerful) model | `/smart` | Uses `[roles] reasoning` from config, falls back to `claude-opus-4-6` |
 | `/role <name>` | Switch to the model assigned to a role | `/role critic` | Roles defined in `[roles]` config or user model prefs |
 | `/fav` | Toggle current model in/out of favorites | `/fav` | Favorites shown with ★ in the model picker and `/model` output |
+| `/reviewer [on\|off]` | Toggle reviewer sub-agent | `/reviewer on` | When on, a second model reviews each assistant response before it is shown |
 
 ### Context
 
@@ -59,11 +61,19 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 
 | Command | Description | Example | Notes |
 |---------|-------------|---------|-------|
-| `/workdir` | Show the current working directory | `/workdir` | |
+| `/agents` | Show current agent configuration | `/agents` | Lists main, worker, and reviewer slots with active model |
+| `/profiles` | List all profiles | `/profiles` | Shows active model per slot for each profile |
+| `/profile` | Open profile picker | `/profile` | Switch, create, or edit profiles interactively |
+| `/profile new` | Create a new profile | `/profile new` | Launches the guided setup wizard |
+| `/profile edit [name]` | Edit a profile | `/profile edit cheap` | Edit provider, model, and API key for the named profile |
+| `/settings` | Open settings editor | `/settings` | Edit roles and default model; changes saved to `config.toml` |
+| `/workdir [path]` | Show or set working directory | `/workdir ~/projects/myapp` | Without argument shows current cwd |
 | `/check` | Run diagnostics on the current project | `/check` | Invokes the DiagnosticsTool |
 | `/index` | Show repo index stats | `/index` | Build with `clido index build` |
 | `/rules` | Show active CLIDO.md rules files | `/rules` | Overlay listing all discovered rules |
 | `/image <path>` | Attach an image to the next message | `/image screenshot.png` | Supports PNG, JPEG, GIF, WebP |
+| `/stop` | Interrupt current run | `/stop` | Cancels the in-progress agent turn without exiting |
+| `/copy` | Copy last assistant message to clipboard | `/copy` | Uses OSC 52 escape sequence; requires terminal support |
 
 ## Using slash commands
 

@@ -5,7 +5,6 @@ use clido_core::{
     AgentConfig, ContentBlock, Message, ModelResponse, Role, StopReason, ToolSchema, Usage,
 };
 use clido_core::{ClidoError, Result};
-use futures::stream;
 use futures::Stream;
 use std::pin::Pin;
 use std::time::Duration;
@@ -38,7 +37,7 @@ impl OpenAICompatProvider {
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(15))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build reqwest::Client — TLS backend unavailable");
         Self {
             client,
             api_key,
@@ -121,9 +120,10 @@ impl OpenAICompatProvider {
             })
             .collect();
 
+        let max_tokens = config.max_output_tokens.unwrap_or(8192);
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens,
             "messages": openai_messages
         });
         body["messages"].as_array_mut().unwrap().insert(
@@ -243,19 +243,12 @@ impl OpenAICompatProvider {
                 if let Some(m) = json["error"]["message"].as_str() {
                     format!("API error ({}): {}", status.as_u16(), m)
                 } else {
-                    format!(
-                        "API error ({}): {}",
-                        status.as_u16(),
-                        &text[..text.len().min(300)]
-                    )
+                    let preview: String = text.chars().take(300).collect();
+                    format!("API error ({}): {}", status.as_u16(), preview)
                 }
             } else {
-                format!(
-                    "API error {} (model: {}): {}",
-                    status,
-                    self.model,
-                    &text[..text.len().min(300)]
-                )
+                let preview: String = text.chars().take(300).collect();
+                format!("API error {} (model: {}): {}", status, self.model, preview)
             };
             return Err(ClidoError::Provider(msg));
         }
@@ -501,11 +494,81 @@ impl ModelProvider for OpenAICompatProvider {
 
     async fn complete_stream(
         &self,
-        _messages: &[Message],
-        _tools: &[ToolSchema],
-        _config: &AgentConfig,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        config: &AgentConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        Ok(Box::pin(stream::empty()))
+        let (system_from_messages, openai_messages) = messages_to_openai(messages)?;
+        let system_content = {
+            let base = config
+                .system_prompt
+                .as_deref()
+                .unwrap_or("You are clido, an AI coding agent. Always refer to yourself as clido.");
+            match &system_from_messages {
+                Some(s) if !s.is_empty() => format!("{}\n{}", base, s),
+                _ => base.to_string(),
+            }
+        };
+        let openai_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema
+                    }
+                })
+            })
+            .collect();
+
+        let max_tokens = config.max_output_tokens.unwrap_or(8192);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": openai_messages,
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        });
+        body["messages"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({ "role": "system", "content": system_content }),
+        );
+        if !openai_tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(openai_tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+
+        let url = self.request_url();
+        let mut req = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json");
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        for (k, v) in &self.extra_headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let response = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ClidoError::Provider(format!("stream request failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let preview: String = text.chars().take(300).collect();
+            return Err(ClidoError::Provider(format!(
+                "API error {} (model: {}): {}",
+                status, self.model, preview
+            )));
+        }
+
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(parse_openai_sse(byte_stream)))
     }
 
     async fn list_models(&self) -> Vec<crate::provider::ModelEntry> {
@@ -518,14 +581,23 @@ impl ModelProvider for OpenAICompatProvider {
         for (k, v) in &self.extra_headers {
             req = req.header(k.as_str(), v.as_str());
         }
-        let Ok(resp) = req.send().await else {
-            return vec![];
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("list_models: request failed: {}", e);
+                return vec![];
+            }
         };
         if !resp.status().is_success() {
+            warn!("list_models: API returned status {}", resp.status());
             return vec![];
         }
-        let Ok(json) = resp.json::<serde_json::Value>().await else {
-            return vec![];
+        let json = match resp.json::<serde_json::Value>().await {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("list_models: failed to parse response: {}", e);
+                return vec![];
+            }
         };
         let is_openrouter = base.contains("openrouter.ai");
         let is_openai = base.contains("api.openai.com");
@@ -553,6 +625,157 @@ impl ModelProvider for OpenAICompatProvider {
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }
+}
+
+/// Parse OpenAI-compatible SSE byte stream into a stream of `StreamEvent`.
+///
+/// OpenAI SSE format: each chunk is `data: <json>\n\n`, terminated by `data: [DONE]\n\n`.
+/// Each JSON chunk has `choices[0].delta` with optional `content` (text) and `tool_calls`.
+fn parse_openai_sse(
+    byte_stream: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<StreamEvent>> + Send {
+    use futures::channel::mpsc;
+    use futures::SinkExt;
+    use futures::StreamExt;
+
+    let (mut tx, rx) = mpsc::unbounded::<Result<StreamEvent>>();
+
+    tokio::spawn(async move {
+        let mut line_buf = String::new();
+        // tool_call index → (id, name, partial_json) for assembling tool use blocks
+        let mut tool_calls: std::collections::HashMap<u64, (String, String, String)> =
+            std::collections::HashMap::new();
+
+        let mut stream = std::pin::pin!(byte_stream);
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    let err: Result<StreamEvent> = Err(ClidoError::Provider(e.to_string()));
+                    let _ = tx.send(err).await;
+                    return;
+                }
+            };
+
+            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            loop {
+                let Some(pos) = line_buf.find('\n') else {
+                    break;
+                };
+                let line = line_buf[..pos].trim_end_matches('\r').to_string();
+                line_buf = line_buf[pos + 1..].to_string();
+
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data == "[DONE]" {
+                    // Flush any accumulated tool calls as ToolUseEnd events.
+                    for (id, _, _) in tool_calls.values() {
+                        let _ = tx
+                            .send(Ok(StreamEvent::ToolUseEnd { id: id.clone() }))
+                            .await;
+                    }
+                    return;
+                }
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+                    continue;
+                };
+
+                // Usage chunk (stream_options.include_usage)
+                if let Some(usage_obj) = json.get("usage").filter(|u| !u.is_null()) {
+                    let usage = Usage {
+                        input_tokens: usage_obj["prompt_tokens"].as_u64().unwrap_or(0),
+                        output_tokens: usage_obj["completion_tokens"].as_u64().unwrap_or(0),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    };
+                    let stop_reason = match json["choices"]
+                        .as_array()
+                        .and_then(|c| c.first())
+                        .and_then(|c| c["finish_reason"].as_str())
+                    {
+                        Some("tool_calls") => StopReason::ToolUse,
+                        Some("length") => StopReason::MaxTokens,
+                        Some("stop_sequence") => StopReason::StopSequence,
+                        _ => StopReason::EndTurn,
+                    };
+                    let _ = tx
+                        .send(Ok(StreamEvent::MessageDelta { stop_reason, usage }))
+                        .await;
+                    continue;
+                }
+
+                let Some(choices) = json["choices"].as_array() else {
+                    continue;
+                };
+                let Some(choice) = choices.first() else {
+                    continue;
+                };
+                let delta = &choice["delta"];
+
+                // Text content delta
+                if let Some(text) = delta["content"].as_str() {
+                    if !text.is_empty() {
+                        let _ = tx.send(Ok(StreamEvent::TextDelta(text.to_string()))).await;
+                    }
+                }
+
+                // Tool call deltas
+                if let Some(tc_arr) = delta["tool_calls"].as_array() {
+                    for tc in tc_arr {
+                        let idx = tc["index"].as_u64().unwrap_or(0);
+                        let entry = tool_calls
+                            .entry(idx)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
+                        // First chunk for this index carries id and function.name
+                        if let Some(id) = tc["id"].as_str() {
+                            if entry.0.is_empty() {
+                                entry.0 = id.to_string();
+                            }
+                        }
+                        if let Some(name) = tc["function"]["name"].as_str() {
+                            if entry.1.is_empty() {
+                                entry.1 = name.to_string();
+                                let _ = tx
+                                    .send(Ok(StreamEvent::ToolUseStart {
+                                        id: entry.0.clone(),
+                                        name: name.to_string(),
+                                    }))
+                                    .await;
+                            }
+                        }
+                        if let Some(partial) = tc["function"]["arguments"].as_str() {
+                            entry.2.push_str(partial);
+                            if !partial.is_empty() {
+                                let _ = tx
+                                    .send(Ok(StreamEvent::ToolUseDelta {
+                                        id: entry.0.clone(),
+                                        partial_json: partial.to_string(),
+                                    }))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+
+                // Emit finish event
+                if let Some(reason) = choice["finish_reason"].as_str() {
+                    if !reason.is_empty() && reason != "null" {
+                        for (id, _, _) in tool_calls.values() {
+                            let _ = tx
+                                .send(Ok(StreamEvent::ToolUseEnd { id: id.clone() }))
+                                .await;
+                        }
+                        tool_calls.clear();
+                    }
+                }
+            }
+        }
+    });
+
+    rx
 }
 
 #[cfg(test)]

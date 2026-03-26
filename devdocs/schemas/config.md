@@ -49,9 +49,16 @@ base_url = "https://api.anthropic.com"
 
 | Key | Type | Default | Env override | Validation |
 |-----|------|---------|--------------|------------|
-| `max_turns` | integer | 50 | `CLIDO_MAX_TURNS` | > 0, ≤ 1000. |
-| `max_budget_usd` | float | 5.0 | `CLIDO_MAX_BUDGET_USD` | ≥ 0. |
-| `max_concurrent_tools` | integer | 10 | — | > 0, ≤ 100. Semaphore cap for read-only tool concurrency. CLI flag: `--max-parallel-tools`; env: `CLIDO_MAX_PARALLEL_TOOLS`. Note: config key uses `concurrent`, flag/env use `parallel` — the names differ but control the same semaphore. |
+| `max_turns` | integer | 200 | `CLIDO_MAX_TURNS` | > 0, ≤ 1000. |
+| `max_budget_usd` | float | none | `CLIDO_MAX_BUDGET_USD` | ≥ 0. If absent, no budget cap is enforced. CLI flag: `--max-budget-usd`. |
+| `max_concurrent_tools` | integer | none | — | > 0, ≤ 100. Semaphore cap for read-only tool concurrency. CLI flag: `--max-parallel-tools`; env: `CLIDO_MAX_PARALLEL_TOOLS`. Note: config key uses `concurrent`, flag/env use `parallel` — the names differ but control the same semaphore. |
+| `quiet` | boolean | false | — | Suppress spinner, tool lifecycle output, and cost footer. CLI flag: `--quiet` / `-q`. |
+| `no_rules` | boolean | false | — | Skip all CLIDO.md / rules file injection for this session. |
+| `rules_file` | string | — | — | Use a specific rules file instead of the standard hierarchical lookup (cwd → `$HOME`). |
+| `notify` | boolean | false | — | Send a desktop notification and terminal bell when a task completes. Desktop notification requires the `desktop-notify` feature to be compiled in; terminal bell fires regardless. |
+| `auto_checkpoint` | boolean | true | — | Automatically save a checkpoint before each file-mutating agent turn. |
+| `max_checkpoints_per_session` | integer | 50 | — | Maximum number of checkpoints retained per session. 0 = unlimited. |
+| `max_output_tokens` | integer | none | — | Maximum tokens the model may produce per response. If absent, uses the provider default (typically 8192). |
 
 ---
 

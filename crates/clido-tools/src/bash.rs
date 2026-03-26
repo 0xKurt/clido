@@ -46,6 +46,38 @@ fn default_timeout_ms() -> u64 {
     30_000
 }
 
+/// Env vars that carry credentials and must not be inherited by agent-spawned shells.
+/// This prevents accidentally exfiltrating API keys through command output or logs.
+const SECRET_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "MINIMAX_API_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_API_KEY",
+    "HUGGINGFACE_API_KEY",
+    "HF_TOKEN",
+    "COHERE_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "TOGETHER_API_KEY",
+    "CLIDO_API_KEY",
+];
+
+/// Strip known secret-bearing env vars from a command before spawning.
+fn strip_secret_env_vars(cmd: &mut tokio::process::Command) {
+    for var in SECRET_ENV_VARS {
+        cmd.env_remove(var);
+    }
+}
+
 /// Plain (unsandboxed) command execution.
 async fn build_plain_command(
     command: &str,
@@ -56,6 +88,7 @@ async fn build_plain_command(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    strip_secret_env_vars(&mut cmd);
     cmd.output().await
 }
 
@@ -70,8 +103,13 @@ async fn build_sandboxed_command(
 ) -> std::io::Result<std::process::Output> {
     #[cfg(target_os = "macos")]
     {
-        // macOS sandbox-exec profile: deny everything except process exec,
-        // file reads, and writes to /tmp.
+        // macOS sandbox-exec profile.
+        // Restrictions: file writes are limited to /tmp.
+        // NOTE: this profile still allows arbitrary process-exec and
+        // network-outbound connections. A sandboxed command can therefore
+        // exfiltrate data over the network or exec any binary on the system.
+        // It is NOT a full isolation sandbox — it only prevents writes outside
+        // /tmp. Treat it as a convenience guardrail, not a security boundary.
         const PROFILE: &str = concat!(
             "(version 1)",
             "(deny default)",
@@ -86,6 +124,7 @@ async fn build_sandboxed_command(
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
+        strip_secret_env_vars(&mut cmd);
         cmd.output().await
     }
 
@@ -113,6 +152,7 @@ async fn build_sandboxed_command(
             if let Some(dir) = cwd {
                 cmd.current_dir(dir);
             }
+            strip_secret_env_vars(&mut cmd);
             cmd.output().await
         } else {
             // bwrap not available — fall back to unsandboxed with a warning.
@@ -122,6 +162,7 @@ async fn build_sandboxed_command(
             if let Some(dir) = cwd {
                 cmd.current_dir(dir);
             }
+            strip_secret_env_vars(&mut cmd);
             cmd.output().await
         }
     }
@@ -135,6 +176,7 @@ async fn build_sandboxed_command(
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
+        strip_secret_env_vars(&mut cmd);
         cmd.output().await
     }
 }
@@ -170,7 +212,11 @@ impl Tool for BashTool {
             None => return ToolOutput::err("Missing required field: command".to_string()),
         };
 
-        // Refuse commands that reference any blocked path.
+        // Refuse commands that literally contain a blocked path string.
+        // NOTE: this is a best-effort check on the raw command text. It can be
+        // bypassed via shell variable expansion ($HOME/secret), backticks,
+        // process substitution, symlinks, or encoded paths. It is NOT a
+        // security boundary — it is a guardrail against accidental access.
         for blocked in &self.blocked {
             let blocked_str = blocked.to_string_lossy();
             if command.contains(blocked_str.as_ref()) {

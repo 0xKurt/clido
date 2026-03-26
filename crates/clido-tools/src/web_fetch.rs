@@ -156,9 +156,15 @@ impl Tool for WebFetchTool {
 
         let text = strip_html(&body);
 
-        let (content, truncated) = if text.len() > max_chars {
-            // Truncate at a newline boundary if possible.
-            let cutoff = text[..max_chars].rfind('\n').unwrap_or(max_chars);
+        let (content, truncated) = if text.chars().count() > max_chars {
+            // Find the byte offset of the max_chars-th char boundary, then
+            // retreat to a newline boundary if possible.
+            let char_boundary = text
+                .char_indices()
+                .nth(max_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            let cutoff = text[..char_boundary].rfind('\n').unwrap_or(char_boundary);
             let truncated_text = &text[..cutoff];
             (
                 format!(

@@ -24,4 +24,4 @@ exclude-files = [
     # real terminal / TTY; the pure-logic helpers are already tested via #[cfg(test)].
     "crates/clido-cli/src/setup.rs",
 ]
-fail-under = 50.0
+fail-under = 70.0

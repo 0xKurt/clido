@@ -66,6 +66,18 @@ No API key is required. Ollama must be running locally on port 11434.
 Install Ollama from [ollama.ai](https://ollama.ai), then pull a model: `ollama pull llama3.2`
 :::
 
+## Setup wizard keyboard (full-screen TUI)
+
+In a normal terminal (TTY), the wizard uses a full-screen UI instead of the prompts shown above.
+
+- **Esc** on the first step cancels without saving—returning to the shell, or to the chat TUI if you started from `/profile new` or `/init`.
+- **Ctrl+Q** / **Ctrl+C** also cancel without saving (no failed exit code for cancellation).
+- After entering a **new profile name**, **Esc** on the provider step goes back to edit the name.
+- **←** / **→**, **Home**, **End** move the cursor in the profile name, API key, and similar fields.
+- When **creating a profile** (`/profile new` or `clido profile create`) and another profile already has a **plaintext** API key for the same provider, the wizard lists it: **↑↓** to choose, **Enter** to reuse, **n** to type a new key.
+
+Non-TTY / piped runs use simple text prompts only; these keys do not apply there.
+
 ## Config file location
 
 The wizard writes `~/.config/clido/config.toml` (or `%APPDATA%\clido\config.toml` on Windows, though Windows is not currently supported).

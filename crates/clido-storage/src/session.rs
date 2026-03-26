@@ -57,6 +57,65 @@ pub enum SessionLine {
     },
 }
 
+/// Replace a token that starts at `start` with a redacted placeholder.
+/// Scans forward from `start` consuming alphanumeric, `-`, `_`, `.`, `+`, `/`
+/// characters (base64/URL-safe alphabet used by most API keys).
+fn redact_token(s: &str, start: usize) -> String {
+    let prefix_end = start;
+    let mut end = prefix_end;
+    let bytes = s.as_bytes();
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b.is_ascii_alphanumeric()
+            || b == b'-'
+            || b == b'_'
+            || b == b'.'
+            || b == b'+'
+            || b == b'/'
+        {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if end > prefix_end {
+        format!("{}[REDACTED]{}", &s[..prefix_end], &s[end..])
+    } else {
+        s.to_string()
+    }
+}
+
+/// Redact known API key patterns from a JSON string before persisting to disk.
+///
+/// Handles: Anthropic (`sk-ant-`), OpenRouter (`sk-or-`), OpenAI (`sk-proj-`, `sk-`),
+/// AWS access keys (`AKIA`), and common `_key`/`_token`/`_secret` env var assignments.
+/// This operates on the raw JSON string so it works across all field types without
+/// needing to know the schema.
+pub fn redact_secrets(s: &str) -> String {
+    // Ordered: longer/more-specific prefixes first to avoid partial matches.
+    const PREFIXES: &[&str] = &["sk-ant-", "sk-or-", "sk-proj-", "AKIA"];
+
+    let mut result = s.to_string();
+    for prefix in PREFIXES {
+        let mut search_from = 0;
+        loop {
+            match result[search_from..].find(prefix) {
+                None => break,
+                Some(rel) => {
+                    let abs = search_from + rel + prefix.len();
+                    result = redact_token(&result, abs);
+                    // Advance past the prefix to avoid infinite loop.
+                    search_from = search_from + rel + prefix.len();
+                    if search_from >= result.len() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Stale-file record from a ToolResult (path, content_hash, mtime_nanos).
 #[derive(Debug, Clone)]
 pub struct StaleFileRecord {
@@ -112,8 +171,13 @@ impl SessionWriter {
     }
 
     /// Append a session line (newline-delimited JSON).
+    ///
+    /// Secret patterns (API keys, AWS credentials) are redacted before writing
+    /// so that credentials captured in tool inputs/outputs don't persist to disk.
     pub fn write_line(&mut self, line: &SessionLine) -> anyhow::Result<()> {
-        serde_json::to_writer(&mut self.file, line)?;
+        let json = serde_json::to_string(line)?;
+        let redacted = redact_secrets(&json);
+        self.file.write_all(redacted.as_bytes())?;
         self.file.write_all(b"\n")?;
         Ok(())
     }
@@ -660,5 +724,52 @@ mod tests {
         use std::io::Write;
         w.write_all(b"raw bytes").unwrap();
         w.flush().unwrap();
+    }
+
+    #[test]
+    fn redact_secrets_replaces_anthropic_key() {
+        let s = r#"{"command":"echo sk-ant-api03-abcXYZ123"}"#;
+        let r = redact_secrets(s);
+        assert!(!r.contains("abcXYZ123"), "API key value should be redacted");
+        assert!(
+            r.contains("sk-ant-"),
+            "prefix should remain for readability"
+        );
+        assert!(r.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_replaces_aws_key() {
+        let s = r#"{"output":"AKIAIOSFODNN7EXAMPLE rest of text"}"#;
+        let r = redact_secrets(s);
+        assert!(
+            !r.contains("IOSFODNN7EXAMPLE"),
+            "AWS key should be redacted"
+        );
+        assert!(r.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_replaces_openrouter_key() {
+        let s = r#"{"key":"sk-or-v1-deadbeefcafe1234"}"#;
+        let r = redact_secrets(s);
+        assert!(!r.contains("deadbeefcafe1234"));
+        assert!(r.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_noop_on_clean_input() {
+        let s = r#"{"tool_name":"Read","input":{"file_path":"src/main.rs"}}"#;
+        let r = redact_secrets(s);
+        assert_eq!(r, s, "clean input should be unchanged");
+    }
+
+    #[test]
+    fn redact_secrets_multiple_keys_in_one_string() {
+        let s = "sk-ant-key1 and sk-or-key2";
+        let r = redact_secrets(s);
+        assert!(!r.contains("key1"));
+        assert!(!r.contains("key2"));
+        assert_eq!(r.matches("[REDACTED]").count(), 2);
     }
 }
