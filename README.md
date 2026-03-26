@@ -32,7 +32,7 @@ cargo build --release
 
 On first launch, clido will run an interactive wizard (`clido init`) that:
 
-1. Prompts for your preferred provider (anthropic, openrouter, alibabacloud, local)
+1. Prompts for your preferred provider (anthropic, openrouter, openai, mistral, minimax, alibabacloud, local)
 2. Asks for your API key or base URL
 3. Writes `~/.config/clido/config.toml`
 
@@ -69,17 +69,20 @@ Switch profiles with `--profile fast` or `CLIDO_PROFILE=fast`.
 | `OPENAI_API_KEY` | OpenAI / OpenRouter API key |
 | `OPENROUTER_API_KEY` | OpenRouter API key |
 | `DASHSCOPE_API_KEY` | Alibaba Cloud (DashScope / Qwen) API key |
+| `MINIMAX_API_KEY` | MiniMax API key |
 | `CLIDO_PROFILE` | Active profile name |
 | `CLIDO_MODEL` | Model override |
 | `CLIDO_PROVIDER` | Provider override |
-| `CLIDO_MAX_TURNS` | Max agent turns (default: 10) |
+| `CLIDO_MAX_TURNS` | Max agent turns |
 | `CLIDO_MAX_BUDGET_USD` | Spend limit in USD |
 | `CLIDO_PERMISSION_MODE` | `default`, `accept-all`, or `plan` |
 | `CLIDO_OUTPUT_FORMAT` | `text`, `json`, or `stream-json` |
-| `CLIDO_INPUT_FORMAT` | `text` or `stream-json` |
+| `CLIDO_INPUT_FORMAT` | `text` (stream-json reserved for V2) |
 | `CLIDO_WORKDIR` | Working directory override |
 | `CLIDO_MAX_PARALLEL_TOOLS` | Max parallel read-only tool calls |
 | `CLIDO_SYSTEM_PROMPT` | System prompt override |
+| `CLIDO_DATA_DIR` | Override data directory (sessions, index, audit) |
+| `CLIDO_SESSION_DIR` | Override session storage directory |
 
 ## CLI flags
 
@@ -133,12 +136,20 @@ clido <SUBCOMMAND>
 | `sessions list` | List recent sessions |
 | `sessions show <ID>` | Show a session |
 | `sessions fork <ID>` | Fork a session to a new ID |
+| `profile list` | List all profiles with active model per slot |
+| `profile create [NAME]` | Create a new profile via guided wizard |
+| `profile switch <NAME>` | Switch the active (default) profile |
+| `profile edit <NAME>` | Edit a profile via guided wizard |
+| `profile delete <NAME>` | Delete a profile |
 | `memory list` | List stored memories |
 | `memory prune` | Prune old memories |
 | `memory reset` | Delete all memories |
 | `index build` | Build the repository index |
 | `index stats` | Show index statistics |
 | `index clear` | Clear the index |
+| `checkpoint` | Manage session checkpoints |
+| `rollback [ID]` | Restore to a checkpoint |
+| `plan` | Manage task plans |
 | `workflow run <FILE>` | Run a declarative workflow |
 | `workflow validate <FILE>` | Validate workflow YAML |
 | `workflow inspect <FILE>` | List workflow steps and dependencies |
@@ -182,12 +193,19 @@ Type `/` in the input bar to see completions. Available commands:
 | `/session` | Show current session ID |
 | `/sessions` | Open session picker (list and resume recent sessions) |
 | `/quit` | Exit |
+| `/stop` | Interrupt the current run without sending a message |
 | `/model [name]` | Show or switch the active model |
 | `/models` | Open interactive model picker (filter, favorites, pricing) |
 | `/fast` | Switch to the fast model (respects `[roles] fast` in config) |
 | `/smart` | Switch to the smart model (respects `[roles] reasoning` in config) |
 | `/role <name>` | Switch to the model assigned to a named role |
 | `/fav` | Toggle the current model as a favorite |
+| `/profile` | Open profile picker — switch, create, or edit profiles |
+| `/profile new` | Create a new profile via the guided wizard |
+| `/profile edit [name]` | Edit a profile via the guided wizard |
+| `/profiles` | List all profiles with active model per slot |
+| `/agents` | Show current agent configuration (main, worker, reviewer) |
+| `/reviewer [on\|off]` | Toggle reviewer sub-agent |
 | `/cost` | Show session cost so far |
 | `/tokens` | Show input and output token usage |
 | `/compact` | Compact the context window immediately |
@@ -195,9 +213,17 @@ Type `/` in the input bar to see completions. Available commands:
 | `/plan` | Show current task plan (when `--planner` is active) |
 | `/ship [msg]` | Stage all changes, commit, and push |
 | `/save [msg]` | Stage all changes and commit locally |
+| `/pr [title]` | Create a pull request |
+| `/branch <name>` | Create and switch to a new branch |
+| `/sync` | Pull --rebase from upstream, resolve conflicts if needed |
 | `/undo` | Undo the last committed change |
+| `/rollback [id]` | Restore to a checkpoint |
 | `/index` | Show repo index status |
 | `/rules` | Show active CLIDO.md rules files |
+| `/settings` | Open settings editor (roles, default model) |
+| `/workdir [path]` | Show or set working directory |
+| `/check` | Run diagnostics on current project |
+| `/copy` | Copy last assistant message to clipboard |
 | `/image <path>` | Attach an image to the next message |
 
 **Key bindings:** `Enter` send · `Ctrl+Enter` interrupt & send · `↑↓` history · `PgUp/PgDn` scroll · `Ctrl+U` clear input · `Ctrl+C` quit.
@@ -307,7 +333,7 @@ See [Local development and testing](devdocs/guides/local-development-testing.md)
 
 ## Status
 
-**V1+ implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes, `clido doctor` and `clido init`, interactive TUI (`clido` with no args at a TTY), first-run setup, memory, repo index, declarative workflows, audit log, stats, shell completions, man page, list-models, planner (experimental), and MCP support. Build and test: see **Build** above.
+**V1+ implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes, `clido doctor` and `clido init`, interactive TUI (`clido` with no args at a TTY), first-run setup, memory, repo index, declarative workflows, audit log, stats, shell completions, man page, list-models, planner (experimental), MCP support, agent profiles (create/switch/edit/delete with worker and reviewer sub-agent slots), checkpoints and rollback, and multi-provider support including Anthropic, OpenAI, OpenRouter, Mistral, MiniMax, Alibaba Cloud, and local (Ollama). Build and test: see **Build** above.
 
 ## Documentation
 
