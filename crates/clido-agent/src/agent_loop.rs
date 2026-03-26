@@ -691,6 +691,7 @@ impl AgentLoop {
         pricing: Option<&PricingTable>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<String> {
+        let history_before = self.history.len();
         let user_msg = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -711,7 +712,11 @@ impl AgentLoop {
             });
         }
 
-        self.run_completion_loop(session, pricing, cancel).await
+        let result = self.run_completion_loop(session, pricing, cancel).await;
+        if result.is_err() && self.history.len() == history_before + 1 {
+            self.history.pop();
+        }
+        result
     }
 
     /// Run until stop_reason is EndTurn or max_turns reached.
@@ -729,6 +734,7 @@ impl AgentLoop {
             self.config.system_prompt = Some(injected);
         }
 
+        let history_before = self.history.len();
         let user_msg = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -749,7 +755,13 @@ impl AgentLoop {
             });
         }
 
-        self.run_completion_loop(session, pricing, cancel).await
+        let result = self.run_completion_loop(session, pricing, cancel).await;
+        // If the run failed before any assistant response, rollback the user message
+        // so the next call doesn't send consecutive user messages (which most APIs reject).
+        if result.is_err() && self.history.len() == history_before + 1 {
+            self.history.pop();
+        }
+        result
     }
 
     /// Like `run`, but prepends `extra_blocks` (e.g. image blocks) before the text block.
@@ -765,6 +777,7 @@ impl AgentLoop {
             self.config.system_prompt = Some(injected);
         }
 
+        let history_before = self.history.len();
         let mut content = extra_blocks;
         content.push(ContentBlock::Text {
             text: user_input.to_string(),
@@ -787,7 +800,11 @@ impl AgentLoop {
             });
         }
 
-        self.run_completion_loop(session, pricing, cancel).await
+        let result = self.run_completion_loop(session, pricing, cancel).await;
+        if result.is_err() && self.history.len() == history_before + 1 {
+            self.history.pop();
+        }
+        result
     }
 
     /// Like `run_next_turn`, but prepends `extra_blocks` before the text block.
@@ -799,6 +816,7 @@ impl AgentLoop {
         pricing: Option<&PricingTable>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<String> {
+        let history_before = self.history.len();
         let mut content = extra_blocks;
         content.push(ContentBlock::Text {
             text: user_input.to_string(),
@@ -821,7 +839,11 @@ impl AgentLoop {
             });
         }
 
-        self.run_completion_loop(session, pricing, cancel).await
+        let result = self.run_completion_loop(session, pricing, cancel).await;
+        if result.is_err() && self.history.len() == history_before + 1 {
+            self.history.pop();
+        }
+        result
     }
 
     async fn run_completion_loop(
@@ -1983,6 +2005,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "extra blocks response");
+    }
+
+    // ── history rollback on failed run ─────────────────────────────────────
+
+    /// Provider that always fails to simulate a network/API error.
+    struct FailingProvider;
+
+    #[async_trait]
+    impl ModelProvider for FailingProvider {
+        async fn complete(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<ModelResponse> {
+            Err(ClidoError::Other(anyhow::anyhow!("simulated API error")))
+        }
+
+        async fn complete_stream(
+            &self,
+            _messages: &[clido_core::Message],
+            _tools: &[ToolSchema],
+            _config: &AgentConfig,
+        ) -> clido_core::Result<
+            Pin<Box<dyn Stream<Item = clido_core::Result<clido_providers::StreamEvent>> + Send>>,
+        > {
+            unimplemented!()
+        }
+        async fn list_models(&self) -> Vec<clido_providers::ModelEntry> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn run_rolls_back_user_message_on_provider_failure() {
+        let provider = Arc::new(FailingProvider);
+        let mut agent = AgentLoop::new(provider, empty_registry(), mock_config(), None);
+        assert_eq!(agent.history.len(), 0);
+        let result = agent.run("hello", None, None, None).await;
+        assert!(result.is_err());
+        // History must be empty — the dangling user message should be rolled back.
+        assert_eq!(
+            agent.history.len(),
+            0,
+            "failed run should roll back the user message from history"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_next_turn_rolls_back_user_message_on_provider_failure() {
+        // First turn succeeds with a working provider.
+        let good_provider = Arc::new(MockProvider::new("first response"));
+        let mut agent = AgentLoop::new(good_provider, empty_registry(), mock_config(), None);
+        agent.run("first", None, None, None).await.unwrap();
+        let len_after_first = agent.history.len();
+
+        // Swap the provider to a failing one, then try a second turn.
+        agent.provider = Arc::new(FailingProvider);
+        let result = agent.run_next_turn("second", None, None, None).await;
+        assert!(result.is_err());
+        // History must not have grown — the dangling user message is rolled back.
+        assert_eq!(
+            agent.history.len(),
+            len_after_first,
+            "failed run_next_turn should roll back the user message"
+        );
     }
 
     // ── cancel signal ──────────────────────────────────────────────────────
