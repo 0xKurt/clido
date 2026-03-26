@@ -195,6 +195,22 @@ async fn dispatch(cli: cli::Cli) -> Result<(), anyhow::Error> {
         .into());
     }
 
+    // Invalid flag combinations — error at startup per CLI spec §3.
+    if cli.quiet && cli.verbose {
+        return Err(CliError::Usage(
+            "--quiet and --verbose are mutually exclusive. Use one or the other.".into(),
+        )
+        .into());
+    }
+    if cli.system_prompt.is_some() && cli.system_prompt_file.is_some() {
+        return Err(CliError::Usage(
+            "--system-prompt and --system-prompt-file are mutually exclusive. \
+             Use --append-system-prompt to extend the default prompt."
+                .into(),
+        )
+        .into());
+    }
+
     match &cli.subcommand {
         Some(cli::Subcommand::Version) => {
             println!("clido {}", VERSION);
