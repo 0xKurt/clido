@@ -14,8 +14,10 @@ use crate::errors::CliError;
 use crate::sessions;
 use crate::ui::{ansi, cli_use_color};
 
-/// Handle a `/`-prefixed REPL slash command. Returns `true` if the loop should exit.
-async fn handle_slash_command(cmd: &str, total_turns: u32, total_cost_usd: f64) -> bool {
+/// Handle a `/`-prefixed REPL slash command.
+/// Returns `Some(exit)` if handled locally (exit=true means quit the loop),
+/// or `None` if the input should be passed to the agent unchanged.
+async fn handle_slash_command(cmd: &str, total_turns: u32, total_cost_usd: f64) -> Option<bool> {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     match parts[0] {
         "/help" => {
@@ -46,7 +48,6 @@ async fn handle_slash_command(cmd: &str, total_turns: u32, total_cost_usd: f64) 
             let id = parts.get(1).map(|s| s.trim()).unwrap_or("");
             if id.is_empty() {
                 eprintln!("Usage: /resume <session-id>");
-                eprintln!("       Or restart with: clido --resume {}", id);
             } else {
                 eprintln!(
                     "To resume session {}, restart the REPL with: clido --resume {}",
@@ -66,12 +67,11 @@ async fn handle_slash_command(cmd: &str, total_turns: u32, total_cost_usd: f64) 
                 _ => eprintln!("Usage: /mode plan | /mode agent"),
             }
         }
-        "/exit" | "/quit" => return true,
-        other => {
-            eprintln!("Unknown REPL command: {}. Type /help for a list.", other);
-        }
+        "/exit" | "/quit" => return Some(true),
+        // Unknown: pass to the agent unchanged.
+        _ => return None,
     }
-    false
+    Some(false)
 }
 
 pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
@@ -115,12 +115,11 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
         let prompt = if line.starts_with("//") {
             &line[1..]
         } else if line.starts_with('/') {
-            // Slash command — handle locally, do not send to agent.
-            let exit = handle_slash_command(line, total_turns, total_cost_usd).await;
-            if exit {
-                break;
+            match handle_slash_command(line, total_turns, total_cost_usd).await {
+                Some(true) => break,     // /exit or /quit
+                Some(false) => continue, // handled locally, nothing to send
+                None => line,            // unknown — pass to agent as-is
             }
-            continue;
         } else {
             line
         };
