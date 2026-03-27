@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::file_tracker::FileTracker;
 use crate::path_guard::PathGuard;
-use crate::secrets::scan_for_secrets;
+use crate::secrets::{scan_for_secrets, secret_findings_prefix};
 use crate::{Tool, ToolOutput};
 
 pub struct EditTool {
@@ -800,14 +800,16 @@ impl Tool for EditTool {
             Err(e) => return ToolOutput::err(e.to_string()),
         };
 
-        // Secret detection: warn on new_string content, but do not block
+        // Secret detection: warn on new_string content, but do not block (tool output + tracing)
         let findings = scan_for_secrets(new_string);
-        for finding in &findings {
-            eprintln!(
-                "Warning: potential secret detected in edit content: {}",
-                finding
+        if !findings.is_empty() {
+            tracing::warn!(
+                tool = "Edit",
+                ?findings,
+                "potential secrets in tool content"
             );
         }
+        let secret_prefix = secret_findings_prefix(&findings);
 
         let old_content = content.clone();
 
@@ -908,8 +910,8 @@ impl Tool for EditTool {
         let diff = build_unified_diff(path_str, &old_content, &new_content);
         let mut out = ToolOutput::ok_with_meta(
             format!(
-                "Edited {}\nmatch_strategy: {}\nmatch_confidence: {:.2}",
-                path_str, strategy, confidence
+                "{}Edited {}\nmatch_strategy: {}\nmatch_confidence: {:.2}",
+                secret_prefix, path_str, strategy, confidence
             ),
             path.display().to_string(),
             hash,

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::file_tracker::FileTracker;
 use crate::path_guard::PathGuard;
-use crate::secrets::scan_for_secrets;
+use crate::secrets::{scan_for_secrets, secret_findings_prefix};
 use crate::{Tool, ToolOutput};
 
 pub struct WriteTool {
@@ -72,14 +72,16 @@ impl Tool for WriteTool {
             return ToolOutput::err("Missing required field: file_path or path".to_string());
         }
 
-        // Secret detection: warn but do not block
+        // Secret detection: warn but do not block (message in tool output + tracing; no stderr)
         let findings = scan_for_secrets(content);
-        for finding in &findings {
-            eprintln!(
-                "Warning: potential secret detected in write content: {}",
-                finding
+        if !findings.is_empty() {
+            tracing::warn!(
+                tool = "Write",
+                ?findings,
+                "potential secrets in tool content"
             );
         }
+        let secret_prefix = secret_findings_prefix(&findings);
 
         let path = match self.guard.resolve_for_write(path_str) {
             Ok(p) => p,
@@ -114,7 +116,7 @@ impl Tool for WriteTool {
                     tracker.update(&path, mtime_nanos);
                 }
                 ToolOutput::ok_with_meta(
-                    "File written successfully.".to_string(),
+                    format!("{}File written successfully.", secret_prefix),
                     path.display().to_string(),
                     hash,
                     mtime_nanos,

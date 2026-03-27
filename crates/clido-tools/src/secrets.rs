@@ -1,5 +1,21 @@
 //! Secret-pattern scanning for Write and Edit tool content.
 
+/// Prefix for successful tool output when patterns matched. Never includes secret values.
+pub fn secret_findings_prefix(findings: &[String]) -> String {
+    if findings.is_empty() {
+        return String::new();
+    }
+    let mut block =
+        String::from("⚠ Warning: content matched secret-like patterns (values are not shown):\n");
+    for f in findings {
+        block.push_str("  • ");
+        block.push_str(f);
+        block.push('\n');
+    }
+    block.push('\n');
+    block
+}
+
 /// Scan content for secret-like patterns.
 /// Returns a list of human-readable descriptions of what was found.
 pub fn scan_for_secrets(content: &str) -> Vec<String> {
@@ -187,6 +203,22 @@ mod tests {
         let content = "fn main() {\n    println!(\"hello world\");\n}\n";
         let findings = scan_for_secrets(content);
         assert!(findings.is_empty(), "Clean content should have no findings");
+    }
+
+    #[test]
+    fn secret_findings_prefix_empty_when_no_findings() {
+        assert!(secret_findings_prefix(&[]).is_empty());
+        let findings = scan_for_secrets("fn main() {}");
+        assert!(secret_findings_prefix(&findings).is_empty());
+    }
+
+    #[test]
+    fn secret_findings_prefix_lists_safe_descriptions_only() {
+        let findings = scan_for_secrets("auth_token = \"supersecretlongvalue1234567890\"");
+        let p = secret_findings_prefix(&findings);
+        assert!(p.contains("secret-like patterns"));
+        assert!(p.contains("credential"));
+        assert!(!p.contains("supersecretlongvalue"));
     }
 
     // ── openai key detection ──────────────────────────────────────────────

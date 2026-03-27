@@ -6722,7 +6722,7 @@ async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
         if let Some(entry) = entry {
             crate::setup::run_edit_profile(profile_name, entry).await?;
         } else {
-            eprintln!("profile '{}' not found", profile_name);
+            tracing::warn!(profile = %profile_name, "profile not found for /profile edit");
         }
         let mut next_cli = cli.clone();
         next_cli.resume = app.restart_resume_session.take();
