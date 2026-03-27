@@ -8,8 +8,8 @@ pub mod pricing;
 pub mod types;
 
 pub use config::{
-    AgentConfig, AgentSlotConfig, AgentsConfig, HooksConfig, PermissionMode, ProviderConfig,
-    ProviderType,
+    evaluate_rules, AgentConfig, AgentSlotConfig, AgentsConfig, HooksConfig, PermissionMode,
+    PermissionRule, ProviderConfig, ProviderType, RuleAction,
 };
 pub use config_loader::{
     agent_config_from_loaded, config_file_exists, delete_profile_from_config, global_config_path,
@@ -20,3 +20,7 @@ pub use error::{ClidoError, Result};
 pub use model_prefs::ModelPrefs;
 pub use pricing::{compute_cost_usd, load_pricing, ModelPricingEntry, PricingTable};
 pub use types::{ContentBlock, Message, ModelResponse, Role, StopReason, ToolSchema, Usage};
+
+/// Number of consecutive identical tool failures before doom-loop detection triggers.
+/// Exported so ClidoError::DoomLoop can reference it in its Display impl.
+pub const DOOM_LOOP_THRESHOLD_DISPLAY: usize = 3;

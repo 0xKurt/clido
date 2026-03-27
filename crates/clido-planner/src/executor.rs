@@ -1,8 +1,10 @@
 //! DAG executor: run tasks in dependency order, batching parallel tasks.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::future::join_all;
 
 use crate::graph::{TaskGraph, TaskNode};
 
@@ -38,6 +40,11 @@ pub struct PlanExecutor;
 
 impl PlanExecutor {
     /// Execute a graph using the given runner. Returns a PlanResult with all task results.
+    ///
+    /// Tasks within the same dependency batch run in parallel (true concurrent execution
+    /// via `join_all`). Batches are ordered by dependency: all tasks in batch N complete
+    /// before any task in batch N+1 starts.
+    ///
     /// If the graph is invalid (cycle, etc.) returns a fallback result immediately.
     pub async fn execute(graph: &TaskGraph, runner: &dyn TaskRunner) -> PlanResult {
         let batches = match graph.parallel_batches() {
@@ -57,16 +64,33 @@ impl PlanExecutor {
         let start = std::time::Instant::now();
         let mut all_success = true;
 
+        // Wrap runner in Arc so it can be shared across parallel futures.
+        let runner = Arc::new(RunnerRef(runner));
+
         for batch in batches {
-            // Run batch tasks sequentially for now (parallel execution is a future optimisation).
-            // The batching structure is still useful because it communicates which tasks COULD
-            // run in parallel, satisfying the DoD requirement.
-            for task in batch {
-                let result = runner.run_task(task, &context).await;
+            if batch.is_empty() {
+                continue;
+            }
+            let batch_ctx = context.clone();
+            // Run all tasks in this batch concurrently.
+            let futures: Vec<_> = batch
+                .iter()
+                .map(|task| {
+                    let r = runner.clone();
+                    let ctx = batch_ctx.clone();
+                    // Clone the node so it can be moved into the async closure.
+                    let task: TaskNode = (*task).clone();
+                    async move { r.0.run_task(&task, &ctx).await }
+                })
+                .collect();
+
+            let batch_results = join_all(futures).await;
+
+            for result in batch_results {
                 if !result.success {
                     all_success = false;
                 }
-                context.insert(task.id.clone(), result.output.clone());
+                context.insert(result.task_id.clone(), result.output.clone());
                 task_results.push(result);
             }
         }
@@ -79,6 +103,13 @@ impl PlanExecutor {
         }
     }
 }
+
+/// Wrapper so we can put `&dyn TaskRunner` inside `Arc` without lifetime issues.
+struct RunnerRef<'a>(&'a dyn TaskRunner);
+
+// SAFETY: TaskRunner requires Send + Sync, so the wrapper is Send + Sync too.
+unsafe impl<'a> Send for RunnerRef<'a> {}
+unsafe impl<'a> Sync for RunnerRef<'a> {}
 
 #[cfg(test)]
 mod tests {

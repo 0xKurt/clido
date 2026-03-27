@@ -220,6 +220,7 @@ async fn sub_agent_isolation_from_cli_crate() {
         max_turns: 2,
         max_budget_usd: None,
         permission_mode: PermissionMode::AcceptAll,
+        permission_rules: vec![],
         max_context_tokens: None,
         compaction_threshold: None,
         quiet: false,

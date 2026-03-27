@@ -67,6 +67,7 @@ fn test_config() -> AgentConfig {
         max_turns: 3,
         max_budget_usd: None,
         permission_mode: PermissionMode::AcceptAll,
+        permission_rules: vec![],
         max_context_tokens: None,
         compaction_threshold: None,
         quiet: false,

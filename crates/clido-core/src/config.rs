@@ -2,6 +2,136 @@
 
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Per-file permission rules
+// ---------------------------------------------------------------------------
+
+/// Action to take when a permission rule matches a tool's file argument.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleAction {
+    /// Automatically allow without prompting.
+    Allow,
+    /// Automatically deny and return feedback to the model.
+    Deny,
+    /// Ask the user interactively.
+    Ask,
+}
+
+/// A single glob-pattern-based permission rule.
+///
+/// Rules are evaluated in order; the first match wins.  If no rule matches,
+/// the effective `PermissionMode` fallback is used.
+///
+/// Example TOML:
+/// ```toml
+/// [[permission_rules]]
+/// pattern = "src/**"
+/// action = "allow"
+///
+/// [[permission_rules]]
+/// pattern = "tests/**"
+/// action = "ask"
+///
+/// [[permission_rules]]
+/// pattern = "**"
+/// action = "deny"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRule {
+    /// Glob pattern matched against the tool's primary file argument (relative to workspace root).
+    pub pattern: String,
+    /// Action to take on match.
+    pub action: RuleAction,
+    /// Optional human-readable reason shown when denying.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl PermissionRule {
+    /// Return `true` when `path` matches this rule's glob pattern.
+    pub fn matches(&self, path: &str) -> bool {
+        glob_match(&self.pattern, path)
+    }
+}
+
+/// Evaluate an ordered rule list against `path`.  Returns the first matching
+/// action, or `None` when no rule matches.
+pub fn evaluate_rules(
+    rules: &[PermissionRule],
+    path: &str,
+) -> Option<(RuleAction, Option<String>)> {
+    for rule in rules {
+        if rule.matches(path) {
+            return Some((rule.action.clone(), rule.reason.clone()));
+        }
+    }
+    None
+}
+
+/// Simple glob matcher supporting `*` (within segment) and `**` (multi-segment).
+fn glob_match(pattern: &str, path: &str) -> bool {
+    glob_match_parts(
+        &pattern.split('/').collect::<Vec<_>>(),
+        &path.split('/').collect::<Vec<_>>(),
+    )
+}
+
+fn glob_match_parts(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first(), path.first()) {
+        (None, None) => true,
+        (None, _) | (_, None) => {
+            // Allow trailing **
+            pat.iter().all(|p| *p == "**")
+        }
+        (Some(&"**"), _) => {
+            // ** can consume zero or more path segments.
+            if glob_match_parts(&pat[1..], path) {
+                return true;
+            }
+            glob_match_parts(pat, &path[1..])
+        }
+        (Some(p), Some(s)) => {
+            if segment_match(p, s) {
+                glob_match_parts(&pat[1..], &path[1..])
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Match a single path segment against a pattern segment (supports `*`).
+fn segment_match(pattern: &str, segment: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    // Simple * wildcard within segment.
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == segment;
+    }
+    let mut s = segment;
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            if !s.starts_with(part) {
+                return false;
+            }
+            s = &s[part.len()..];
+        } else if i == parts.len() - 1 {
+            if !s.ends_with(part) {
+                return false;
+            }
+        } else {
+            match s.find(part) {
+                Some(pos) => s = &s[pos + part.len()..],
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 /// Permission mode for state-changing tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -24,7 +154,11 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// Optional ordered list of glob-based per-file permission rules.
+    /// Rules are evaluated before the `permission_mode` fallback.
+    /// First matching rule wins.
     #[serde(default)]
+    pub permission_rules: Vec<PermissionRule>,
     pub use_planner: bool,
     #[serde(default)]
     pub use_index: bool,
@@ -65,6 +199,7 @@ impl Default for AgentConfig {
             model: String::new(),
             system_prompt: None,
             permission_mode: PermissionMode::Default,
+            permission_rules: Vec::new(),
             use_planner: false,
             use_index: false,
             max_context_tokens: None,

@@ -339,16 +339,22 @@ pub(crate) fn load_mcp_tools_from_path(
             return registry;
         }
     };
+    // MCP initialize/list_tools are now async. We're called from a sync context during
+    // startup, so we use block_in_place to drive the async calls on the current thread
+    // without blocking the entire runtime.
+    let rt = tokio::runtime::Handle::current();
     for server_config in mcp_cfg.servers {
         let server_name = server_config.name.clone();
         match McpClient::spawn(server_config) {
             Err(e) => eprintln!("MCP spawn failed for '{}': {}", server_name, e),
             Ok(client) => {
-                if let Err(e) = client.initialize() {
+                let init_result = tokio::task::block_in_place(|| rt.block_on(client.initialize()));
+                if let Err(e) = init_result {
                     eprintln!("MCP initialize failed for '{}': {}", server_name, e);
                     continue;
                 }
-                match client.list_tools() {
+                let tools_result = tokio::task::block_in_place(|| rt.block_on(client.list_tools()));
+                match tools_result {
                     Err(e) => eprintln!("MCP list_tools failed for '{}': {}", server_name, e),
                     Ok(tools) => {
                         let client_arc = Arc::new(client);

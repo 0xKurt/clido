@@ -1,11 +1,15 @@
 //! MCP (Model Context Protocol) client: spawn server process, initialize, list tools, call tools.
 //!
-//! MCP protocol is JSON-RPC 2.0 over stdio.
+//! MCP protocol is JSON-RPC 2.0 over stdio. This implementation uses tokio async I/O so that
+//! slow or misbehaving MCP servers never block the Tokio executor.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::process::Stdio;
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
 
 /// Configuration for an MCP server.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -44,6 +48,8 @@ struct JsonRpcResponse {
 }
 
 /// Active MCP client connected to a spawned server process.
+///
+/// All I/O uses async tokio primitives so a slow server never blocks the executor.
 pub struct McpClient {
     _child: Child,
     stdin: Mutex<ChildStdin>,
@@ -83,19 +89,20 @@ impl McpClient {
         })
     }
 
-    fn next_id(&self) -> u64 {
-        let mut id = self.next_id.lock().unwrap();
+    async fn next_id(&self) -> u64 {
+        let mut id = self.next_id.lock().await;
         let v = *id;
         *id += 1;
         v
     }
 
-    fn send_request(
+    /// Send a JSON-RPC request and await the response line asynchronously.
+    async fn send_request(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let id = self.next_id();
+        let id = self.next_id().await;
         let req = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -103,20 +110,34 @@ impl McpClient {
             "params": params
         });
         let line = serde_json::to_string(&req)? + "\n";
+
+        // Write request.
         {
-            let mut stdin = self.stdin.lock().unwrap();
-            stdin.write_all(line.as_bytes())?;
-            stdin.flush()?;
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP write error: {}", e))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP flush error: {}", e))?;
         }
-        // Read response line
+
+        // Read response line.
         let mut resp_line = String::new();
         {
-            let mut reader = self.reader.lock().unwrap();
-            reader.read_line(&mut resp_line)?;
+            let mut reader = self.reader.lock().await;
+            reader
+                .read_line(&mut resp_line)
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP read error: {}", e))?;
         }
+
         if resp_line.trim().is_empty() {
             return Err(anyhow::anyhow!("MCP server returned empty response"));
         }
+
         let resp: JsonRpcResponse = serde_json::from_str(&resp_line).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to parse MCP response: {} — raw: {}",
@@ -131,7 +152,7 @@ impl McpClient {
     }
 
     /// Send the `initialize` handshake.
-    pub fn initialize(&self) -> anyhow::Result<serde_json::Value> {
+    pub async fn initialize(&self) -> anyhow::Result<serde_json::Value> {
         self.send_request(
             "initialize",
             serde_json::json!({
@@ -140,11 +161,14 @@ impl McpClient {
                 "clientInfo": { "name": "clido", "version": "0.1.0" }
             }),
         )
+        .await
     }
 
     /// List tools exposed by the server.
-    pub fn list_tools(&self) -> anyhow::Result<Vec<McpToolDef>> {
-        let result = self.send_request("tools/list", serde_json::json!({}))?;
+    pub async fn list_tools(&self) -> anyhow::Result<Vec<McpToolDef>> {
+        let result = self
+            .send_request("tools/list", serde_json::json!({}))
+            .await?;
         let tools = result
             .get("tools")
             .and_then(|t| t.as_array())
@@ -176,7 +200,7 @@ impl McpClient {
     }
 
     /// Call a tool by name with the given arguments.
-    pub fn call_tool(
+    pub async fn call_tool(
         &self,
         name: &str,
         arguments: serde_json::Value,
@@ -188,6 +212,7 @@ impl McpClient {
                 "arguments": arguments
             }),
         )
+        .await
     }
 }
 
@@ -195,36 +220,12 @@ impl McpClient {
 pub fn load_mcp_config(path: &std::path::Path) -> anyhow::Result<McpConfig> {
     let s = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read MCP config: {}", e))?;
-    if path
-        .extension()
-        .map(|e| e == "yaml" || e == "yml")
-        .unwrap_or(false)
-    {
-        serde_json::from_str(&serde_yaml_to_json(&s)?)
-            .map_err(|e| anyhow::anyhow!("Failed to parse MCP config YAML: {}", e))
-    } else {
-        serde_json::from_str(&s)
-            .map_err(|e| anyhow::anyhow!("Failed to parse MCP config JSON: {}", e))
-    }
-}
-
-/// Minimal YAML-to-JSON shim (just use JSON since serde_json parses both when input is JSON).
-/// For YAML, we use a basic approach — real YAML parsing would require serde_yaml.
-fn serde_yaml_to_json(s: &str) -> anyhow::Result<String> {
-    // Try as JSON first (YAML is a superset of JSON)
-    if serde_json::from_str::<serde_json::Value>(s).is_ok() {
-        return Ok(s.to_string());
-    }
-    Err(anyhow::anyhow!(
-        "YAML MCP configs require JSON-compatible syntax (or use .json extension)"
-    ))
+    serde_json::from_str(&s).map_err(|e| anyhow::anyhow!("Failed to parse MCP config JSON: {}", e))
 }
 
 // ---------------------------------------------------------------------------
 // McpTool: Tool trait wrapper for a single MCP tool
 // ---------------------------------------------------------------------------
-
-use std::sync::Arc;
 
 /// A `Tool`-trait implementation that delegates execution to an MCP server.
 pub struct McpTool {
@@ -253,7 +254,7 @@ impl crate::Tool for McpTool {
     }
 
     async fn execute(&self, input: serde_json::Value) -> crate::ToolOutput {
-        match self.client.call_tool(&self.def.name, input) {
+        match self.client.call_tool(&self.def.name, input).await {
             Ok(result) => crate::ToolOutput::ok(result.to_string()),
             Err(e) => crate::ToolOutput::err(e.to_string()),
         }
@@ -306,28 +307,17 @@ mod tests {
         assert_eq!(cfg.servers[0].command, "cat");
     }
 
-    /// Integration test: spawn `cat` as a mock MCP server.
-    /// cat just echoes back stdin, so we can use it to verify the I/O plumbing.
-    /// The actual JSON-RPC protocol is validated separately with real servers.
-    #[test]
-    fn mcp_client_spawn_echo_server() {
-        // We can't easily test full JSON-RPC with cat, but we can confirm the
-        // client spawns without panicking. A real MCP server test would require
-        // a real MCP server binary.
+    #[tokio::test]
+    async fn mcp_client_spawn_echo_server() {
         let cfg = McpServerConfig {
             name: "echo-test".to_string(),
             command: "cat".to_string(),
             args: vec![],
             env: HashMap::new(),
         };
-        // spawn should succeed on unix
         let result = McpClient::spawn(cfg);
-        // On CI/unix, cat is always available
         if let Ok(client) = result {
-            // We can't call initialize() against cat since it won't respond
-            // with valid JSON-RPC. Just verify the struct is usable.
             assert_eq!(client.config.name, "echo-test");
         }
-        // Either Ok or Err is acceptable for this unit test
     }
 }

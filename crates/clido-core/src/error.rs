@@ -32,6 +32,13 @@ pub enum ClidoError {
     #[error("budget exceeded")]
     BudgetExceeded,
 
+    /// Agent called the same tool with identical failing output 3+ times in a row.
+    /// This indicates a stuck loop that would otherwise spend tokens indefinitely.
+    #[error(
+        "doom loop detected: tool '{tool}' failed with the same error 3 times in a row: {error}"
+    )]
+    DoomLoop { tool: String, error: String },
+
     #[error("max_turns exceeded")]
     MaxTurnsExceeded,
 
@@ -120,6 +127,18 @@ mod tests {
     fn budget_exceeded_display() {
         let e = ClidoError::BudgetExceeded;
         assert!(e.to_string().contains("budget exceeded"));
+    }
+
+    #[test]
+    fn doom_loop_display() {
+        let e = ClidoError::DoomLoop {
+            tool: "Bash".to_string(),
+            error: "command not found".to_string(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("doom loop"), "got: {s}");
+        assert!(s.contains("Bash"), "got: {s}");
+        assert!(s.contains("command not found"), "got: {s}");
     }
 
     #[test]

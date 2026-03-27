@@ -14,16 +14,73 @@ use crate::errors::CliError;
 use crate::sessions;
 use crate::ui::{ansi, cli_use_color};
 
+/// Parse `@agent` mention routing from a prompt.
+///
+/// Returns `(agent_hint, cleaned_prompt)` where `agent_hint` is `Some("worker")` etc.
+/// and `cleaned_prompt` has the `@agent` prefix stripped.
+///
+/// Supported: `@worker`, `@reviewer`, `@explore`, `@general`.
+/// Unknown `@...` tokens are left in the prompt unchanged.
+fn parse_agent_mention(prompt: &str) -> (Option<&'static str>, String) {
+    let trimmed = prompt.trim_start();
+    // Must start with @ and have at least one more char.
+    if !trimmed.starts_with('@') {
+        return (None, prompt.to_string());
+    }
+    let rest = &trimmed[1..];
+    // Extract the agent name (alpha/underscore/digit until whitespace).
+    let name_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    let remainder = rest[name_end..].trim_start().to_string();
+
+    match name.to_lowercase().as_str() {
+        "worker" | "w" => (Some("worker"), remainder),
+        "reviewer" | "r" => (Some("reviewer"), remainder),
+        "explore" | "e" => (Some("explore"), remainder),
+        "general" | "g" => (Some("general"), remainder),
+        _ => (None, prompt.to_string()),
+    }
+}
+
+/// Build an agent-routing prefix that tells the main agent to immediately delegate
+/// to the specified sub-agent tool.
+fn route_to_agent(agent: &str, prompt: &str) -> String {
+    match agent {
+        "worker" => format!(
+            "ROUTING: Call SpawnWorker immediately with the following task. \
+             Pass ALL necessary context in the call. Do not do any work yourself first.\n\
+             Task: {prompt}"
+        ),
+        "reviewer" => format!(
+            "ROUTING: Call SpawnReviewer immediately to review the following. \
+             Include the relevant code as `output` in the call.\n\
+             Review request: {prompt}"
+        ),
+        // explore and general → just prepend a light instruction
+        "explore" => {
+            format!("[Explore mode] Focus on reading/searching the codebase to answer: {prompt}")
+        }
+        _ => prompt.to_string(),
+    }
+}
+
 /// Handle a `/`-prefixed REPL slash command.
 /// Returns `Some(exit)` if handled locally (exit=true means quit the loop),
 /// or `None` if the input should be passed to the agent unchanged.
-async fn handle_slash_command(cmd: &str, total_turns: u32, total_cost_usd: f64) -> Option<bool> {
+async fn handle_slash_command(
+    cmd: &str,
+    total_turns: u32,
+    total_cost_usd: f64,
+    agent_loop: &mut AgentLoop,
+) -> Option<bool> {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     match parts[0] {
         "/help" => {
             eprintln!("REPL commands (not sent to the agent):");
             eprintln!("  /help              — show this list");
             eprintln!("  /cost              — current session cost and turn count");
+            eprintln!("  /compact           — summarise and compact the conversation history");
+            eprintln!("  /model <name>      — switch the active model for this session");
             eprintln!("  /sessions          — list recent sessions");
             eprintln!(
                 "  /resume <id>       — restart with an existing session (use --resume flag)"
@@ -32,12 +89,39 @@ async fn handle_slash_command(cmd: &str, total_turns: u32, total_cost_usd: f64) 
             eprintln!("  /mode agent        — reminder: restart without --permission-mode");
             eprintln!("  /exit  /quit       — end the REPL");
             eprintln!("  //...              — send a literal prompt starting with /");
+            eprintln!();
+            eprintln!("Agent routing shortcuts:");
+            eprintln!("  @worker <task>     — route immediately to the SpawnWorker sub-agent");
+            eprintln!("  @reviewer <task>   — route immediately to the SpawnReviewer sub-agent");
+            eprintln!("  @explore <query>   — hint to explore/search the codebase");
         }
         "/cost" => {
             eprintln!(
                 "Session: {} turns, ${:.4} total",
                 total_turns, total_cost_usd
             );
+        }
+        "/compact" => {
+            eprint!("Compacting history…");
+            let _ = io::stderr().flush();
+            match agent_loop.compact_history_now().await {
+                Ok((before, after)) => {
+                    eprintln!(" done ({before} → {after} messages).");
+                }
+                Err(e) => {
+                    eprintln!(" failed: {e}");
+                }
+            }
+        }
+        "/model" => {
+            let name = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if name.is_empty() {
+                eprintln!("Current model: {}", agent_loop.current_model());
+                eprintln!("Usage: /model <model-name>");
+            } else {
+                agent_loop.set_model(name.to_string());
+                eprintln!("Switched to model: {}", agent_loop.current_model());
+            }
         }
         "/sessions" => {
             if let Err(e) = sessions::run_sessions_list().await {
@@ -112,22 +196,28 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
         }
 
         // `//...` sends a literal prompt starting with `/`.
-        let prompt = if line.starts_with("//") {
-            &line[1..]
+        let prompt: String = if line.starts_with("//") {
+            line[1..].to_string()
         } else if line.starts_with('/') {
-            match handle_slash_command(line, total_turns, total_cost_usd).await {
-                Some(true) => break,     // /exit or /quit
-                Some(false) => continue, // handled locally, nothing to send
-                None => line,            // unknown — pass to agent as-is
+            match handle_slash_command(line, total_turns, total_cost_usd, &mut loop_).await {
+                Some(true) => break,      // /exit or /quit
+                Some(false) => continue,  // handled locally, nothing to send
+                None => line.to_string(), // unknown — pass to agent as-is
             }
         } else {
-            line
+            // @agent mention routing: rewrite the prompt if applicable.
+            let (agent_hint, cleaned) = parse_agent_mention(line);
+            if let Some(agent) = agent_hint {
+                route_to_agent(agent, &cleaned)
+            } else {
+                line.to_string()
+            }
         };
 
         let result = if first_turn {
             loop_
                 .run(
-                    prompt,
+                    &prompt,
                     Some(&mut writer),
                     Some(&setup.pricing_table),
                     Some(cancel.clone()),
@@ -136,7 +226,7 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
         } else {
             loop_
                 .run_next_turn(
-                    prompt,
+                    &prompt,
                     Some(&mut writer),
                     Some(&setup.pricing_table),
                     Some(cancel.clone()),
@@ -167,6 +257,27 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
                     println!("{}", text);
                 }
             }
+            Err(ClidoError::DoomLoop { tool, error }) => {
+                let msg = format!(
+                    "Stuck: tool '{}' failed with the same error 3 times in a row.\n\
+                     Error: {}\n\
+                     The agent has been stopped. Try rephrasing your request, \
+                     checking the tool configuration, or running with --permission-mode accept-all.",
+                    tool, error
+                );
+                if cli.output_format == "json" {
+                    let out = serde_json::json!({
+                        "schema_version": 1,
+                        "type": "repl_turn",
+                        "is_error": true,
+                        "error_kind": "doom_loop",
+                        "result": msg,
+                    });
+                    println!("{}", serde_json::to_string(&out).unwrap());
+                } else {
+                    eprintln!("⚠ {}", msg);
+                }
+            }
             Err(e) => {
                 let msg = e.to_string();
                 if cli.output_format == "json" {
@@ -194,4 +305,80 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
     });
     let _ = writer.flush();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agent_mention_worker() {
+        let (agent, prompt) = parse_agent_mention("@worker refactor the auth module");
+        assert_eq!(agent, Some("worker"));
+        assert_eq!(prompt, "refactor the auth module");
+    }
+
+    #[test]
+    fn parse_agent_mention_reviewer() {
+        let (agent, prompt) = parse_agent_mention("@reviewer check this PR");
+        assert_eq!(agent, Some("reviewer"));
+        assert_eq!(prompt, "check this PR");
+    }
+
+    #[test]
+    fn parse_agent_mention_explore() {
+        let (agent, prompt) = parse_agent_mention("@explore find all API endpoints");
+        assert_eq!(agent, Some("explore"));
+        assert_eq!(prompt, "find all API endpoints");
+    }
+
+    #[test]
+    fn parse_agent_mention_general() {
+        let (agent, prompt) = parse_agent_mention("@general do X");
+        assert_eq!(agent, Some("general"));
+        assert_eq!(prompt, "do X");
+    }
+
+    #[test]
+    fn parse_agent_mention_no_mention() {
+        let (agent, prompt) = parse_agent_mention("fix the bug in auth.rs");
+        assert_eq!(agent, None);
+        assert_eq!(prompt, "fix the bug in auth.rs");
+    }
+
+    #[test]
+    fn parse_agent_mention_unknown_at() {
+        // Unknown @name should be passed through unchanged.
+        let (agent, prompt) = parse_agent_mention("@unknown something");
+        assert_eq!(agent, None);
+        assert!(prompt.contains("@unknown"));
+    }
+
+    #[test]
+    fn parse_agent_mention_shorthand_w() {
+        let (agent, _) = parse_agent_mention("@w refactor");
+        assert_eq!(agent, Some("worker"));
+    }
+
+    #[test]
+    fn route_to_agent_worker_contains_spawn() {
+        let out = route_to_agent("worker", "write tests");
+        assert!(out.contains("SpawnWorker"), "expected SpawnWorker: {out}");
+        assert!(out.contains("write tests"), "expected original task: {out}");
+    }
+
+    #[test]
+    fn route_to_agent_reviewer_contains_spawn() {
+        let out = route_to_agent("reviewer", "review this code");
+        assert!(
+            out.contains("SpawnReviewer"),
+            "expected SpawnReviewer: {out}"
+        );
+    }
+
+    #[test]
+    fn route_to_agent_explore_passthrough() {
+        let out = route_to_agent("explore", "find the auth module");
+        assert!(out.contains("find the auth module"));
+    }
 }

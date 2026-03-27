@@ -638,6 +638,7 @@ pub fn agent_config_from_loaded(
         model: model.clone(),
         system_prompt: cli_system_prompt,
         permission_mode: cli_permission_mode.unwrap_or_default(),
+        permission_rules: Vec::new(),
         use_planner: false,
         use_index: false,
         max_context_tokens: loaded.context.max_context_tokens,

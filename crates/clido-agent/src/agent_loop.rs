@@ -9,6 +9,7 @@ use clido_core::{
     compute_cost_usd, AgentConfig, ContentBlock, HooksConfig, Message, PermissionMode, Role,
     StopReason,
 };
+use clido_core::{evaluate_rules, RuleAction};
 use clido_core::{ClidoError, PricingTable, Result};
 use clido_memory::MemoryStore;
 use clido_providers::ModelProvider;
@@ -16,10 +17,16 @@ use clido_storage::{AuditEntry, AuditLog, SessionLine, SessionWriter};
 use clido_tools::{ToolOutput, ToolRegistry};
 use futures::future::join_all;
 use similar::TextDiff;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
+
+/// How many consecutive identical tool failures trigger doom-loop detection.
+const DOOM_LOOP_THRESHOLD: usize = 3;
+/// Budget warning thresholds (percentage of limit consumed).
+const BUDGET_WARNING_PCTS: &[u8] = &[50, 80, 90];
 
 /// The result of a permission request — what the user decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +35,8 @@ pub enum PermGrant {
     Allow,
     /// Deny this invocation.
     Deny,
+    /// Deny and send feedback text back to the agent so it can adjust its approach.
+    DenyWithFeedback(String),
     /// Open proposed content in `$EDITOR` and use whatever the user saves.
     EditInEditor,
     /// Allow all remaining Write/Edit operations in this session without asking again.
@@ -69,6 +78,10 @@ pub trait EventEmitter: Send + Sync {
     /// Called for any text the model emits while it's still calling tools (thinking aloud).
     /// Default impl is a no-op so existing code compiles without changes.
     async fn on_assistant_text(&self, _text: &str) {}
+    /// Called when cumulative cost crosses a budget threshold (50%, 80%, 90%).
+    /// `pct` is the percentage (50, 80, or 90), `spent_usd` and `limit_usd` are raw values.
+    /// Default impl is a no-op.
+    async fn on_budget_warning(&self, _pct: u8, _spent_usd: f64, _limit_usd: f64) {}
 }
 
 /// Reconstruct conversation history from session JSONL lines (for resume).
@@ -164,6 +177,10 @@ pub struct AgentLoop {
     /// When true, the agent will emit a planning step on the first turn (--planner flag).
     /// The plan is purely informational: the reactive loop still drives execution.
     pub planner_mode: bool,
+    /// Tracks recent tool failures for doom-loop detection.
+    doom_monitor: VecDeque<String>,
+    /// Tracks which budget warning percentages have already been emitted this run.
+    budget_warned_pcts: Vec<u8>,
 }
 
 impl AgentLoop {
@@ -193,6 +210,8 @@ impl AgentLoop {
             memory: None,
             planner_mode: false,
             base_system_prompt,
+            doom_monitor: VecDeque::new(),
+            budget_warned_pcts: Vec::new(),
         }
     }
 
@@ -230,6 +249,8 @@ impl AgentLoop {
             memory: None,
             planner_mode: false,
             base_system_prompt,
+            doom_monitor: VecDeque::new(),
+            budget_warned_pcts: Vec::new(),
         }
     }
 
@@ -311,6 +332,8 @@ impl AgentLoop {
         self.cumulative_output_tokens = 0;
         self.cumulative_cache_read_tokens = 0;
         self.cumulative_cache_creation_tokens = 0;
+        self.doom_monitor.clear();
+        self.budget_warned_pcts.clear();
     }
 
     /// Immediately compact the conversation history, regardless of the compaction threshold.
@@ -859,6 +882,8 @@ impl AgentLoop {
         self.cumulative_output_tokens = 0;
         self.cumulative_cache_read_tokens = 0;
         self.cumulative_cache_creation_tokens = 0;
+        self.doom_monitor.clear();
+        self.budget_warned_pcts.clear();
         const DEFAULT_INPUT_USD_PER_1M: f64 = 3.0;
         const DEFAULT_OUTPUT_USD_PER_1M: f64 = 15.0;
 
@@ -920,9 +945,23 @@ impl AgentLoop {
             self.cumulative_cache_creation_tokens +=
                 response.usage.cache_creation_input_tokens.unwrap_or(0);
 
+            // Budget hard stop
             if let Some(limit) = self.config.max_budget_usd {
                 if self.cumulative_cost_usd > limit {
                     return Err(ClidoError::BudgetExceeded);
+                }
+                // Budget warnings at 50%, 80%, 90% of limit
+                if let Some(ref e) = self.emit {
+                    let pct_used = (self.cumulative_cost_usd / limit * 100.0).floor() as u8;
+                    for &threshold_pct in BUDGET_WARNING_PCTS {
+                        if pct_used >= threshold_pct
+                            && !self.budget_warned_pcts.contains(&threshold_pct)
+                        {
+                            self.budget_warned_pcts.push(threshold_pct);
+                            e.on_budget_warning(threshold_pct, self.cumulative_cost_usd, limit)
+                                .await;
+                        }
+                    }
                 }
             }
 
@@ -1137,7 +1176,8 @@ impl AgentLoop {
                     };
 
                     let mut tool_results = Vec::new();
-                    for ((id, _, _), (output, duration_ms)) in tool_uses.iter().zip(outputs.iter())
+                    for ((id, name, _), (output, duration_ms)) in
+                        tool_uses.iter().zip(outputs.iter())
                     {
                         if let Some(ref mut w) = session {
                             let _ = w.write_line(&SessionLine::ToolResult {
@@ -1155,6 +1195,31 @@ impl AgentLoop {
                             content: output.content.clone(),
                             is_error: output.is_error,
                         });
+
+                        // Doom-loop detection: N consecutive identical failures from
+                        // the same tool → stop rather than keep spending tokens in a loop.
+                        if output.is_error {
+                            let key = format!(
+                                "{}:{}",
+                                name,
+                                output.content.chars().take(120).collect::<String>()
+                            );
+                            self.doom_monitor.push_back(key.clone());
+                            if self.doom_monitor.len() > DOOM_LOOP_THRESHOLD {
+                                self.doom_monitor.pop_front();
+                            }
+                            if self.doom_monitor.len() >= DOOM_LOOP_THRESHOLD
+                                && self.doom_monitor.iter().all(|k| k == &key)
+                            {
+                                return Err(ClidoError::DoomLoop {
+                                    tool: name.clone(),
+                                    error: output.content.chars().take(200).collect::<String>(),
+                                });
+                            }
+                        } else {
+                            // A successful tool call resets the doom counter.
+                            self.doom_monitor.clear();
+                        }
                     }
                     self.history.push(Message {
                         role: Role::User,
@@ -1194,6 +1259,54 @@ impl AgentLoop {
             return self.execute_tool(name, input).await;
         }
 
+        // ── Per-file permission rules ────────────────────────────────────────
+        // If the config has `permission_rules`, evaluate them against the tool's
+        // primary file argument (the first string value in `input`) before falling
+        // through to the mode-level logic.
+        if !self.config.permission_rules.is_empty() {
+            if let Some(tool) = self.tools.get(name) {
+                if !tool.is_read_only() {
+                    // Extract the primary file argument: first string value in the
+                    // input object, or the value of a key named "path" / "file".
+                    let file_arg = input
+                        .get("path")
+                        .or_else(|| input.get("file"))
+                        .or_else(|| input.get("target"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            input
+                                .as_object()
+                                .and_then(|m| m.values().find_map(|v| v.as_str()))
+                        })
+                        .unwrap_or("");
+
+                    if let Some((action, reason)) =
+                        evaluate_rules(&self.config.permission_rules, file_arg)
+                    {
+                        match action {
+                            RuleAction::Allow => {
+                                // Rule explicitly allows — bypass mode checks.
+                                return self.execute_tool(name, input).await;
+                            }
+                            RuleAction::Deny => {
+                                let msg = match reason {
+                                    Some(r) => format!("Permission denied by rule: {}", r),
+                                    None => format!(
+                                        "Permission denied by rule for '{}' on path '{}'",
+                                        name, file_arg
+                                    ),
+                                };
+                                return ToolOutput::err(msg);
+                            }
+                            RuleAction::Ask => {
+                                // Fall through to interactive prompt below.
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if effective == PermissionMode::PlanOnly {
             if let Some(tool) = self.tools.get(name) {
                 if !tool.is_read_only() {
@@ -1215,7 +1328,17 @@ impl AgentLoop {
                             file_path: None,
                         };
                         match ask.ask(req).await {
-                            PermGrant::Allow | PermGrant::AllowAll => {}
+                            PermGrant::Allow => {}
+                            PermGrant::AllowAll => {
+                                // Persist: skip permission checks for all subsequent calls.
+                                self.permission_mode_override = Some(PermissionMode::AcceptAll);
+                            }
+                            PermGrant::DenyWithFeedback(feedback) => {
+                                return ToolOutput::err(format!(
+                                    "User denied '{}': {feedback}",
+                                    name
+                                ));
+                            }
                             PermGrant::Deny | PermGrant::EditInEditor => {
                                 return ToolOutput::err(format!("User denied tool '{}'.", name));
                             }
@@ -1251,7 +1374,15 @@ impl AgentLoop {
                         };
                         match ask.ask(req).await {
                             PermGrant::Allow => {}
-                            PermGrant::AllowAll => {}
+                            PermGrant::AllowAll => {
+                                self.permission_mode_override = Some(PermissionMode::AcceptAll);
+                            }
+                            PermGrant::DenyWithFeedback(feedback) => {
+                                return ToolOutput::err(format!(
+                                    "User rejected '{}': {feedback}",
+                                    name
+                                ));
+                            }
                             PermGrant::Deny => {
                                 return ToolOutput::err(format!(
                                     "User denied tool '{}' in diff-review mode.",
@@ -1762,6 +1893,7 @@ mod tests {
             max_turns: 3,
             max_budget_usd: None,
             permission_mode: PermissionMode::AcceptAll,
+            permission_rules: vec![],
             max_context_tokens: None,
             compaction_threshold: None,
             quiet: false,

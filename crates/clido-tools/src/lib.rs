@@ -1,5 +1,6 @@
 //! Tools: trait, registry, and implementations (Bash, Read, Write, Glob, Grep, etc.).
 
+mod apply_patch_tool;
 mod bash;
 mod diagnostics;
 mod edit;
@@ -8,6 +9,7 @@ pub mod file_tracker;
 mod git_tool;
 mod glob_tool;
 mod grep_tool;
+mod ls_tool;
 pub mod mcp;
 mod path_guard;
 mod read;
@@ -24,6 +26,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
+pub use apply_patch_tool::ApplyPatchTool;
 pub use bash::BashTool;
 pub use diagnostics::DiagnosticsTool;
 pub use edit::EditTool;
@@ -32,6 +35,7 @@ pub use file_tracker::FileTracker;
 pub use git_tool::GitTool;
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
+pub use ls_tool::LsTool;
 pub use mcp::{load_mcp_config, McpClient, McpConfig, McpServerConfig, McpTool, McpToolDef};
 pub use path_guard::PathGuard;
 pub use read::ReadTool;
@@ -79,6 +83,8 @@ pub fn default_registry_with_options(
     r.register(WriteTool::new_with_tracker(guard.clone(), tracker.clone()));
     r.register(EditTool::new_with_tracker(guard.clone(), tracker.clone()));
     r.register(GlobTool::new_with_guard(guard.clone()));
+    r.register(LsTool::new_with_guard(guard.clone()));
+    r.register(ApplyPatchTool::new(guard.clone()));
     r.register(GrepTool::new_with_guard(guard));
     r.register(GitTool::new(workspace_root.clone()));
     r.register(SemanticSearchTool::new(workspace_root.clone()));
