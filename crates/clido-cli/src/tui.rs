@@ -1390,7 +1390,10 @@ fn render(frame: &mut Frame, app: &mut App) {
     let line2_w: usize = hline2.iter().map(|s| s.content.chars().count()).sum();
     let header_h: u16 = if line1_w + line2_w <= w { 1 } else { 2 };
 
-    // Layout: header | chat | status (2) | queue (1) | hint (1) | input (3)
+    // Layout: header | chat | status (2) | queue (1) | hint (1) | input (dynamic)
+    // Input grows with content: 1 line of text = 3 rows (2 borders + 1), capped at 12.
+    let input_line_count = app.input.matches('\n').count() + 1;
+    let input_h = (input_line_count as u16 + 2).min(12);
     let [header_area, chat_area, status_area, queue_area, hint_area, input_area] =
         Layout::vertical([
             Constraint::Length(header_h),
@@ -1398,7 +1401,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(input_h),
         ])
         .areas(area);
 
@@ -1541,22 +1544,55 @@ fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // ── Input box (always rendered, even when permission popup is showing) ──
-    // Compute horizontal scroll so the cursor stays visible.
-    // Visible width = input_area.width - 2 (borders) - 2 (leading " " + 1 margin).
+    // Compute cursor position.  For multiline input, derive (row, col) from the
+    // char offset; for single-line input use horizontal scroll as before.
     let input_visible_w = (input_area.width as usize).saturating_sub(4).max(1);
-    if app.cursor < app.input_scroll {
-        app.input_scroll = app.cursor;
-    } else if app.cursor >= app.input_scroll + input_visible_w {
-        app.input_scroll = app.cursor - input_visible_w + 1;
-    }
-    // Slice the visible window of the input.
-    let input_display: String = app
-        .input
-        .chars()
-        .skip(app.input_scroll)
-        .take(input_visible_w)
-        .collect();
-    let cursor_col = (app.cursor - app.input_scroll) as u16;
+    let byte_at_cursor = char_byte_pos(&app.input, app.cursor);
+    let before_cursor = &app.input[..byte_at_cursor];
+    let is_multiline = app.input.contains('\n');
+    let (cursor_row, cursor_col): (u16, u16) = if is_multiline {
+        let row = before_cursor.matches('\n').count() as u16;
+        let col = before_cursor
+            .rfind('\n')
+            .map(|p| app.input[p + 1..byte_at_cursor].chars().count())
+            .unwrap_or_else(|| before_cursor.chars().count()) as u16;
+        (row, col.min(input_visible_w as u16))
+    } else {
+        // Single-line: maintain horizontal scroll window.
+        if app.cursor < app.input_scroll {
+            app.input_scroll = app.cursor;
+        } else if app.cursor >= app.input_scroll + input_visible_w {
+            app.input_scroll = app.cursor - input_visible_w + 1;
+        }
+        (0, (app.cursor - app.input_scroll) as u16)
+    };
+
+    // Build the paragraph text.  Multiline: one ratatui Line per input line.
+    // Single-line: horizontally-scrolled window as before.
+    let max_visible_content_rows = input_h.saturating_sub(2) as usize; // minus top+bottom border
+    let input_para_lines: Vec<Line<'static>> = if is_multiline {
+        let all_lines: Vec<&str> = app.input.split('\n').collect();
+        // Vertical scroll: keep the cursor line visible.
+        let v_scroll = if cursor_row as usize >= max_visible_content_rows {
+            cursor_row as usize - max_visible_content_rows + 1
+        } else {
+            0
+        };
+        all_lines
+            .iter()
+            .skip(v_scroll)
+            .take(max_visible_content_rows)
+            .map(|l| Line::raw(format!(" {}", l)))
+            .collect()
+    } else {
+        let visible: String = app
+            .input
+            .chars()
+            .skip(app.input_scroll)
+            .take(input_visible_w)
+            .collect();
+        vec![Line::raw(format!(" {}", visible))]
+    };
 
     // Always clear the input area first — prevents any bleed-through from overlapping widgets.
     frame.render_widget(Clear, input_area);
@@ -1618,23 +1654,33 @@ fn render(frame: &mut Frame, app: &mut App) {
             .title(title_line)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::LightMagenta));
-        let para = Paragraph::new(format!(" {}", input_display)).block(block);
+        let para = Paragraph::new(input_para_lines).block(block);
         frame.render_widget(para, input_area);
         if app.pending_perm.is_none() {
-            frame.set_cursor_position((input_area.x + 2 + cursor_col, input_area.y + 1));
+            frame.set_cursor_position((
+                input_area.x + 2 + cursor_col,
+                input_area.y + 1 + cursor_row.min(max_visible_content_rows as u16 - 1),
+            ));
         }
     } else {
         let idle_title = Line::from(vec![Span::styled(
-            " Ask anything  (Enter=send  ↑↓=history  /help=commands) ",
+            if is_multiline {
+                " Shift+Enter=newline  Enter=send  Ctrl+Enter=interrupt "
+            } else {
+                " Ask anything  (Enter=send  Shift+Enter=newline  /help=commands) "
+            },
             Style::default().fg(TUI_SOFT_ACCENT),
         )]);
         let block = Block::default()
             .title(idle_title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(TUI_SOFT_ACCENT));
-        let para = Paragraph::new(format!(" {}", input_display)).block(block);
+        let para = Paragraph::new(input_para_lines).block(block);
         frame.render_widget(para, input_area);
-        frame.set_cursor_position((input_area.x + 2 + cursor_col, input_area.y + 1));
+        frame.set_cursor_position((
+            input_area.x + 2 + cursor_col,
+            input_area.y + 1 + cursor_row.min(max_visible_content_rows as u16 - 1),
+        ));
     }
 
     // ── Hint line ──
@@ -1644,6 +1690,8 @@ fn render(frame: &mut Frame, app: &mut App) {
     let mut hint_spans = vec![
         Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
         Span::styled(" send  ", hint_dim),
+        Span::styled("Shift+Enter", Style::default().fg(Color::DarkGray)),
+        Span::styled(" newline  ", hint_dim),
         Span::styled("Esc", Style::default().fg(Color::DarkGray)),
         Span::styled(" clear  ", hint_dim),
         Span::styled("↑↓", Style::default().fg(Color::DarkGray)),
@@ -3442,6 +3490,9 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("".into()));
             app.push(ChatLine::Section("Navigation".into()));
             app.push(ChatLine::Info("Enter              send message".into()));
+            app.push(ChatLine::Info(
+                "Shift+Enter        insert newline (multiline input)".into(),
+            ));
             app.push(ChatLine::Info("Ctrl+Enter         interrupt & send".into()));
             app.push(ChatLine::Info(
                 "↑↓ / PgUp/PgDn    scroll conversation".into(),
@@ -5912,6 +5963,14 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         }
         // Ctrl+Enter: interrupt current run and send immediately.
         (Km::CONTROL, Enter) => app.force_send(),
+        // Shift+Enter: insert a newline without sending (multiline input).
+        (Km::SHIFT, Enter) => {
+            let byte_pos = char_byte_pos(&app.input, app.cursor);
+            app.input.insert(byte_pos, '\n');
+            app.cursor += 1;
+            app.selected_cmd = None;
+            app.history_idx = None;
+        }
         (_, Enter) => app.submit(),
         (_, Backspace) => {
             if app.cursor > 0 {
@@ -7158,12 +7217,9 @@ async fn event_loop(
                         }
                     }
                     Some(Ok(Event::Paste(mut text))) => {
-                        if text.ends_with("\r\n") {
-                            text.truncate(text.len().saturating_sub(2));
-                        } else if text.ends_with('\n') || text.ends_with('\r') {
-                            text.pop();
-                        }
-                        text = text.replace(['\r', '\n'], " ");
+                        // Normalise line endings to \n but preserve newlines so users can
+                        // paste multiline markdown without it collapsing into a single line.
+                        text = text.replace("\r\n", "\n").replace('\r', "\n");
                         if !text.is_empty() {
                             let byte_pos = char_byte_pos(&app.input, app.cursor);
                             app.input.insert_str(byte_pos, &text);
