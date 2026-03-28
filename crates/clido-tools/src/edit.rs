@@ -2103,4 +2103,156 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("let x = 42;"), "content: {}", content);
     }
+
+    // ── T02: Edit tool fuzzy matching boundary tests ──────────────────────────
+
+    // T02-1: exact match on full content succeeds.
+    #[tokio::test]
+    async fn edit_exact_full_string_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "exact.txt",
+                "old_string": "hello world",
+                "new_string": "goodbye"
+            }))
+            .await;
+        assert!(!out.is_error, "exact match should succeed: {}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "goodbye",
+            "file content should be replaced"
+        );
+    }
+
+    // T02-2: no match returns an error, not a panic.
+    #[tokio::test]
+    async fn edit_no_match_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomatch.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "nomatch.txt",
+                "old_string": "not present",
+                "new_string": "x"
+            }))
+            .await;
+        assert!(out.is_error, "no-match should produce an error");
+        assert!(
+            out.content.contains("not found"),
+            "error message should mention 'not found': {}",
+            out.content
+        );
+    }
+
+    // T02-3: old_str appearing twice fails with an ambiguous/multiple-matches error.
+    #[tokio::test]
+    async fn edit_multiple_matches_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        std::fs::write(&path, "needle\nsome text\nneedle").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "multi.txt",
+                "old_string": "needle",
+                "new_string": "replacement"
+            }))
+            .await;
+        assert!(out.is_error, "ambiguous match should produce an error");
+        // The error message should mention multiple matches or line numbers.
+        assert!(
+            out.content.contains("line")
+                || out.content.contains("ambiguous")
+                || out.content.contains("multiple"),
+            "error should mention multiple matches: {}",
+            out.content
+        );
+    }
+
+    // T02-4: empty old_str fails gracefully (not a panic).
+    #[tokio::test]
+    async fn edit_empty_old_string_fails_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty_old.txt");
+        std::fs::write(&path, "some content").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "empty_old.txt",
+                "old_string": "",
+                "new_string": "replacement"
+            }))
+            .await;
+        // An empty old_string is nonsensical; the tool should return an error, not panic.
+        assert!(
+            out.is_error,
+            "empty old_string should be rejected: {}",
+            out.content
+        );
+    }
+
+    // T02-5: multibyte Unicode characters are handled without byte-boundary panics.
+    #[tokio::test]
+    async fn edit_unicode_multibyte_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unicode.txt");
+        // Content with emoji (4-byte UTF-8 codepoints) and accented chars.
+        std::fs::write(&path, "Hello 🦀 world – café").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "unicode.txt",
+                "old_string": "🦀 world",
+                "new_string": "🐍 universe"
+            }))
+            .await;
+        assert!(
+            !out.is_error,
+            "unicode replacement should succeed: {}",
+            out.content
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("🐍 universe"),
+            "replaced text should be present: {content}"
+        );
+        assert!(
+            content.contains("café"),
+            "unrelated unicode content should be preserved: {content}"
+        );
+    }
+
+    // T02-6: leading/trailing whitespace on old_string is normalised (tier-2 match).
+    #[tokio::test]
+    async fn edit_whitespace_normalization_trailing_spaces_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws.txt");
+        // File content has trailing spaces on a line.
+        std::fs::write(&path, "fn main() {  \n    println!(\"hi\");\n}").unwrap();
+        let tool = EditTool::new(dir.path().to_path_buf());
+        // old_string without trailing spaces — normalized match should still find it.
+        let out = tool
+            .execute(serde_json::json!({
+                "file_path": "ws.txt",
+                "old_string": "fn main() {\n    println!(\"hi\");\n}",
+                "new_string": "fn main() {\n    println!(\"hello\");\n}"
+            }))
+            .await;
+        assert!(
+            !out.is_error,
+            "normalized whitespace match should succeed: {}",
+            out.content
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("hello"),
+            "replacement should be applied: {content}"
+        );
+    }
 }

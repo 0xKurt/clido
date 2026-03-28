@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
 use crate::errors::CliError;
+use crate::git_context::GitContext;
 use crate::ui::{ansi, cli_use_color};
 
 /// EventEmitter that writes stream-json events to stdout as the agent runs.
@@ -136,8 +137,13 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
         Some(lines) => {
             let history = session_lines_to_messages(lines);
             if history.is_empty() {
+                let git_wr = workspace_root.clone();
+                let git_fn: Box<dyn Fn() -> Option<String> + Send + Sync> = Box::new(move || {
+                    GitContext::discover(&git_wr).map(|ctx| ctx.to_prompt_section())
+                });
                 let mut loop_ =
-                    AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user);
+                    AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user)
+                        .with_git_context_fn(git_fn);
                 if let Some(ref a) = audit {
                     loop_ = loop_.with_audit_log(a.clone());
                 }
@@ -165,13 +171,18 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
                     loop_.cumulative_cache_creation_tokens,
                 )
             } else {
+                let git_wr2 = workspace_root.clone();
+                let git_fn2: Box<dyn Fn() -> Option<String> + Send + Sync> = Box::new(move || {
+                    GitContext::discover(&git_wr2).map(|ctx| ctx.to_prompt_section())
+                });
                 let mut loop_ = AgentLoop::new_with_history(
                     setup.provider,
                     setup.registry,
                     setup.config,
                     history,
                     setup.ask_user,
-                );
+                )
+                .with_git_context_fn(git_fn2);
                 if let Some(ref a) = audit {
                     loop_ = loop_.with_audit_log(a.clone());
                 }
@@ -196,9 +207,13 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
             }
         }
         None => {
+            let git_wr3 = workspace_root.clone();
+            let git_fn3: Box<dyn Fn() -> Option<String> + Send + Sync> =
+                Box::new(move || GitContext::discover(&git_wr3).map(|ctx| ctx.to_prompt_section()));
             let mut loop_ =
                 AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user)
-                    .with_planner(cli.planner);
+                    .with_planner(cli.planner)
+                    .with_git_context_fn(git_fn3);
             if let Some(ref a) = audit {
                 loop_ = loop_.with_audit_log(a.clone());
             }

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use clido_agent::{
     AgentLoop, AskUser, EventEmitter, PermGrant as AgentPermGrant, PermRequest as AgentPermRequest,
 };
-use clido_core::ClidoError;
+use clido_core::{ClidoError, PermissionMode};
 use clido_storage::SessionWriter;
 use crossterm::{
     event::{
@@ -36,6 +36,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
+use crate::git_context::GitContext;
 use crate::image_input::ImageAttachment;
 use crate::prompt_enhance::{
     load_prompt_mode, load_rules, project_rules_path, project_settings_path, save_prompt_mode,
@@ -206,7 +207,7 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/copy", "copy to clipboard. Usage: /copy (last reply) | /copy <n> (last n exchanges) | /copy all"),
             (
                 "/notify",
-                "show or toggle completion notifications. Usage: /notify [on|off|status]",
+                "toggle desktop notifications on/off. Usage: /notify [on|off]",
             ),
             (
                 "/index",
@@ -325,6 +326,12 @@ enum AgentEvent {
     /// Periodic keep-alive from agent_task while waiting on a slow LLM response.
     /// Resets the stall timer without producing any visible output.
     Heartbeat,
+    /// Emitted when cumulative cost crosses a budget threshold (50%, 80%, or 90%).
+    BudgetWarning {
+        percent: u8,
+        cost: f64,
+        limit: f64,
+    },
 }
 
 // ── Plan editor state ─────────────────────────────────────────────────────────
@@ -481,6 +488,81 @@ impl ModelPickerState {
     }
 }
 
+/// Known providers with their display name and whether they require an API key.
+const KNOWN_PROVIDERS: &[(&str, &str, bool)] = &[
+    ("anthropic", "Anthropic  (Claude)", true),
+    ("openai", "OpenAI  (GPT / o-series)", true),
+    ("google", "Google  (Gemini)", true),
+    ("xai", "xAI  (Grok)", true),
+    ("deepseek", "DeepSeek", true),
+    ("groq", "Groq", true),
+    ("mistral", "Mistral", true),
+    ("cohere", "Cohere", true),
+    ("together", "Together AI", true),
+    ("perplexity", "Perplexity", true),
+    ("ollama", "Ollama  (local)", false),
+    ("lmstudio", "LM Studio  (local)", false),
+    ("openrouter", "OpenRouter", true),
+    ("azure", "Azure OpenAI", true),
+    ("custom", "Custom / Other", true),
+];
+
+struct ProviderPickerState {
+    /// Index of the highlighted provider in KNOWN_PROVIDERS.
+    selected: usize,
+    /// Live filter string typed by user.
+    filter: String,
+    scroll_offset: usize,
+}
+
+impl ProviderPickerState {
+    fn new() -> Self {
+        Self {
+            selected: 0,
+            filter: String::new(),
+            scroll_offset: 0,
+        }
+    }
+
+    fn filtered(&self) -> Vec<usize> {
+        let f = self.filter.trim().to_lowercase();
+        KNOWN_PROVIDERS
+            .iter()
+            .enumerate()
+            .filter(|(_, (id, name, _))| {
+                f.is_empty() || id.contains(&f) || name.to_lowercase().contains(&f)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn clamp(&mut self) {
+        let n = self.filtered().len();
+        if n == 0 {
+            self.selected = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.selected = self.selected.min(n.saturating_sub(1));
+            self.scroll_offset = self.scroll_offset.min(self.selected);
+        }
+    }
+
+    /// The selected provider id string, or empty if none.
+    fn selected_id(&self) -> Option<&'static str> {
+        let indices = self.filtered();
+        indices.get(self.selected).map(|&i| KNOWN_PROVIDERS[i].0)
+    }
+
+    /// Whether the currently selected provider requires an API key.
+    fn selected_requires_key(&self) -> bool {
+        let indices = self.filtered();
+        indices
+            .get(self.selected)
+            .map(|&i| KNOWN_PROVIDERS[i].2)
+            .unwrap_or(true)
+    }
+}
+
 // ── Profile overview overlay ──────────────────────────────────────────────────
 
 /// Which field of a profile is being inline-edited.
@@ -504,6 +586,10 @@ enum ProfileOverlayMode {
     Overview,
     /// User is editing a specific field inline.
     EditField(ProfileEditField),
+    /// Provider picker — shown when editing a provider field (or wizard provider step).
+    PickingProvider { for_field: ProfileEditField },
+    /// Model picker — shown when editing a model field (or wizard model step).
+    PickingModel { for_field: ProfileEditField },
     /// User is creating a new profile, step-by-step.
     Creating { step: ProfileCreateStep },
 }
@@ -546,6 +632,10 @@ struct ProfileOverlayState {
     config_path: std::path::PathBuf,
     /// Whether this is a new-profile creation flow.
     is_new: bool,
+    /// State for the provider picker (used in PickingProvider mode).
+    provider_picker: ProviderPickerState,
+    /// State for the model picker inside the profile overlay (used in PickingModel mode).
+    profile_model_picker: Option<ModelPickerState>,
 }
 
 /// Display labels and keys for the editable profile fields (in order).
@@ -617,6 +707,8 @@ impl ProfileOverlayState {
             status: None,
             config_path,
             is_new: false,
+            provider_picker: ProviderPickerState::new(),
+            profile_model_picker: None,
         }
     }
 
@@ -641,6 +733,8 @@ impl ProfileOverlayState {
             status: None,
             config_path,
             is_new: true,
+            provider_picker: ProviderPickerState::new(),
+            profile_model_picker: None,
         }
     }
 
@@ -681,11 +775,52 @@ impl ProfileOverlayState {
     }
 
     /// Start editing the field at `cursor`.
-    fn begin_edit(&mut self) {
+    fn begin_edit(&mut self, known_models: &[ModelEntry]) {
         let field = self.cursor_field();
-        self.input = self.field_value(&field);
-        self.input_cursor = self.input.chars().count();
-        self.mode = ProfileOverlayMode::EditField(field);
+        match field {
+            ProfileEditField::Provider
+            | ProfileEditField::WorkerProvider
+            | ProfileEditField::ReviewerProvider => {
+                let current = self.field_value(&field);
+                self.provider_picker = ProviderPickerState::new();
+                let indices = self.provider_picker.filtered();
+                if let Some(pos) = indices
+                    .iter()
+                    .position(|&i| KNOWN_PROVIDERS[i].0 == current.as_str())
+                {
+                    self.provider_picker.selected = pos;
+                }
+                self.mode = ProfileOverlayMode::PickingProvider { for_field: field };
+            }
+            ProfileEditField::Model
+            | ProfileEditField::WorkerModel
+            | ProfileEditField::ReviewerModel => {
+                let current = self.field_value(&field);
+                let provider = match field {
+                    ProfileEditField::WorkerModel => self.worker_provider.clone(),
+                    ProfileEditField::ReviewerModel => self.reviewer_provider.clone(),
+                    _ => self.provider.clone(),
+                };
+                let mut picker = ModelPickerState {
+                    models: known_models.to_vec(),
+                    filter: if !provider.is_empty() {
+                        provider
+                    } else {
+                        current
+                    },
+                    selected: 0,
+                    scroll_offset: 0,
+                };
+                picker.clamp();
+                self.profile_model_picker = Some(picker);
+                self.mode = ProfileOverlayMode::PickingModel { for_field: field };
+            }
+            _ => {
+                self.input = self.field_value(&field);
+                self.input_cursor = self.input.chars().count();
+                self.mode = ProfileOverlayMode::EditField(field);
+            }
+        }
     }
 
     /// Commit the current input to the field being edited and return to overview.
@@ -719,6 +854,40 @@ impl ProfileOverlayState {
         self.mode = ProfileOverlayMode::Overview;
         self.input.clear();
         self.input_cursor = 0;
+    }
+
+    fn commit_provider_pick(&mut self) {
+        if let ProfileOverlayMode::PickingProvider { ref for_field } = self.mode.clone() {
+            if let Some(id) = self.provider_picker.selected_id() {
+                match for_field {
+                    ProfileEditField::Provider => self.provider = id.to_string(),
+                    ProfileEditField::WorkerProvider => self.worker_provider = id.to_string(),
+                    ProfileEditField::ReviewerProvider => self.reviewer_provider = id.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        self.provider_picker = ProviderPickerState::new();
+        self.mode = ProfileOverlayMode::Overview;
+    }
+
+    fn commit_model_pick(&mut self) {
+        if let ProfileOverlayMode::PickingModel { ref for_field } = self.mode.clone() {
+            if let Some(picker) = &self.profile_model_picker {
+                let filtered = picker.filtered();
+                if let Some(m) = filtered.get(picker.selected) {
+                    let id = m.id.clone();
+                    match for_field {
+                        ProfileEditField::Model => self.model = id,
+                        ProfileEditField::WorkerModel => self.worker_model = id,
+                        ProfileEditField::ReviewerModel => self.reviewer_model = id,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.profile_model_picker = None;
+        self.mode = ProfileOverlayMode::Overview;
     }
 
     /// Persist the current state to the config file and report result.
@@ -962,6 +1131,14 @@ impl EventEmitter for TuiEmitter {
             let _ = self.tx.send(AgentEvent::Thinking(text.to_string()));
         }
     }
+
+    async fn on_budget_warning(&self, pct: u8, spent_usd: f64, limit_usd: f64) {
+        let _ = self.tx.send(AgentEvent::BudgetWarning {
+            percent: pct,
+            cost: spent_usd,
+            limit: limit_usd,
+        });
+    }
 }
 
 fn format_tool_input(name: &str, input: &serde_json::Value) -> String {
@@ -1145,6 +1322,8 @@ struct App {
     perm_selected: usize,
     /// When user picks "Deny with feedback", this holds the feedback text being typed.
     perm_feedback_input: Option<String>,
+    /// Tracks whether the user has granted AllowAll for this session (for UI display).
+    permission_mode_override: Option<PermissionMode>,
     /// Selected index in the slash-command popup (None = no popup).
     selected_cmd: Option<usize>,
     quit: bool,
@@ -1307,6 +1486,7 @@ impl App {
             cancel,
             perm_selected: 0,
             perm_feedback_input: None,
+            permission_mode_override: None,
             selected_cmd: None,
             quit: false,
             wants_reinit: false,
@@ -1825,28 +2005,44 @@ fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // Decide header height: 1 line if everything fits side-by-side, else 2.
+    // When the terminal is very narrow, use a single minimal header.
     let w = area.width as usize;
+    let is_narrow = area.width < 60;
     let line1_w: usize = hline1.iter().map(|s| s.content.chars().count()).sum();
     let line2_w: usize = hline2.iter().map(|s| s.content.chars().count()).sum();
-    let header_h: u16 = if line1_w + line2_w <= w { 1 } else { 2 };
+    let header_h: u16 = if is_narrow || line1_w + line2_w <= w {
+        1
+    } else {
+        2
+    };
 
     // Layout: header | chat | status (2) | queue (1) | hint (1) | input (dynamic)
     // Input grows with content: 1 line of text = 3 rows (2 borders + 1), capped at 12.
+    // When very narrow (< 40), collapse optional rows to avoid layout panics.
     let input_line_count = app.input.matches('\n').count() + 1;
     let input_h = (input_line_count as u16 + 2).min(12);
+    let (hint_h, status_h) = if area.width < 40 { (0, 0) } else { (1, 2) };
     let [header_area, chat_area, status_area, queue_area, hint_area, input_area] =
         Layout::vertical([
             Constraint::Length(header_h),
             Constraint::Min(0),
-            Constraint::Length(2),
+            Constraint::Length(status_h),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(hint_h),
             Constraint::Length(input_h),
         ])
         .areas(area);
 
     // ── Header render ──
-    let header_para = if header_h == 1 {
+    let header_para = if is_narrow {
+        // Minimal single-line header: just the model name.
+        Paragraph::new(Line::from(vec![Span::styled(
+            truncate_chars(&app.model, w),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )]))
+    } else if header_h == 1 {
         // Everything on one line — append line2 to line1 and fit to width.
         hline1.extend(hline2);
         Paragraph::new(Line::from(fit_spans(hline1, w)))
@@ -2061,7 +2257,7 @@ fn render(frame: &mut Frame, app: &mut App) {
         } else if app.input.is_empty() {
             let elapsed_s = app.turn_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
             let elapsed_hint = if elapsed_s >= 1 {
-                format!("  {}s", elapsed_s)
+                format!(" {}s", elapsed_s)
             } else {
                 String::new()
             };
@@ -2123,47 +2319,49 @@ fn render(frame: &mut Frame, app: &mut App) {
         ));
     }
 
-    // ── Hint line ──
-    let hint_dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
-    let mut hint_spans = vec![
-        Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
-        Span::styled(" send  ", hint_dim),
-        Span::styled("Shift+Enter", Style::default().fg(Color::DarkGray)),
-        Span::styled(" newline  ", hint_dim),
-        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
-        Span::styled(" clear  ", hint_dim),
-        Span::styled("↑↓", Style::default().fg(Color::DarkGray)),
-        Span::styled(" history  ", hint_dim),
-        Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
-        Span::styled(" scroll  ", hint_dim),
-        Span::styled("/settings", Style::default().fg(Color::DarkGray)),
-        Span::styled(" settings  ", hint_dim),
-        Span::styled("/help", Style::default().fg(Color::DarkGray)),
-        Span::styled(" commands  ", hint_dim),
-        Span::styled("Ctrl+/", Style::default().fg(Color::DarkGray)),
-        Span::styled(" stop agent  ", hint_dim),
-        Span::styled("Ctrl+C", Style::default().fg(Color::DarkGray)),
-        Span::styled(" quit  ", hint_dim),
-        Span::styled("Ctrl+L", Style::default().fg(Color::DarkGray)),
-        Span::styled(" refresh  ", hint_dim),
-        Span::styled("Shift+select", Style::default().fg(Color::DarkGray)),
-        Span::styled(" copy text  ", hint_dim),
-    ];
-    // Scroll position indicator when not following.
-    if app.max_scroll > 0 && !app.following {
-        let pct = (app.scroll * 100 / app.max_scroll).min(100);
-        hint_spans.push(Span::styled(
-            format!("  ↑ {}%", pct),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ));
+    // ── Hint line — hidden when terminal is very narrow ──
+    if area.width >= 40 {
+        let hint_dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
+        let mut hint_spans = vec![
+            Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
+            Span::styled(" send  ", hint_dim),
+            Span::styled("Shift+Enter", Style::default().fg(Color::DarkGray)),
+            Span::styled(" newline  ", hint_dim),
+            Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled(" clear  ", hint_dim),
+            Span::styled("↑↓", Style::default().fg(Color::DarkGray)),
+            Span::styled(" history  ", hint_dim),
+            Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
+            Span::styled(" scroll  ", hint_dim),
+            Span::styled("/settings", Style::default().fg(Color::DarkGray)),
+            Span::styled(" settings  ", hint_dim),
+            Span::styled("/help", Style::default().fg(Color::DarkGray)),
+            Span::styled(" commands  ", hint_dim),
+            Span::styled("Ctrl+/", Style::default().fg(Color::DarkGray)),
+            Span::styled(" stop agent  ", hint_dim),
+            Span::styled("Ctrl+C", Style::default().fg(Color::DarkGray)),
+            Span::styled(" quit  ", hint_dim),
+            Span::styled("Ctrl+L", Style::default().fg(Color::DarkGray)),
+            Span::styled(" refresh  ", hint_dim),
+            Span::styled("Shift+select", Style::default().fg(Color::DarkGray)),
+            Span::styled(" copy text  ", hint_dim),
+        ];
+        // Scroll position indicator when not following.
+        if app.max_scroll > 0 && !app.following {
+            let pct = (app.scroll * 100 / app.max_scroll).min(100);
+            hint_spans.push(Span::styled(
+                format!("  ↑ {}%", pct),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+        let hint_spans = fit_spans(hint_spans, hint_area.width as usize);
+        let hint = Paragraph::new(Line::from(hint_spans));
+        frame.render_widget(hint, hint_area);
     }
-    let hint_spans = fit_spans(hint_spans, hint_area.width as usize);
-    let hint = Paragraph::new(Line::from(hint_spans));
-    frame.render_widget(hint, hint_area);
 
     // ── "↓ new messages" scroll indicator ──
     if !app.following && app.max_scroll > app.scroll {
@@ -2789,33 +2987,27 @@ fn render(frame: &mut Frame, app: &mut App) {
         let mut content: Vec<Line<'static>> = Vec::new();
         if rules.is_empty() {
             content.push(Line::from(vec![Span::styled(
-                "  No active rules files.".to_string(),
+                "  No active rules.".to_string(),
                 Style::default().fg(Color::DarkGray),
             )]));
         } else {
-            for (path, detail) in rules {
-                if path.trim().is_empty() {
+            for (id, text) in rules {
+                if id.trim().is_empty() {
                     content.push(Line::raw(""));
-                } else if path.starts_with("  ") {
-                    // Preview / indent line
-                    content.push(Line::from(vec![Span::styled(
-                        format!("    {}", truncate_chars(detail, 74)),
-                        Style::default().fg(Color::DarkGray),
-                    )]));
                 } else {
-                    // File path header with detail (line count etc.)
-                    content.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {}", path),
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("  ({})", detail),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
+                    // Rule ID as header
+                    content.push(Line::from(vec![Span::styled(
+                        format!("  {}", id),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
+                    // Rule text content
+                    content.push(Line::from(vec![Span::styled(
+                        format!("    {}", truncate_chars(text, 74)),
+                        Style::default().fg(Color::Gray),
+                    )]));
+                    content.push(Line::raw(""));
                 }
             }
         }
@@ -2832,7 +3024,7 @@ fn render(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Clear, popup_rect);
         frame.render_widget(
             Paragraph::new(content)
-                .block(modal_block(" Active Rules Files ", Color::Cyan))
+                .block(modal_block(" Active Rules ", Color::Cyan))
                 .wrap(Wrap { trim: false }),
             popup_rect,
         );
@@ -3558,6 +3750,12 @@ fn render_profile_overlay(
         ProfileOverlayMode::Creating { step } => {
             render_profile_create(frame, popup_rect, content_area, hint_area, st, step)
         }
+        ProfileOverlayMode::PickingProvider { .. } => {
+            render_profile_provider_picker(frame, popup_rect, content_area, hint_area, st)
+        }
+        ProfileOverlayMode::PickingModel { .. } => {
+            render_profile_model_picker(frame, popup_rect, content_area, hint_area, st)
+        }
     }
 }
 
@@ -3755,6 +3953,18 @@ fn render_profile_create(
     st: &ProfileOverlayState,
     step: &ProfileCreateStep,
 ) {
+    match step {
+        ProfileCreateStep::Provider => {
+            render_profile_provider_picker(frame, popup_rect, content_area, hint_area, st);
+            return;
+        }
+        ProfileCreateStep::Model => {
+            render_profile_model_picker(frame, popup_rect, content_area, hint_area, st);
+            return;
+        }
+        _ => {}
+    }
+
     frame.render_widget(
         Block::default()
             .title(" New Profile ")
@@ -3885,6 +4095,179 @@ fn render_profile_create(
     if cursor_y < content_area.y + content_area.height {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn render_profile_provider_picker(
+    frame: &mut Frame,
+    popup_rect: Rect,
+    content_area: Rect,
+    hint_area: Rect,
+    st: &ProfileOverlayState,
+) {
+    frame.render_widget(
+        Block::default()
+            .title(" Select Provider ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+        popup_rect,
+    );
+
+    const VISIBLE: usize = 10;
+    let picker = &st.provider_picker;
+    let indices = picker.filtered();
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![Span::styled(
+            format!("  Filter: {}_", picker.filter),
+            Style::default().fg(Color::White),
+        )]),
+        Line::raw(""),
+    ];
+
+    let end = (picker.scroll_offset + VISIBLE).min(indices.len());
+    for (di, &idx) in indices[picker.scroll_offset..end].iter().enumerate() {
+        let abs_pos = picker.scroll_offset + di;
+        let selected = abs_pos == picker.selected;
+        let (id, name, needs_key) = KNOWN_PROVIDERS[idx];
+        let bg = if selected {
+            TUI_SELECTION_BG
+        } else {
+            Color::Reset
+        };
+        let fg = if selected { Color::White } else { Color::Gray };
+        let key_hint = if !needs_key { "  (no key needed)" } else { "" };
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {:<12}  {}{}", id, name, key_hint),
+            Style::default().fg(fg).bg(bg),
+        )]));
+    }
+
+    let above = picker.scroll_offset;
+    let below = indices.len().saturating_sub(picker.scroll_offset + VISIBLE);
+    if above > 0 || below > 0 {
+        let mut parts = Vec::new();
+        if above > 0 {
+            parts.push(format!("↑↑ {} more", above));
+        }
+        if below > 0 {
+            parts.push(format!("↓↓ {} more", below));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  {}", parts.join("  ")),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
+    frame.render_widget(
+        Paragraph::new("↑↓=navigate  Enter=select  type to filter  Esc=cancel").style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        hint_area,
+    );
+}
+
+fn render_profile_model_picker(
+    frame: &mut Frame,
+    popup_rect: Rect,
+    content_area: Rect,
+    hint_area: Rect,
+    st: &ProfileOverlayState,
+) {
+    frame.render_widget(
+        Block::default()
+            .title(" Select Model ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)),
+        popup_rect,
+    );
+
+    let Some(ref picker) = st.profile_model_picker else {
+        return;
+    };
+    const VISIBLE: usize = 12;
+    let filtered = picker.filtered();
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            format!("  Filter: {}_", picker.filter),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "  {:<32}  {:<12}  {:>8}  {:>8}  {:>6}",
+                "model", "provider", "$/1M in", "$/1M out", "ctx k"
+            ),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )),
+        Line::raw(""),
+    ];
+
+    let end = (picker.scroll_offset + VISIBLE).min(filtered.len());
+    for (di, m) in filtered[picker.scroll_offset..end].iter().enumerate() {
+        let selected = picker.scroll_offset + di == picker.selected;
+        let bg = if selected {
+            TUI_SELECTION_BG
+        } else {
+            Color::Reset
+        };
+        let fg = if selected { Color::White } else { Color::Gray };
+        let ctx = m
+            .context_k
+            .map(|k| format!("{:>4}k", k))
+            .unwrap_or_else(|| "    ?".into());
+        let id_display: String = m.id.chars().take(32).collect();
+        let prov_display: String = m.provider.chars().take(12).collect();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {:<32}  {:<12}  {:>8.2}  {:>8.2}  {}",
+                id_display, prov_display, m.input_mtok, m.output_mtok, ctx
+            ),
+            Style::default().fg(fg).bg(bg),
+        )));
+    }
+
+    let above = picker.scroll_offset;
+    let below = filtered
+        .len()
+        .saturating_sub(picker.scroll_offset + VISIBLE);
+    if above > 0 || below > 0 {
+        let mut parts = Vec::new();
+        if above > 0 {
+            parts.push(format!("↑↑ {} more", above));
+        }
+        if below > 0 {
+            parts.push(format!("↓↓ {} more", below));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  {}", parts.join("  ")),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
+    frame.render_widget(
+        Paragraph::new("↑↓=navigate  Enter=select  type to filter  Esc=cancel").style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        hint_area,
+    );
 }
 
 // ── Modal component helpers ───────────────────────────────────────────────────
@@ -5273,25 +5656,19 @@ fn execute_slash(app: &mut App, cmd: &str) {
             match arg {
                 "on" => {
                     app.notify_enabled = true;
-                    app.push(ChatLine::Info(
-                        "  Notifications enabled for this session.".into(),
-                    ));
+                    app.push(ChatLine::Info("  ✓ Notifications enabled".into()));
                 }
                 "off" => {
                     app.notify_enabled = false;
-                    app.push(ChatLine::Info(
-                        "  Notifications disabled for this session.".into(),
-                    ));
+                    app.push(ChatLine::Info("  ✓ Notifications disabled".into()));
                 }
-                "status" | "" => {
+                "" => {
+                    app.notify_enabled = !app.notify_enabled;
                     let state = if app.notify_enabled { "on" } else { "off" };
-                    app.push(ChatLine::Info(format!(
-                        "  Notifications: {}  (toggle: /notify on | /notify off)",
-                        state
-                    )));
+                    app.push(ChatLine::Info(format!("  Notifications {}", state)));
                 }
                 _ => {
-                    app.push(ChatLine::Info("  Usage: /notify [on|off|status]".into()));
+                    app.push(ChatLine::Info("  Usage: /notify [on|off]".into()));
                 }
             }
         }
@@ -5322,30 +5699,16 @@ Once built, the agent can search by concept rather than just filename.".into(),
             }
         }
         "/rules" => {
-            let rules = clido_context::discover_rules(&app.workspace_root, false, None);
+            let active = app.prompt_rules.active_rules();
             let mut overlay_content: Vec<(String, String)> = Vec::new();
-            if rules.is_empty() {
+            if active.is_empty() {
                 overlay_content.push((
-                    "  No active rules files.".to_string(),
-                    "Create CLIDO.md in your project root to define agent constraints.".to_string(),
+                    "  No active rules.".to_string(),
+                    "Use /prompt-rules add <text> to define prompt enhancement rules.".to_string(),
                 ));
             } else {
-                for f in &rules {
-                    let line_count = f.content.lines().count();
-                    overlay_content.push((
-                        f.path.display().to_string(),
-                        format!("{} lines", line_count),
-                    ));
-                    // Show first 6 non-empty lines as preview
-                    let preview_lines: Vec<&str> = f
-                        .content
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .take(6)
-                        .collect();
-                    if !preview_lines.is_empty() {
-                        overlay_content.push(("  ".to_string(), preview_lines.join(" │ ")));
-                    }
+                for rule in active {
+                    overlay_content.push((rule.id.clone(), rule.text.clone()));
                 }
             }
             app.rules_overlay = Some(overlay_content);
@@ -6060,7 +6423,7 @@ fn build_lines_w_uncached(app: &App, width: usize) -> Vec<Line<'static>> {
             }
             ChatLine::Assistant(text) => {
                 out.push(Line::from(vec![Span::styled(
-                    "clido",
+                    "assistant",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -7056,7 +7419,7 @@ fn handle_plan_editor_key(app: &mut App, event: crossterm::event::KeyEvent) {
             // Abort plan — close editor without executing.
             app.plan_editor = None;
             app.plan_task_editing = None;
-            app.push(ChatLine::Info("  ↻ Plan aborted".into()));
+            app.push(ChatLine::Info("  ✗ Plan aborted".into()));
             app.busy = false;
         }
         _ => {}
@@ -7103,21 +7466,38 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
                             st.name = value;
                             st.input.clear();
                             st.input_cursor = 0;
+                            st.provider_picker = ProviderPickerState::new();
+                            st.provider_picker.clamp();
                             st.mode = ProfileOverlayMode::Creating {
                                 step: ProfileCreateStep::Provider,
                             };
                         }
                         ProfileCreateStep::Provider => {
-                            if value.is_empty() {
-                                st.status = Some("  ✗ Provider cannot be empty".into());
-                                return;
+                            if let Some(id) = st.provider_picker.selected_id() {
+                                st.provider = id.to_string();
+                                let needs_key = st.provider_picker.selected_requires_key();
+                                let models = app.known_models.clone();
+                                let mut picker = ModelPickerState {
+                                    models,
+                                    filter: id.to_string(),
+                                    selected: 0,
+                                    scroll_offset: 0,
+                                };
+                                picker.clamp();
+                                st.profile_model_picker = Some(picker);
+                                st.input.clear();
+                                st.input_cursor = 0;
+                                // Skip API key step for local providers (ollama, lmstudio, etc.)
+                                let next_step = if needs_key {
+                                    ProfileCreateStep::ApiKey
+                                } else {
+                                    st.api_key.clear();
+                                    ProfileCreateStep::Model
+                                };
+                                st.mode = ProfileOverlayMode::Creating { step: next_step };
+                            } else {
+                                st.status = Some("  ✗ Select a provider from the list".into());
                             }
-                            st.provider = value;
-                            st.input.clear();
-                            st.input_cursor = 0;
-                            st.mode = ProfileOverlayMode::Creating {
-                                step: ProfileCreateStep::ApiKey,
-                            };
                         }
                         ProfileCreateStep::ApiKey => {
                             // API key may be empty for local providers
@@ -7129,75 +7509,287 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
                             };
                         }
                         ProfileCreateStep::Model => {
-                            if value.is_empty() {
-                                st.status = Some("  ✗ Model cannot be empty".into());
-                                return;
+                            let model_id = st.profile_model_picker.as_ref().and_then(|p| {
+                                let filtered = p.filtered();
+                                filtered.get(p.selected).map(|m| m.id.clone())
+                            });
+                            if let Some(id) = model_id {
+                                st.model = id;
+                                st.input.clear();
+                                st.input_cursor = 0;
+                                st.mode = ProfileOverlayMode::Overview;
+                                let st = app.profile_overlay.as_mut().unwrap();
+                                st.save();
+                                let name = st.name.clone();
+                                let msg = st
+                                    .status
+                                    .clone()
+                                    .unwrap_or_else(|| format!("  ✓ Profile '{}' created", name));
+                                app.push(ChatLine::Info(msg));
+                                app.push(ChatLine::Info(format!(
+                                    "  Use /profile {} to switch to it.",
+                                    name
+                                )));
+                                app.profile_overlay = None;
+                            } else {
+                                st.status = Some("  ✗ Select a model from the list".into());
                             }
-                            st.model = value;
-                            st.input.clear();
-                            st.input_cursor = 0;
-                            // Save and switch to overview
-                            st.mode = ProfileOverlayMode::Overview;
-                            let st = app.profile_overlay.as_mut().unwrap();
-                            st.save();
-                            let name = st.name.clone();
-                            let msg = st.status.clone().unwrap_or_default();
-                            app.push(ChatLine::Info(msg));
-                            // Switch to the new profile
-                            app.push(ChatLine::Info(format!(
-                                "  Use /profile {} to switch to it.",
-                                name
-                            )));
-                            app.profile_overlay = None;
                         }
                     }
                 }
                 Backspace => {
-                    if !st.input.is_empty() {
-                        if event.modifiers.contains(Km::CONTROL) {
-                            // Ctrl+Backspace: delete word
-                            while st.input_cursor > 0 {
-                                let b = char_byte_pos_tui(&st.input, st.input_cursor - 1);
-                                let ch = st.input[..b].chars().last();
-                                if ch.map(|c| c == ' ').unwrap_or(false) && st.input_cursor > 1 {
-                                    break;
-                                }
-                                st.input_cursor -= 1;
-                                let pos = char_byte_pos_tui(&st.input, st.input_cursor);
-                                st.input.remove(pos);
+                    match step {
+                        ProfileCreateStep::Provider => {
+                            st.provider_picker.filter.pop();
+                            st.provider_picker.clamp();
+                        }
+                        ProfileCreateStep::Model => {
+                            if let Some(ref mut picker) = st.profile_model_picker {
+                                picker.filter.pop();
+                                picker.clamp();
                             }
-                        } else {
-                            delete_char_before_cursor_pe(st);
+                        }
+                        _ => {
+                            if !st.input.is_empty() {
+                                if event.modifiers.contains(Km::CONTROL) {
+                                    // Ctrl+Backspace: delete word
+                                    while st.input_cursor > 0 {
+                                        let b = char_byte_pos_tui(&st.input, st.input_cursor - 1);
+                                        let ch = st.input[..b].chars().last();
+                                        if ch.map(|c| c == ' ').unwrap_or(false)
+                                            && st.input_cursor > 1
+                                        {
+                                            break;
+                                        }
+                                        st.input_cursor -= 1;
+                                        let pos = char_byte_pos_tui(&st.input, st.input_cursor);
+                                        st.input.remove(pos);
+                                    }
+                                } else {
+                                    delete_char_before_cursor_pe(st);
+                                }
+                            }
                         }
                     }
                 }
-                Delete => {
-                    delete_char_at_cursor_pe(st);
-                }
-                Left => {
-                    if st.input_cursor > 0 {
-                        st.input_cursor -= 1;
+                Delete => match step {
+                    ProfileCreateStep::Provider | ProfileCreateStep::Model => {}
+                    _ => {
+                        delete_char_at_cursor_pe(st);
                     }
-                }
-                Right => {
-                    if st.input_cursor < st.input.chars().count() {
+                },
+                Left => match step {
+                    ProfileCreateStep::Provider | ProfileCreateStep::Model => {}
+                    _ => {
+                        if st.input_cursor > 0 {
+                            st.input_cursor -= 1;
+                        }
+                    }
+                },
+                Right => match step {
+                    ProfileCreateStep::Provider | ProfileCreateStep::Model => {}
+                    _ => {
+                        if st.input_cursor < st.input.chars().count() {
+                            st.input_cursor += 1;
+                        }
+                    }
+                },
+                Home => match step {
+                    ProfileCreateStep::Provider | ProfileCreateStep::Model => {}
+                    _ => {
+                        st.input_cursor = 0;
+                    }
+                },
+                End => match step {
+                    ProfileCreateStep::Provider | ProfileCreateStep::Model => {}
+                    _ => {
+                        st.input_cursor = st.input.chars().count();
+                    }
+                },
+                Up => match step {
+                    ProfileCreateStep::Provider => {
+                        if st.provider_picker.selected > 0 {
+                            st.provider_picker.selected -= 1;
+                            if st.provider_picker.selected < st.provider_picker.scroll_offset {
+                                st.provider_picker.scroll_offset = st.provider_picker.selected;
+                            }
+                        }
+                    }
+                    ProfileCreateStep::Model => {
+                        if let Some(ref mut picker) = st.profile_model_picker {
+                            if picker.selected > 0 {
+                                picker.selected -= 1;
+                                if picker.selected < picker.scroll_offset {
+                                    picker.scroll_offset = picker.selected;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        st.input_cursor = 0;
+                    }
+                },
+                Down => match step {
+                    ProfileCreateStep::Provider => {
+                        const VIS: usize = 10;
+                        let n = st.provider_picker.filtered().len();
+                        if n > 0 && st.provider_picker.selected + 1 < n {
+                            st.provider_picker.selected += 1;
+                            if st.provider_picker.selected >= st.provider_picker.scroll_offset + VIS
+                            {
+                                st.provider_picker.scroll_offset =
+                                    st.provider_picker.selected + 1 - VIS;
+                            }
+                        }
+                    }
+                    ProfileCreateStep::Model => {
+                        const VIS: usize = 12;
+                        if let Some(ref mut picker) = st.profile_model_picker {
+                            let n = picker.filtered().len();
+                            if n > 0 && picker.selected + 1 < n {
+                                picker.selected += 1;
+                                if picker.selected >= picker.scroll_offset + VIS {
+                                    picker.scroll_offset = picker.selected + 1 - VIS;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        st.input_cursor = st.input.chars().count();
+                    }
+                },
+                Char(c) => match step {
+                    ProfileCreateStep::Provider => {
+                        st.provider_picker.filter.push(c);
+                        st.provider_picker.clamp();
+                    }
+                    ProfileCreateStep::Model => {
+                        if let Some(ref mut picker) = st.profile_model_picker {
+                            picker.filter.push(c);
+                            picker.clamp();
+                        }
+                    }
+                    _ => {
+                        let b = char_byte_pos_tui(&st.input, st.input_cursor);
+                        st.input.insert(b, c);
                         st.input_cursor += 1;
                     }
-                }
-                Home | KeyCode::Up => {
-                    st.input_cursor = 0;
-                }
-                End | KeyCode::Down => {
-                    st.input_cursor = st.input.chars().count();
-                }
-                Char(c) => {
-                    let b = char_byte_pos_tui(&st.input, st.input_cursor);
-                    st.input.insert(b, c);
-                    st.input_cursor += 1;
-                }
+                },
                 _ => {}
             }
         }
+
+        // ── PickingProvider: structured provider picker ─────────────────────
+        ProfileOverlayMode::PickingProvider { .. } => match event.code {
+            Esc => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                st.provider_picker = ProviderPickerState::new();
+                st.mode = ProfileOverlayMode::Overview;
+            }
+            Enter => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                st.commit_provider_pick();
+                st.save();
+                let name = st.name.clone();
+                let provider = st.provider.clone();
+                let model = st.model.clone();
+                if app.current_profile == name {
+                    app.provider = provider;
+                    app.model = model;
+                }
+            }
+            Up => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                if st.provider_picker.selected > 0 {
+                    st.provider_picker.selected -= 1;
+                    if st.provider_picker.selected < st.provider_picker.scroll_offset {
+                        st.provider_picker.scroll_offset = st.provider_picker.selected;
+                    }
+                }
+            }
+            Down => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                let n = st.provider_picker.filtered().len();
+                if n > 0 && st.provider_picker.selected + 1 < n {
+                    st.provider_picker.selected += 1;
+                    const VIS: usize = 10;
+                    if st.provider_picker.selected >= st.provider_picker.scroll_offset + VIS {
+                        st.provider_picker.scroll_offset = st.provider_picker.selected + 1 - VIS;
+                    }
+                }
+            }
+            Char(c) => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                st.provider_picker.filter.push(c);
+                st.provider_picker.clamp();
+            }
+            Backspace => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                st.provider_picker.filter.pop();
+                st.provider_picker.clamp();
+            }
+            _ => {}
+        },
+
+        // ── PickingModel: structured model picker ────────────────────────────
+        ProfileOverlayMode::PickingModel { .. } => match event.code {
+            Esc => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                st.profile_model_picker = None;
+                st.mode = ProfileOverlayMode::Overview;
+            }
+            Enter => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                st.commit_model_pick();
+                st.save();
+                let name = st.name.clone();
+                let provider = st.provider.clone();
+                let model = st.model.clone();
+                if app.current_profile == name {
+                    app.provider = provider;
+                    app.model = model;
+                }
+            }
+            Up => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                if let Some(ref mut picker) = st.profile_model_picker {
+                    if picker.selected > 0 {
+                        picker.selected -= 1;
+                        if picker.selected < picker.scroll_offset {
+                            picker.scroll_offset = picker.selected;
+                        }
+                    }
+                }
+            }
+            Down => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                if let Some(ref mut picker) = st.profile_model_picker {
+                    const VIS: usize = 12;
+                    let n = picker.filtered().len();
+                    if n > 0 && picker.selected + 1 < n {
+                        picker.selected += 1;
+                        if picker.selected >= picker.scroll_offset + VIS {
+                            picker.scroll_offset = picker.selected + 1 - VIS;
+                        }
+                    }
+                }
+            }
+            Char(c) => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                if let Some(ref mut picker) = st.profile_model_picker {
+                    picker.filter.push(c);
+                    picker.clamp();
+                }
+            }
+            Backspace => {
+                let st = app.profile_overlay.as_mut().unwrap();
+                if let Some(ref mut picker) = st.profile_model_picker {
+                    picker.filter.pop();
+                    picker.clamp();
+                }
+            }
+            _ => {}
+        },
 
         // ── Overview: navigate fields ──────────────────────────────────────
         ProfileOverlayMode::Overview => {
@@ -7216,7 +7808,8 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
                     }
                 }
                 Enter => {
-                    st.begin_edit();
+                    let models: Vec<ModelEntry> = app.known_models.clone();
+                    app.profile_overlay.as_mut().unwrap().begin_edit(&models);
                 }
                 KeyCode::Char('s') if event.modifiers.contains(Km::CONTROL) => {
                     let st = app.profile_overlay.as_mut().unwrap();
@@ -7940,6 +8533,11 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                                 2 => PermGrant::Workdir,
                                 _ => PermGrant::Deny,
                             };
+                            // Track AllowAll grants on the App so the UI can reflect the state
+                            // and so we can reset it on workdir changes.
+                            if matches!(grant, PermGrant::Session | PermGrant::Workdir) {
+                                app.permission_mode_override = Some(PermissionMode::AcceptAll);
+                            }
                             let _ = perm.reply.send(grant);
                             app.perm_selected = 0;
                         }
@@ -8459,9 +9057,13 @@ async fn agent_task(
 
     let planner_mode = cli.planner;
     let context_max_tokens = setup.config.max_context_tokens.unwrap_or(200_000) as u64;
+    let git_workspace = workspace_root.clone();
+    let git_context_fn: Box<dyn Fn() -> Option<String> + Send + Sync> =
+        Box::new(move || GitContext::discover(&git_workspace).map(|ctx| ctx.to_prompt_section()));
     let mut agent = AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user)
         .with_emitter(emitter)
-        .with_planner(planner_mode);
+        .with_planner(planner_mode)
+        .with_git_context_fn(git_context_fn);
 
     let mut first_turn = true;
     // Auto-continue counter: when the turn limit is hit mid-task, clido automatically
@@ -8547,6 +9149,7 @@ async fn agent_task(
             match AgentSetup::build(&cli, &new_workspace) {
                 Ok(new_setup) => {
                     agent.replace_tools(new_setup.registry);
+                    agent.reset_permission_mode_override();
                     if let Ok(mut state) = perms.lock() {
                         state.clear_all_grants();
                     }
@@ -8604,6 +9207,7 @@ async fn agent_task(
                 match AgentSetup::build(&cli, &new_workspace) {
                     Ok(new_setup) => {
                         agent.replace_tools(new_setup.registry);
+                        agent.reset_permission_mode_override();
                         if let Ok(mut state) = perms.lock() {
                             state.clear_all_grants();
                         }
@@ -9590,6 +10194,9 @@ async fn event_loop(
                     Some(AgentEvent::WorkdirSwitched { path }) => {
                         last_agent_activity = std::time::Instant::now();
                         app.workspace_root = path.clone();
+                        // Reset the app-side AllowAll override — the agent's override was
+                        // already reset in agent_task when replace_tools was called.
+                        app.permission_mode_override = None;
                         app.push(ChatLine::Info(format!("  ✓ Working directory: {}", path.display())));
                         app.push(ChatLine::Info(
                             "  Permission grants were reset for safety after the switch."
@@ -9725,6 +10332,13 @@ async fn event_loop(
                         // Silent keep-alive from agent_task during slow LLM responses.
                         // Just refresh the activity timestamp to prevent false stall detection.
                         last_agent_activity = std::time::Instant::now();
+                    }
+                    Some(AgentEvent::BudgetWarning { percent, cost, limit }) => {
+                        last_agent_activity = std::time::Instant::now();
+                        app.push(ChatLine::Info(format!(
+                            "  ⚠ {}% of budget used (${:.4} / ${:.4})",
+                            percent, cost, limit
+                        )));
                     }
                     None => {
                         return Ok(EventLoopExit::Recover(
@@ -10502,15 +11116,15 @@ mod tests {
             &entry,
             std::path::PathBuf::from("/tmp/t.toml"),
         );
-        // Navigate to model field (cursor=2)
-        ov.cursor = 2;
-        ov.begin_edit();
+        // Navigate to ApiKey field (cursor=1) — uses inline edit, not picker
+        ov.cursor = 1;
+        ov.begin_edit(&[]);
         assert_eq!(
             ov.mode,
-            ProfileOverlayMode::EditField(ProfileEditField::Model)
+            ProfileOverlayMode::EditField(ProfileEditField::ApiKey)
         );
-        assert_eq!(ov.input, "gpt-4o");
-        assert_eq!(ov.input_cursor, 6); // char count of "gpt-4o"
+        assert_eq!(ov.input, "");
+        assert_eq!(ov.input_cursor, 0);
 
         // Cancel should restore overview
         ov.cancel_edit();
@@ -10537,10 +11151,23 @@ mod tests {
             &entry,
             std::path::PathBuf::from("/tmp/t.toml"),
         );
-        ov.cursor = 2; // Model field
-        ov.begin_edit();
-        ov.input = "claude-haiku-4-5".into();
-        ov.commit_edit();
+        // Model field (cursor=2) now uses picker — begin_edit enters PickingModel mode
+        ov.cursor = 2;
+        let model_entry = ModelEntry {
+            id: "claude-haiku-4-5".into(),
+            provider: "openai".into(),
+            input_mtok: 0.25,
+            output_mtok: 1.25,
+            context_k: Some(200),
+            role: None,
+            is_favorite: false,
+        };
+        ov.begin_edit(&[model_entry]);
+        assert!(matches!(ov.mode, ProfileOverlayMode::PickingModel { .. }));
+        // picker should have the model entry
+        assert!(ov.profile_model_picker.is_some());
+        // commit the pick
+        ov.commit_model_pick();
         assert_eq!(ov.model, "claude-haiku-4-5");
         assert_eq!(ov.mode, ProfileOverlayMode::Overview);
     }
@@ -10680,5 +11307,176 @@ mod tests {
         let down = move_cursor_line_down(s, start).unwrap();
         let back = move_cursor_line_up(s, down).unwrap();
         assert_eq!(back, start);
+    }
+
+    // ── T01: TUI critical path unit tests ─────────────────────────────────────
+
+    fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent {
+            code,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    // T01-1: pressing Enter with option 3 (Deny) selected resolves PendingPerm with Deny.
+    #[test]
+    fn perm_modal_deny_sends_deny_grant() {
+        use crossterm::event::KeyCode;
+        use tokio::sync::oneshot;
+
+        let mut app = make_test_app();
+        let (reply_tx, mut reply_rx) = oneshot::channel::<PermGrant>();
+        app.pending_perm = Some(PendingPerm {
+            tool_name: "Write".to_string(),
+            preview: "writing to a file".to_string(),
+            reply: reply_tx,
+        });
+        app.perm_selected = 3; // index 3 = Deny
+
+        handle_key(&mut app, make_key(KeyCode::Enter));
+
+        assert!(
+            app.pending_perm.is_none(),
+            "pending_perm should be cleared after Deny"
+        );
+        let grant = reply_rx.try_recv().expect("reply should have been sent");
+        assert!(
+            matches!(grant, PermGrant::Deny),
+            "expected PermGrant::Deny, got {:?}",
+            grant
+        );
+        assert_eq!(app.perm_selected, 0, "selection should reset to 0");
+    }
+
+    // T01-2: DenyWithFeedback — Enter on option 4 enters feedback mode; second Enter sends
+    // DenyWithFeedback with the typed reason.
+    #[test]
+    fn perm_modal_deny_with_feedback_sends_reason() {
+        use crossterm::event::KeyCode;
+        use tokio::sync::oneshot;
+
+        let mut app = make_test_app();
+        let (reply_tx, mut reply_rx) = oneshot::channel::<PermGrant>();
+        app.pending_perm = Some(PendingPerm {
+            tool_name: "Bash".to_string(),
+            preview: "rm -rf /".to_string(),
+            reply: reply_tx,
+        });
+        app.perm_selected = 4; // index 4 = DenyWithFeedback
+
+        // First Enter: enter feedback-input mode.
+        handle_key(&mut app, make_key(KeyCode::Enter));
+        assert!(
+            app.perm_feedback_input.is_some(),
+            "feedback input mode should be active"
+        );
+        assert!(
+            app.pending_perm.is_some(),
+            "pending_perm should still be set during feedback entry"
+        );
+
+        // Type feedback characters.
+        handle_key(&mut app, make_key(KeyCode::Char('b')));
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        handle_key(&mut app, make_key(KeyCode::Char('d')));
+
+        // Second Enter: submit feedback.
+        handle_key(&mut app, make_key(KeyCode::Enter));
+
+        assert!(
+            app.pending_perm.is_none(),
+            "pending_perm should be cleared after DenyWithFeedback submit"
+        );
+        assert!(
+            app.perm_feedback_input.is_none(),
+            "perm_feedback_input should be cleared"
+        );
+        assert_eq!(app.perm_selected, 0, "selection should reset to 0");
+
+        let grant = reply_rx.try_recv().expect("reply should have been sent");
+        match grant {
+            PermGrant::DenyWithFeedback(reason) => {
+                assert_eq!(reason, "bad", "feedback text mismatch: {reason}");
+            }
+            other => panic!("expected DenyWithFeedback, got {:?}", other),
+        }
+    }
+
+    // T01-3: messages queued while busy are processed FIFO.
+    #[test]
+    fn queue_processes_items_in_fifo_order() {
+        let mut app = make_test_app();
+        app.busy = true;
+
+        // Submit three inputs while busy — they should land in queued FIFO.
+        for msg in &["first", "second", "third"] {
+            app.input = msg.to_string();
+            app.cursor = app.input.chars().count();
+            app.submit();
+        }
+
+        assert_eq!(app.queued.len(), 3, "all three inputs should be queued");
+        let items: Vec<&str> = app.queued.iter().map(String::as_str).collect();
+        assert_eq!(
+            items,
+            vec!["first", "second", "third"],
+            "queue must preserve FIFO order"
+        );
+    }
+
+    // T01-4: input_history is capped at 1000 entries (FX14 fix).
+    #[test]
+    fn input_history_capped_at_1000() {
+        let mut app = make_test_app();
+        // Push 1001 distinct entries directly via send_now (which adds to history).
+        for i in 0..1001usize {
+            app.send_now(format!("prompt {i}"));
+        }
+        assert_eq!(
+            app.input_history.len(),
+            1000,
+            "history must be capped at 1000"
+        );
+        // The very first entry "prompt 0" should have been evicted.
+        assert_ne!(
+            app.input_history.first().map(String::as_str),
+            Some("prompt 0"),
+            "oldest entry should have been evicted"
+        );
+        // The last entry should be the most recent.
+        assert_eq!(
+            app.input_history.last().map(String::as_str),
+            Some("prompt 1000"),
+            "newest entry should be the last element"
+        );
+    }
+
+    // T01-5: a multiline input (containing '\n') is submitted and stored in history.
+    #[test]
+    fn multiline_input_is_handled() {
+        let mut app = make_test_app();
+        let multiline = "line one\nline two\nline three";
+        app.send_now(multiline.to_string());
+
+        // The input should appear as a ChatLine::User message.
+        let has_user_line = app.messages.iter().any(|m| {
+            if let ChatLine::User(text) = m {
+                text == multiline
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_user_line,
+            "multiline input should appear as a User ChatLine"
+        );
+
+        // It should also be recorded in history.
+        assert!(
+            app.input_history.contains(&multiline.to_string()),
+            "multiline input should be recorded in input_history"
+        );
     }
 }

@@ -181,6 +181,10 @@ pub struct AgentLoop {
     doom_monitor: VecDeque<String>,
     /// Tracks which budget warning percentages have already been emitted this run.
     budget_warned_pcts: Vec<u8>,
+    /// Optional callback to compute fresh git context each turn. When set, the
+    /// returned string (if any) is injected as a `<git_context>` addendum to the
+    /// system prompt on every call to `run()` / `run_with_extra_blocks()`.
+    git_context_fn: Option<Box<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 impl AgentLoop {
@@ -212,6 +216,7 @@ impl AgentLoop {
             base_system_prompt,
             doom_monitor: VecDeque::new(),
             budget_warned_pcts: Vec::new(),
+            git_context_fn: None,
         }
     }
 
@@ -251,6 +256,7 @@ impl AgentLoop {
             base_system_prompt,
             doom_monitor: VecDeque::new(),
             budget_warned_pcts: Vec::new(),
+            git_context_fn: None,
         }
     }
 
@@ -263,6 +269,14 @@ impl AgentLoop {
     /// Attach an audit log.
     pub fn with_audit_log(mut self, log: Arc<std::sync::Mutex<AuditLog>>) -> Self {
         self.audit_log = Some(log);
+        self
+    }
+
+    /// Attach a per-turn git context provider. The closure is called before each
+    /// `run()` invocation and its output (if any) is appended to the system prompt
+    /// as a `<git_context>` block so the model always sees fresh repo state.
+    pub fn with_git_context_fn(mut self, f: Box<dyn Fn() -> Option<String> + Send + Sync>) -> Self {
+        self.git_context_fn = Some(f);
         self
     }
 
@@ -294,6 +308,12 @@ impl AgentLoop {
         self.tools = tools;
     }
 
+    /// Reset the runtime permission mode override (used when the workdir changes so
+    /// previously-granted AllowAll does not silently carry over to a new project).
+    pub fn reset_permission_mode_override(&mut self) {
+        self.permission_mode_override = None;
+    }
+
     /// Retrieve relevant memories for the given prompt and prepend them to
     /// the system prompt override for one turn.
     fn inject_memories(&self, prompt: &str) -> Option<String> {
@@ -316,6 +336,16 @@ impl AgentLoop {
             .as_deref()
             .unwrap_or("You are a helpful coding assistant.");
         Some(format!("{}\n\n[Relevant memories]\n{}", base, memory_text))
+    }
+
+    /// Compute fresh git context via `git_context_fn` (if set) and return a new
+    /// system prompt string with the context appended. Returns `None` when no
+    /// git context function is registered or when the function returns nothing.
+    /// Like `inject_memories`, always builds from `base_system_prompt` so the
+    /// block does not accumulate across repeated turns.
+    fn inject_git_context(&self, current_system_prompt: &str) -> Option<String> {
+        let git_section = (self.git_context_fn.as_ref()?)()?;
+        Some(format!("{}\n\n{}", current_system_prompt, git_section))
     }
 
     /// Prune the memory store to keep the most recent 5000 entries, preventing
@@ -770,6 +800,11 @@ impl AgentLoop {
         if let Some(injected) = self.inject_memories(user_input) {
             self.config.system_prompt = Some(injected);
         }
+        // Refresh git context each turn so the model always sees the current branch/diff.
+        let base_for_git = self.config.system_prompt.clone().unwrap_or_default();
+        if let Some(with_git) = self.inject_git_context(&base_for_git) {
+            self.config.system_prompt = Some(with_git);
+        }
 
         let history_before = self.history.len();
         let user_msg = Message {
@@ -816,6 +851,10 @@ impl AgentLoop {
     ) -> Result<String> {
         if let Some(injected) = self.inject_memories(user_input) {
             self.config.system_prompt = Some(injected);
+        }
+        let base_for_git = self.config.system_prompt.clone().unwrap_or_default();
+        if let Some(with_git) = self.inject_git_context(&base_for_git) {
+            self.config.system_prompt = Some(with_git);
         }
 
         let history_before = self.history.len();

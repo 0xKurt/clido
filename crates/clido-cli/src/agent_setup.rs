@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::cli::Cli;
 use crate::errors::CliError;
-use crate::git_context::GitContext;
+
 use crate::provider::{make_provider, StdinAskUser};
 use crate::spawn_tools::{SpawnReviewerTool, SpawnWorkerTool};
 
@@ -201,12 +201,10 @@ impl AgentSetup {
             }
         }
 
-        // Inject git context into the system prompt if the working directory is a git repo.
-        if let Some(git_ctx) = GitContext::discover(workspace_root) {
-            if let Some(ref mut sp) = config.system_prompt {
-                *sp = format!("{}\n\n{}", sp, git_ctx.to_prompt_section());
-            }
-        }
+        // Git context is no longer injected here as a one-shot static section.
+        // Instead each AgentLoop consumer attaches a `git_context_fn` callback
+        // (via `AgentLoop::with_git_context_fn`) so the context is refreshed on
+        // every user turn, reflecting the current branch/status/log.
 
         if config.max_context_tokens.is_none() {
             if let Some(entry) = pricing_table.models.get(&config.model) {

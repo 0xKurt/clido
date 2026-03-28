@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
 use crate::errors::CliError;
+use crate::git_context::GitContext;
 use crate::sessions;
 use crate::ui::{ansi, cli_use_color};
 
@@ -184,7 +185,11 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
         cancel_handle.store(true, Ordering::Relaxed);
     });
 
-    let mut loop_ = AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user);
+    let git_wr = workspace_root.clone();
+    let git_fn: Box<dyn Fn() -> Option<String> + Send + Sync> =
+        Box::new(move || GitContext::discover(&git_wr).map(|ctx| ctx.to_prompt_section()));
+    let mut loop_ = AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user)
+        .with_git_context_fn(git_fn);
     let mut first_turn = true;
     let mut total_turns: u32 = 0;
     let mut total_cost_usd: f64 = 0.0;
