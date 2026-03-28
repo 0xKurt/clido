@@ -1038,7 +1038,7 @@ impl App {
             self.model = per_turn_model.clone();
             let _ = self.model_switch_tx.send(per_turn_model.clone());
             self.push(ChatLine::Info(format!(
-                "  [one turn] using {} (will revert after response)",
+                "  ↻ Using {} for this turn only",
                 per_turn_model
             )));
             self.push(ChatLine::User(actual_prompt.clone()));
@@ -1238,7 +1238,7 @@ impl App {
                 let total = plans.len();
                 if last_num < total {
                     self.push(ChatLine::Info(format!(
-                        "  plan: {}/{} steps done. Remaining:",
+                        "  Plan: {}/{} steps completed. Remaining:",
                         last_num, total
                     )));
                     for (i, step) in plans[last_num..].iter().enumerate() {
@@ -1255,10 +1255,7 @@ impl App {
                 self.last_plan_raw = Some(text.clone());
                 if let Some(plan) = build_plan_from_assistant_text(&text) {
                     if let Err(e) = clido_planner::save_plan(&self.workspace_root, &plan) {
-                        self.push(ChatLine::Info(format!(
-                            "  warning: could not save plan: {}",
-                            e
-                        )));
+                        self.push(ChatLine::Info(format!("  ⚠ Could not save plan: {}", e)));
                     }
                     self.last_plan = Some(
                         plan.tasks
@@ -1351,27 +1348,27 @@ fn render(frame: &mut Frame, app: &mut App) {
             ("○", Color::DarkGray)
         };
         hline1.push(Span::styled(
-            format!("  rev{}", dot),
+            format!("  review {}", dot),
             Style::default().fg(color).add_modifier(Modifier::DIM),
         ));
     }
 
-    // Line 2: cwd · cost/tokens
+    // Line 2: dir · cost/tokens
     let mut hline2: Vec<Span<'static>> = vec![Span::styled(
-        format!("  cwd:{}", app.workspace_root.display()),
+        format!("  dir: {}", app.workspace_root.display()),
         dim,
     )];
     if app.session_total_cost_usd > 0.0 {
         let sum_in = app.session_total_input_tokens;
         let tok_str = if sum_in >= 1000 {
-            format!("{:.1}k tok Σ", sum_in as f64 / 1000.0)
+            format!("{:.1}k tokens", sum_in as f64 / 1000.0)
         } else {
-            format!("{} tok Σ", sum_in)
+            format!("{} tokens", sum_in)
         };
         let last_in = app.session_input_tokens;
         let ctx_str = if app.context_max_tokens > 0 && last_in > 0 {
             let pct = (last_in as f64 / app.context_max_tokens as f64 * 100.0).min(100.0);
-            format!("  last {:.0}% ctx", pct)
+            format!("  {:.0}% ctx", pct)
         } else {
             String::new()
         };
@@ -1506,9 +1503,9 @@ fn render(frame: &mut Frame, app: &mut App) {
                 first.clone()
             };
             let label = if n == 1 {
-                "  ⟳ queued  ".to_string()
+                "  ⟳ 1 queued  ".to_string()
             } else {
-                format!("  ⟳ queued ({})  ", n)
+                format!("  ⟳ {} queued  ", n)
             };
             Line::from(vec![
                 Span::styled(
@@ -1699,21 +1696,21 @@ fn render(frame: &mut Frame, app: &mut App) {
         Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
         Span::styled(" scroll  ", hint_dim),
         Span::styled("/settings", Style::default().fg(Color::DarkGray)),
-        Span::styled(" config  ", hint_dim),
+        Span::styled(" settings  ", hint_dim),
         Span::styled("/help", Style::default().fg(Color::DarkGray)),
         Span::styled(" commands  ", hint_dim),
         Span::styled("Ctrl+/", Style::default().fg(Color::DarkGray)),
-        Span::styled(" stop  ", hint_dim),
+        Span::styled(" stop agent  ", hint_dim),
         Span::styled("Ctrl+C", Style::default().fg(Color::DarkGray)),
         Span::styled(" quit  ", hint_dim),
         Span::styled("Ctrl+L", Style::default().fg(Color::DarkGray)),
-        Span::styled(" redraw  ", hint_dim),
+        Span::styled(" refresh  ", hint_dim),
         Span::styled("Shift+select", Style::default().fg(Color::DarkGray)),
-        Span::styled(" terminal copy  ", hint_dim),
+        Span::styled(" copy text  ", hint_dim),
     ];
     if app.session_total_cost_usd > 0.0 {
         hint_spans.push(Span::styled(
-            format!("  ${:.4} Σ", app.session_total_cost_usd),
+            format!("  ${:.4} spent", app.session_total_cost_usd),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -1881,8 +1878,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         let mut content: Vec<Line<'static>> = vec![
             Line::from(vec![Span::styled(
                 format!(
-                    "  {:<8}  {:<3}  {:<6}  {:<11}  {}",
-                    "id", "msg", "cost", "date", "preview"
+                    "  {:<8}  {:<5}  {:<6}  {:<11}  {}",
+                    "id", "turns", "cost", "date", "preview"
                 ),
                 Style::default()
                     .fg(Color::DarkGray)
@@ -1913,7 +1910,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             let marker = if selected { "▶ " } else { "  " };
             content.push(Line::from(vec![Span::styled(
                 format!(
-                    "{}{:<8}  {:>3}  ${:<5.2}  {:<11}  {}",
+                    "{}{:<8}  {:>5}  ${:<5.2}  {:<11}  {}",
                     marker, id_short, s.num_turns, s.total_cost_usd, date_str, preview_str
                 ),
                 Style::default().fg(fg).bg(bg),
@@ -1970,7 +1967,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             Line::from(vec![Span::styled(
                 format!(
                     "  {:<2} {:<32}  {:<12}  {:>8}  {:>8}  {:>6}  {}",
-                    "  ", "model", "provider", "in/mtok", "out/mtok", "ctx", "role"
+                    "  ", "model", "provider", "$/1M in", "$/1M out", "ctx k", "alias"
                 ),
                 Style::default()
                     .fg(Color::DarkGray)
@@ -3544,10 +3541,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
             let _ = app.model_switch_tx.send(new_model.clone());
             app.model_prefs.push_recent(&new_model);
             app.model_prefs.save();
-            app.push(ChatLine::Info(format!(
-                "  model switched to {} (fast)",
-                new_model
-            )));
+            app.push(ChatLine::Info(format!("  ✓ Model: {} (fast)", new_model)));
         }
         "/smart" => {
             let new_model = app
@@ -3559,10 +3553,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
             let _ = app.model_switch_tx.send(new_model.clone());
             app.model_prefs.push_recent(&new_model);
             app.model_prefs.save();
-            app.push(ChatLine::Info(format!(
-                "  model switched to {} (smart)",
-                new_model
-            )));
+            app.push(ChatLine::Info(format!("  ✓ Model: {} (smart)", new_model)));
         }
         _ if cmd == "/model" || cmd.starts_with("/model ") => {
             let arg = cmd.trim_start_matches("/model").trim();
@@ -3588,7 +3579,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 let _ = app.model_switch_tx.send(new_model.clone());
                 app.model_prefs.push_recent(&new_model);
                 app.model_prefs.save();
-                app.push(ChatLine::Info(format!("  model switched to {}", new_model)));
+                app.push(ChatLine::Info(format!("  ✓ Model: {}", new_model)));
             }
         }
         "/models" => {
@@ -3689,9 +3680,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
                     "off" => Some(false),
                     "" => None, // no arg → just show status
                     _ => {
-                        app.push(ChatLine::Info(
-                            "  reviewer: usage: /reviewer [on|off]".into(),
-                        ));
+                        app.push(ChatLine::Info("  Usage: /reviewer [on|off]".into()));
                         return;
                     }
                 };
@@ -3700,20 +3689,23 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 }
                 let current = app.reviewer_enabled.load(Ordering::Relaxed);
                 let status = if current { "on ●" } else { "off ○" };
-                app.push(ChatLine::Info(format!("  reviewer: {}", status)));
+                app.push(ChatLine::Info(format!("  ✓ Reviewer {}", status)));
             }
         }
         "/session" => match &app.current_session_id {
-            Some(id) => app.push(ChatLine::Info(format!("  session: {}", id))),
-            None => app.push(ChatLine::Info("  no active session yet".into())),
+            Some(id) => app.push(ChatLine::Info(format!("  Session ID: {}", id))),
+            None => app.push(ChatLine::Info("  No active session yet".into())),
         },
         "/sessions" => {
             use clido_storage::list_sessions;
             match list_sessions(&app.workspace_root) {
-                Err(e) => app.push(ChatLine::Info(format!("  error listing sessions: {}", e))),
+                Err(e) => app.push(ChatLine::Info(format!(
+                    "  ✗ Could not list sessions: {}",
+                    e
+                ))),
                 Ok(sessions) if sessions.is_empty() => {
                     app.push(ChatLine::Info(
-                        "  no sessions found for this project".into(),
+                        "  No sessions found for this project".into(),
                     ));
                 }
                 Ok(sessions) => {
@@ -3730,7 +3722,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
             }
         }
         "/workdir" => app.push(ChatLine::Info(format!(
-            "  workdir: {}",
+            "  Working directory: {}",
             app.workspace_root.display()
         ))),
         _ if cmd.starts_with("/workdir ") => {
@@ -3739,15 +3731,18 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 Ok(path) => {
                     let _ = app.workdir_tx.send(path.clone());
                     app.push(ChatLine::Info(format!(
-                        "  workdir switch requested: {}",
+                        "  ↻ Switching to {}…",
                         path.display()
                     )));
                     app.push(ChatLine::Info(
-                        "  waiting for runtime confirmation; prompts stay on current workdir until then."
+                        "  Prompts stay on the current directory until the switch completes."
                             .into(),
                     ));
                 }
-                Err(e) => app.push(ChatLine::Info(format!("  workdir: {}", e))),
+                Err(e) => app.push(ChatLine::Info(format!(
+                    "  ✗ Working directory error: {}",
+                    e
+                ))),
             }
         }
         "/stop" => {
@@ -3773,8 +3768,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
             let query = cmd.trim_start_matches("/memory").trim();
             if query.is_empty() {
                 app.push(ChatLine::Info(
-                    "  memory: usage: /memory <query>  |  or `clido memory list` in another terminal"
-                        .into(),
+                    "  Usage: /memory <query>  |  or run `clido memory list` in a terminal".into(),
                 ));
             } else {
                 match tui_memory_store_path() {
@@ -3782,13 +3776,13 @@ fn execute_slash(app: &mut App, cmd: &str) {
                         Ok(store) => match store.search_hybrid(query, 15) {
                             Ok(entries) if entries.is_empty() => {
                                 app.push(ChatLine::Info(format!(
-                                    "  memory: no matches for {:?}",
+                                    "  No memory matches for \"{}\"",
                                     query
                                 )));
                             }
                             Ok(entries) => {
                                 app.push(ChatLine::Info(format!(
-                                    "  memory: {} match(es) for {:?}",
+                                    "  Found {} memory match(es) for \"{}\"",
                                     entries.len(),
                                     query
                                 )));
@@ -3800,15 +3794,18 @@ fn execute_slash(app: &mut App, cmd: &str) {
                                 }
                             }
                             Err(e) => {
-                                app.push(ChatLine::Info(format!("  memory search error: {}", e)));
+                                app.push(ChatLine::Info(format!(
+                                    "  ✗ Memory search failed: {}",
+                                    e
+                                )));
                             }
                         },
                         Err(e) => app.push(ChatLine::Info(format!(
-                            "  memory: could not open store: {}",
+                            "  ✗ Cannot open memory store: {}",
                             e
                         ))),
                     },
-                    Err(e) => app.push(ChatLine::Info(format!("  memory: {}", e))),
+                    Err(e) => app.push(ChatLine::Info(format!("  ✗ Memory error: {}", e))),
                 }
             }
         }
@@ -3962,15 +3959,23 @@ fn execute_slash(app: &mut App, cmd: &str) {
                                 .collect::<Vec<_>>(),
                         );
                         match clido_planner::save_plan(&app.workspace_root, &editor.plan) {
-                            Ok(path) => app
-                                .push(ChatLine::Info(format!("  plan saved: {}", path.display()))),
-                            Err(e) => app.pending_error = Some(format!("save plan: {}", e)),
+                            Ok(path) => app.push(ChatLine::Info(format!(
+                                "  ✓ Plan saved: {}",
+                                path.display()
+                            ))),
+                            Err(e) => {
+                                app.pending_error = Some(format!("Could not save plan: {}", e))
+                            }
                         }
                     } else if let Some(ref plan) = app.last_plan_snapshot {
                         match clido_planner::save_plan(&app.workspace_root, plan) {
-                            Ok(path) => app
-                                .push(ChatLine::Info(format!("  plan saved: {}", path.display()))),
-                            Err(e) => app.pending_error = Some(format!("save plan: {}", e)),
+                            Ok(path) => app.push(ChatLine::Info(format!(
+                                "  ✓ Plan saved: {}",
+                                path.display()
+                            ))),
+                            Err(e) => {
+                                app.pending_error = Some(format!("Could not save plan: {}", e))
+                            }
                         }
                     } else {
                         app.push(ChatLine::Info("  no active plan to save".into()));
@@ -4006,7 +4011,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
                             ));
                             return;
                         }
-                        app.push(ChatLine::Info("  plan  ┌─ Current plan:".into()));
+                        app.push(ChatLine::Info("  ┌─ Current plan:".into()));
                         let count = plan.tasks.len();
                         for (i, t) in plan.tasks.iter().enumerate() {
                             let prefix = if i + 1 == count {
@@ -4019,7 +4024,7 @@ fn execute_slash(app: &mut App, cmd: &str) {
                     } else {
                         match app.last_plan.clone() {
                             Some(tasks) if !tasks.is_empty() => {
-                                app.push(ChatLine::Info("  plan  ┌─ Current plan:".into()));
+                                app.push(ChatLine::Info("  ┌─ Current plan:".into()));
                                 let count = tasks.len();
                                 for (i, t) in tasks.iter().enumerate() {
                                     let prefix = if i + 1 == count {
@@ -4197,24 +4202,23 @@ fn execute_slash(app: &mut App, cmd: &str) {
             let db_path = app.workspace_root.join(".clido").join("index.db");
             if !db_path.exists() {
                 app.push(ChatLine::Info(
-                    "  index: no database — run `clido index build`. Then the agent can use SemanticSearch."
-                        .into(),
+                    "  Index not built — run `clido index build` to enable semantic search.".into(),
                 ));
             } else {
                 match RepoIndex::open(&db_path) {
                     Ok(index) => match index.stats() {
                         Ok((files, symbols)) => {
                             app.push(ChatLine::Info(format!(
-                                "  index: {} files, {} symbols  (rebuild: `clido index build`)",
+                                "  Index: {} files, {} symbols  (refresh: `clido index build`)",
                                 files, symbols
                             )));
                         }
                         Err(e) => {
-                            app.push(ChatLine::Info(format!("  index stats: {}", e)));
+                            app.push(ChatLine::Info(format!("  ✗ Index error: {}", e)));
                         }
                     },
                     Err(e) => {
-                        app.push(ChatLine::Info(format!("  index: could not open: {}", e)));
+                        app.push(ChatLine::Info(format!("  ✗ Index unavailable: {}", e)));
                     }
                 }
             }
@@ -5397,10 +5401,13 @@ fn handle_plan_editor_key(app: &mut App, event: crossterm::event::KeyEvent) {
             if let Some(ref editor) = app.plan_editor {
                 match clido_planner::save_plan(&app.workspace_root, &editor.plan) {
                     Ok(path) => {
-                        app.push(ChatLine::Info(format!("  plan saved: {}", path.display())));
+                        app.push(ChatLine::Info(format!(
+                            "  ✓ Plan saved: {}",
+                            path.display()
+                        )));
                     }
                     Err(e) => {
-                        app.pending_error = Some(format!("save plan: {}", e));
+                        app.pending_error = Some(format!("Could not save plan: {}", e));
                     }
                 }
             }
@@ -5776,7 +5783,7 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                         // Update recency.
                         app.model_prefs.push_recent(&entry.id);
                         app.model_prefs.save();
-                        app.push(ChatLine::Info(format!("  model switched to {}", entry.id)));
+                        app.push(ChatLine::Info(format!("  ✓ Model: {}", entry.id)));
                     }
                 }
             }
@@ -5992,7 +5999,7 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     app.model_prefs.push_recent(&model_id);
                     app.model_prefs.save();
                     app.push(ChatLine::Info(format!(
-                        "  model switched to {} (role: {})",
+                        "  ✓ Model: {} (alias: {})",
                         model_id, role_name
                     )));
                 }
@@ -7545,13 +7552,13 @@ async fn event_loop(
                     Some(AgentEvent::WorkdirSwitched { path }) => {
                         last_agent_activity = std::time::Instant::now();
                         app.workspace_root = path.clone();
-                        app.push(ChatLine::Info(format!("  workdir set to {}", path.display())));
+                        app.push(ChatLine::Info(format!("  ✓ Working directory: {}", path.display())));
                         app.push(ChatLine::Info(
-                            "  permission grants were reset for safety after workdir switch."
+                            "  Permission grants were reset for safety after the switch."
                                 .into(),
                         ));
                         app.push(ChatLine::Info(
-                            "  note: session files & resume stay on the original project path until restart."
+                            "  Note: session history stays on the original project until restart."
                                 .into(),
                         ));
                     }
@@ -7616,14 +7623,14 @@ async fn event_loop(
                     Some(AgentEvent::Compacted { before, after }) => {
                         last_agent_activity = std::time::Instant::now();
                         app.push(ChatLine::Info(format!(
-                            "  context compacted: {} → {} messages",
+                            "  ↻ Context compressed: {} → {} messages (older history summarised)",
                             before, after
                         )));
                     }
                     Some(AgentEvent::PlanCreated { tasks }) => {
                         last_agent_activity = std::time::Instant::now();
                         // Display the plan in the chat as an info block.
-                        app.push(ChatLine::Info("  plan  ┌─ Planned tasks:".to_string()));
+                        app.push(ChatLine::Info("  ┌─ Plan:".to_string()));
                         let count = tasks.len();
                         for (i, task) in tasks.iter().enumerate() {
                             let prefix = if i + 1 == count { "        └─" } else { "        ├─" };
@@ -7650,12 +7657,12 @@ async fn event_loop(
                     }
                     Some(AgentEvent::PlanTaskStarted { task_id }) => {
                         last_agent_activity = std::time::Instant::now();
-                        app.push(ChatLine::Info(format!("  ↻ plan task {} started", task_id)));
+                        app.push(ChatLine::Info(format!("  ↻ Step {} started", task_id)));
                     }
                     Some(AgentEvent::PlanTaskDone { task_id, success }) => {
                         last_agent_activity = std::time::Instant::now();
                         let icon = if success { "✓" } else { "✗" };
-                        app.push(ChatLine::Info(format!("  {} plan task {} done", icon, task_id)));
+                        app.push(ChatLine::Info(format!("  {} Step {} done", icon, task_id)));
                     }
                     Some(AgentEvent::Heartbeat) => {
                         // Silent keep-alive from agent_task during slow LLM responses.
