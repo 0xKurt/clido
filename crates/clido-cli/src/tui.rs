@@ -8044,24 +8044,16 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         }
         (_, Home) => app.cursor = 0,
         (_, End) => app.cursor = app.input.chars().count(),
-        // ── Up: scroll chat (empty input) or history navigation (with input) ──
+        // ── Up: move cursor up in multiline input, otherwise scroll chat ──────
         (_, Up) if app.pending_perm.is_none() && slash_completions(&app.input).is_empty() => {
-            // In a multiline input, Up moves the cursor to the line above
-            // when we're not already on the first line.
             if app.input.contains('\n') && app.history_idx.is_none() {
                 if let Some(new_cursor) = move_cursor_line_up(&app.input, app.cursor) {
                     app.cursor = new_cursor;
                     return;
                 }
             }
-            if app.input.is_empty() && app.history_idx.is_none() {
-                // Scroll chat up.
-                scroll_up(app, 2);
-            } else {
-                // Input history navigation.
-                if app.input_history.is_empty() {
-                    return;
-                }
+            // Empty input with no active history browse: also navigate history.
+            if app.input.is_empty() && !app.input_history.is_empty() {
                 let new_idx = match app.history_idx {
                     None => {
                         app.history_draft = app.input.clone();
@@ -8074,38 +8066,37 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                 app.input = app.input_history[new_idx].clone();
                 app.cursor = app.input.chars().count();
                 app.selected_cmd = None;
+                return;
             }
+            scroll_up(app, 2);
         }
-        // ── Down: scroll chat (empty input, not in history) or history nav ───
+        // ── Down: move cursor down in multiline input, otherwise scroll chat ──
         (_, Down) if app.pending_perm.is_none() && slash_completions(&app.input).is_empty() => {
-            // In a multiline input, Down moves the cursor to the line below
-            // when we're not already on the last line.
             if app.input.contains('\n') && app.history_idx.is_none() {
                 if let Some(new_cursor) = move_cursor_line_down(&app.input, app.cursor) {
                     app.cursor = new_cursor;
                     return;
                 }
             }
-            if app.input.is_empty() && app.history_idx.is_none() {
-                scroll_down(app, 2);
-            } else {
-                match app.history_idx {
-                    None => {}
-                    Some(i) if i + 1 >= app.input_history.len() => {
+            // Empty input while browsing history: navigate forward.
+            if app.input.is_empty() || app.history_idx.is_some() {
+                if let Some(i) = app.history_idx {
+                    if i + 1 >= app.input_history.len() {
                         app.history_idx = None;
                         app.input = app.history_draft.clone();
                         app.cursor = app.input.chars().count();
                         app.selected_cmd = None;
-                    }
-                    Some(i) => {
+                    } else {
                         let new_idx = i + 1;
                         app.history_idx = Some(new_idx);
                         app.input = app.input_history[new_idx].clone();
                         app.cursor = app.input.chars().count();
                         app.selected_cmd = None;
                     }
+                    return;
                 }
             }
+            scroll_down(app, 2);
         }
         // ── Chat scroll (PageUp/PageDown — larger jumps) ─────────────────────
         (_, PageUp) => {
