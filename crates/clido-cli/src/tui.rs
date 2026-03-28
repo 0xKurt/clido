@@ -204,6 +204,10 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/stop", "interrupt current run without sending a message"),
             ("/copy", "copy to clipboard. Usage: /copy (last reply) | /copy <n> (last n exchanges) | /copy all"),
             (
+                "/notify",
+                "show or toggle completion notifications. Usage: /notify [on|off|status]",
+            ),
+            (
                 "/index",
                 "show codebase index stats  (rebuild: clido index build)",
             ),
@@ -486,6 +490,10 @@ enum ProfileEditField {
     ApiKey,
     Model,
     BaseUrl,
+    WorkerProvider,
+    WorkerModel,
+    ReviewerProvider,
+    ReviewerModel,
 }
 
 /// Screen mode for the profile overlay.
@@ -512,11 +520,17 @@ enum ProfileCreateStep {
 struct ProfileOverlayState {
     /// Profile name being viewed/edited (empty = creating new).
     name: String,
-    /// Live-editable fields.
+    /// Live-editable fields — main agent.
     provider: String,
     api_key: String,
     model: String,
     base_url: String,
+    /// Sub-agent fields — worker (all optional; empty = not configured).
+    worker_provider: String,
+    worker_model: String,
+    /// Sub-agent fields — reviewer (all optional; empty = not configured).
+    reviewer_provider: String,
+    reviewer_model: String,
     /// Current cursor row in overview mode (0-based index into PROFILE_FIELDS).
     cursor: usize,
     /// Current overlay mode.
@@ -533,12 +547,19 @@ struct ProfileOverlayState {
     is_new: bool,
 }
 
-/// Display labels for the editable profile fields (in order).
+/// Display labels and keys for the editable profile fields (in order).
+/// The special key "__section__" marks a non-editable section header divider.
 const PROFILE_FIELDS: &[(&str, &str)] = &[
     ("provider", "Provider"),
     ("api_key", "API Key"),
     ("model", "Model"),
     ("base_url", "Custom Endpoint (optional)"),
+    ("__section__", "── Worker Sub-agent (optional) ──"),
+    ("worker_provider", "Worker Provider"),
+    ("worker_model", "Worker Model"),
+    ("__section__", "── Reviewer Sub-agent (optional) ──"),
+    ("reviewer_provider", "Reviewer Provider"),
+    ("reviewer_model", "Reviewer Model"),
 ];
 
 impl ProfileOverlayState {
@@ -558,12 +579,36 @@ impl ProfileOverlayState {
                     .and_then(|e| std::env::var(e).ok())
             })
             .unwrap_or_default();
+        let worker_provider = entry
+            .worker
+            .as_ref()
+            .map(|w| w.provider.clone())
+            .unwrap_or_default();
+        let worker_model = entry
+            .worker
+            .as_ref()
+            .map(|w| w.model.clone())
+            .unwrap_or_default();
+        let reviewer_provider = entry
+            .reviewer
+            .as_ref()
+            .map(|r| r.provider.clone())
+            .unwrap_or_default();
+        let reviewer_model = entry
+            .reviewer
+            .as_ref()
+            .map(|r| r.model.clone())
+            .unwrap_or_default();
         Self {
             name,
             provider: entry.provider.clone(),
             api_key,
             model: entry.model.clone(),
             base_url: entry.base_url.clone().unwrap_or_default(),
+            worker_provider,
+            worker_model,
+            reviewer_provider,
+            reviewer_model,
             cursor: 0,
             mode: ProfileOverlayMode::Overview,
             input: String::new(),
@@ -582,6 +627,10 @@ impl ProfileOverlayState {
             api_key: String::new(),
             model: String::new(),
             base_url: String::new(),
+            worker_provider: String::new(),
+            worker_model: String::new(),
+            reviewer_provider: String::new(),
+            reviewer_model: String::new(),
             cursor: 0,
             mode: ProfileOverlayMode::Creating {
                 step: ProfileCreateStep::Name,
@@ -601,19 +650,33 @@ impl ProfileOverlayState {
             ProfileEditField::ApiKey => self.api_key.clone(),
             ProfileEditField::Model => self.model.clone(),
             ProfileEditField::BaseUrl => self.base_url.clone(),
+            ProfileEditField::WorkerProvider => self.worker_provider.clone(),
+            ProfileEditField::WorkerModel => self.worker_model.clone(),
+            ProfileEditField::ReviewerProvider => self.reviewer_provider.clone(),
+            ProfileEditField::ReviewerModel => self.reviewer_model.clone(),
             ProfileEditField::None => String::new(),
         }
     }
 
     /// The `ProfileEditField` corresponding to cursor row.
+    /// cursor 0-3 = main agent fields; 4-5 = worker; 6-7 = reviewer.
     fn cursor_field(&self) -> ProfileEditField {
         match self.cursor {
             0 => ProfileEditField::Provider,
             1 => ProfileEditField::ApiKey,
             2 => ProfileEditField::Model,
             3 => ProfileEditField::BaseUrl,
+            4 => ProfileEditField::WorkerProvider,
+            5 => ProfileEditField::WorkerModel,
+            6 => ProfileEditField::ReviewerProvider,
+            7 => ProfileEditField::ReviewerModel,
             _ => ProfileEditField::None,
         }
+    }
+
+    /// Total number of editable cursor positions.
+    fn field_count() -> usize {
+        8
     }
 
     /// Start editing the field at `cursor`.
@@ -632,6 +695,16 @@ impl ProfileOverlayState {
                 ProfileEditField::ApiKey => self.api_key = self.input.trim().to_string(),
                 ProfileEditField::Model => self.model = self.input.trim().to_string(),
                 ProfileEditField::BaseUrl => self.base_url = self.input.trim().to_string(),
+                ProfileEditField::WorkerProvider => {
+                    self.worker_provider = self.input.trim().to_string()
+                }
+                ProfileEditField::WorkerModel => self.worker_model = self.input.trim().to_string(),
+                ProfileEditField::ReviewerProvider => {
+                    self.reviewer_provider = self.input.trim().to_string()
+                }
+                ProfileEditField::ReviewerModel => {
+                    self.reviewer_model = self.input.trim().to_string()
+                }
                 ProfileEditField::None => {}
             }
         }
@@ -659,14 +732,37 @@ impl ProfileOverlayState {
         } else {
             Some(self.api_key.clone())
         };
+        // Build optional sub-agent configs — only if at least a provider is set.
+        let worker = if !self.worker_provider.is_empty() && !self.worker_model.is_empty() {
+            Some(clido_core::AgentSlotConfig {
+                provider: self.worker_provider.clone(),
+                model: self.worker_model.clone(),
+                api_key: None,
+                api_key_env: None,
+                base_url: None,
+            })
+        } else {
+            None
+        };
+        let reviewer = if !self.reviewer_provider.is_empty() && !self.reviewer_model.is_empty() {
+            Some(clido_core::AgentSlotConfig {
+                provider: self.reviewer_provider.clone(),
+                model: self.reviewer_model.clone(),
+                api_key: None,
+                api_key_env: None,
+                base_url: None,
+            })
+        } else {
+            None
+        };
         let entry = clido_core::ProfileEntry {
             provider: self.provider.clone(),
             model: self.model.clone(),
             api_key: api_key_opt,
             api_key_env: None,
             base_url,
-            worker: None,
-            reviewer: None,
+            worker,
+            reviewer,
         };
         match clido_core::upsert_profile_in_config(&self.config_path, &self.name, &entry) {
             Ok(()) => {
@@ -3471,34 +3567,60 @@ fn render_profile_overview(
 
     let editing = matches!(&st.mode, ProfileOverlayMode::EditField(_));
     let mut lines: Vec<Line<'static>> = Vec::new();
-
     lines.push(Line::raw(""));
 
-    for (i, (key, label)) in PROFILE_FIELDS.iter().enumerate() {
-        let selected = st.cursor == i && !editing;
+    // cursor_idx tracks which editable field we're on as we iterate PROFILE_FIELDS.
+    // Section headers don't consume a cursor index.
+    let mut cursor_idx: usize = 0;
+    // line_count tracks rendered lines so we can place the text cursor correctly.
+    let mut line_count: u16 = 1; // starts at 1 for the leading blank
+    let mut editing_line_y: u16 = 0; // Y position of the value row for the active edit field
+
+    for (key, label) in PROFILE_FIELDS.iter() {
+        if *key == "__section__" {
+            // Non-editable section divider
+            lines.push(Line::from(Span::styled(
+                format!("  {}", label),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::DIM | Modifier::BOLD),
+            )));
+            lines.push(Line::raw(""));
+            line_count += 2;
+            continue;
+        }
+
+        let field_cursor = cursor_idx;
+        cursor_idx += 1;
+
+        let selected = st.cursor == field_cursor && !editing;
         let is_editing = matches!(&st.mode, ProfileOverlayMode::EditField(f) if {
-            let expected = match i {
+            let expected = match field_cursor {
                 0 => ProfileEditField::Provider,
                 1 => ProfileEditField::ApiKey,
                 2 => ProfileEditField::Model,
                 3 => ProfileEditField::BaseUrl,
+                4 => ProfileEditField::WorkerProvider,
+                5 => ProfileEditField::WorkerModel,
+                6 => ProfileEditField::ReviewerProvider,
+                7 => ProfileEditField::ReviewerModel,
                 _ => ProfileEditField::None,
             };
             *f == expected
         });
 
         // Label row
-        lines.push(Line::from(vec![Span::styled(
+        lines.push(Line::from(Span::styled(
             format!("  {}", label),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
-        )]));
+        )));
+        line_count += 1;
 
         // Value row
         let display_value = if *key == "api_key" {
             if is_editing {
-                // Show masked version (don't reveal live edit buffer)
                 st.input.clone()
             } else {
                 st.masked_api_key()
@@ -3506,18 +3628,21 @@ fn render_profile_overview(
         } else if is_editing {
             st.input.clone()
         } else {
-            match i {
+            let raw = match field_cursor {
                 0 => st.provider.clone(),
                 1 => st.masked_api_key(),
                 2 => st.model.clone(),
-                3 => {
-                    if st.base_url.is_empty() {
-                        "—".to_string()
-                    } else {
-                        st.base_url.clone()
-                    }
-                }
+                3 => st.base_url.clone(),
+                4 => st.worker_provider.clone(),
+                5 => st.worker_model.clone(),
+                6 => st.reviewer_provider.clone(),
+                7 => st.reviewer_model.clone(),
                 _ => String::new(),
+            };
+            if raw.is_empty() {
+                "—".to_string()
+            } else {
+                raw
             }
         };
 
@@ -3554,6 +3679,7 @@ fn render_profile_overview(
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::DIM),
             ));
+            editing_line_y = content_area.y + line_count;
         } else if selected {
             spans.push(Span::styled(
                 "  (Enter to edit)",
@@ -3565,6 +3691,7 @@ fn render_profile_overview(
 
         lines.push(Line::from(spans));
         lines.push(Line::raw(""));
+        line_count += 2;
     }
 
     // Status message
@@ -3595,15 +3722,11 @@ fn render_profile_overview(
         hint_area,
     );
 
-    // Show cursor in the correct text field when editing.
-    if let ProfileOverlayMode::EditField(_) = &st.mode {
-        // Cursor position: value row is at content_area.y + 2 + row_offset
-        // Each field takes 3 lines (label + value + blank), preceded by 1 blank line.
-        let row_offset = (st.cursor * 3 + 1) as u16; // +1 for leading blank
-        let cursor_y = content_area.y + row_offset + 1; // +1 for label row
-        let cursor_x = content_area.x + 3 + st.input_cursor as u16; // 3 = " ▶ " prefix
-        if cursor_y < content_area.y + content_area.height {
-            frame.set_cursor_position((cursor_x, cursor_y));
+    // Place terminal cursor on the value row of the field being edited.
+    if matches!(&st.mode, ProfileOverlayMode::EditField(_)) && editing_line_y > 0 {
+        let cursor_x = content_area.x + 3 + st.input_cursor as u16; // 3 = " ▶ " prefix width
+        if editing_line_y < content_area.y + content_area.height {
+            frame.set_cursor_position((cursor_x, editing_line_y));
         }
     }
 }
@@ -5128,6 +5251,33 @@ fn execute_slash(app: &mut App, cmd: &str) {
             app.push(ChatLine::Info("  ↻ Running project diagnostics…".into()));
             // Send a message to the agent asking it to run diagnostics on the current project.
             app.send_now("Run diagnostics on the current project".to_string());
+        }
+        _ if cmd == "/notify" || cmd.starts_with("/notify ") => {
+            let arg = cmd.trim_start_matches("/notify").trim();
+            match arg {
+                "on" => {
+                    app.notify_enabled = true;
+                    app.push(ChatLine::Info(
+                        "  Notifications enabled for this session.".into(),
+                    ));
+                }
+                "off" => {
+                    app.notify_enabled = false;
+                    app.push(ChatLine::Info(
+                        "  Notifications disabled for this session.".into(),
+                    ));
+                }
+                "status" | "" => {
+                    let state = if app.notify_enabled { "on" } else { "off" };
+                    app.push(ChatLine::Info(format!(
+                        "  Notifications: {}  (toggle: /notify on | /notify off)",
+                        state
+                    )));
+                }
+                _ => {
+                    app.push(ChatLine::Info("  Usage: /notify [on|off|status]".into()));
+                }
+            }
         }
         "/index" => {
             let db_path = app.workspace_root.join(".clido").join("index.db");
@@ -7007,7 +7157,7 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
                     }
                 }
                 Down => {
-                    if st.cursor + 1 < PROFILE_FIELDS.len() {
+                    if st.cursor + 1 < ProfileOverlayState::field_count() {
                         st.cursor += 1;
                     }
                 }
