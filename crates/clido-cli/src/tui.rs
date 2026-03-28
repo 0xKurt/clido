@@ -289,6 +289,9 @@ enum AgentEvent {
         task_id: String,
         success: bool,
     },
+    /// Periodic keep-alive from agent_task while waiting on a slow LLM response.
+    /// Resets the stall timer without producing any visible output.
+    Heartbeat,
 }
 
 // ── Plan editor state ─────────────────────────────────────────────────────────
@@ -865,6 +868,9 @@ struct App {
     notify_enabled: bool,
     /// Shared flag that gates SpawnReviewerTool execution.  Toggle with `/reviewer on|off`.
     reviewer_enabled: Arc<AtomicBool>,
+    /// Set to true during crash recovery so the ResumedSession event preserves
+    /// the current TUI messages instead of clearing and replaying them.
+    recovering: bool,
     /// True when an explicit reviewer slot is configured in config.toml.
     /// Controls whether the reviewer badge and /reviewer command are shown.
     reviewer_configured: bool,
@@ -979,6 +985,7 @@ impl App {
             rules_overlay: None,
             notify_enabled,
             reviewer_enabled,
+            recovering: false,
             reviewer_configured,
             turn_start: None,
             per_turn_prev_model: None,
@@ -6443,6 +6450,22 @@ async fn agent_task(
                     } else {
                         vec![]
                     };
+
+                // Spawn a heartbeat task that keeps the TUI stall-detector alive while the
+                // LLM is generating (which can take >45 s for long responses).  The task
+                // is aborted as soon as agent.run() returns.
+                let hb_tx = event_tx.clone();
+                let heartbeat = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                    interval.tick().await; // skip the immediate first tick
+                    loop {
+                        interval.tick().await;
+                        if hb_tx.send(AgentEvent::Heartbeat).is_err() {
+                            break;
+                        }
+                    }
+                });
+
                 let result = if extra_blocks.is_empty() {
                     if first_turn {
                         agent
@@ -6484,6 +6507,7 @@ async fn agent_task(
                         )
                         .await
                 };
+                heartbeat.abort();
                 first_turn = false;
 
                 // Emit token usage before response/error so TUI updates cost display.
@@ -6514,6 +6538,19 @@ async fn agent_task(
                             let _ = event_tx.send(AgentEvent::Thinking(
                                 "↻ Continuing (turn limit reached)…".to_string(),
                             ));
+                            // Heartbeat also covers the auto-continue LLM call.
+                            let hb_tx2 = event_tx.clone();
+                            let hb2 = tokio::spawn(async move {
+                                let mut iv =
+                                    tokio::time::interval(std::time::Duration::from_secs(15));
+                                iv.tick().await;
+                                loop {
+                                    iv.tick().await;
+                                    if hb_tx2.send(AgentEvent::Heartbeat).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
                             // Call run_next_turn directly with a continue message.
                             let continue_result = agent
                                 .run_next_turn(
@@ -6523,6 +6560,7 @@ async fn agent_task(
                                     Some(cancel.clone()),
                                 )
                                 .await;
+                            hb2.abort();
                             let _ = event_tx.send(AgentEvent::TokenUsage {
                                 input_tokens: agent.cumulative_input_tokens,
                                 output_tokens: agent.cumulative_output_tokens,
@@ -6948,8 +6986,17 @@ async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                 }
                 let backoff_ms = 300u64.saturating_mul(1u64 << (recovery_attempts - 1));
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+                // Re-use the current session so the recovered agent picks up the full
+                // conversation history from disk, preventing context amnesia.
+                let mut recovery_cli = cli.clone();
+                if let Some(sid) = app.current_session_id.as_deref() {
+                    recovery_cli.resume = Some(sid.to_string());
+                    app.recovering = true;
+                }
+
                 runtime = start_agent_runtime(
-                    cli.clone(),
+                    recovery_cli,
                     workspace_root.clone(),
                     loaded_config.clone(),
                     pricing_table.clone(),
@@ -7071,7 +7118,9 @@ async fn event_loop(
     let mut crossterm_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(80));
     let mut last_agent_activity = std::time::Instant::now();
-    const STALL_TIMEOUT_SECS: u64 = 45;
+    // Stall timeout: trigger recovery only if truly no activity (heartbeats keep this fresh
+    // during long LLM calls, so 120 s is a reliable hard ceiling for genuinely hung agents).
+    const STALL_TIMEOUT_SECS: u64 = 120;
 
     loop {
         terminal.draw(|f| render(f, app))?;
@@ -7284,14 +7333,25 @@ async fn event_loop(
                     }
                     Some(AgentEvent::ResumedSession { messages }) => {
                         last_agent_activity = std::time::Instant::now();
-                        app.messages.clear();
-                        app.messages.push(ChatLine::WelcomeBrand);
-                        app.messages.push(ChatLine::Info("  — resumed session —".into()));
-                        for (role, text) in messages {
-                            if role == "user" {
-                                app.push(ChatLine::User(text));
-                            } else if role == "assistant" {
-                                app.push(ChatLine::Assistant(text));
+                        if app.recovering {
+                            // Silent recovery resume: the agent has restored its internal history
+                            // from the session on disk. Preserve the current TUI display and just
+                            // show a brief note so the user knows context was restored.
+                            app.recovering = false;
+                            app.push(ChatLine::Info(
+                                "  ✓ context restored — please re-send your last message".into(),
+                            ));
+                        } else {
+                            // Explicit /resume or startup resume: clear and replay.
+                            app.messages.clear();
+                            app.messages.push(ChatLine::WelcomeBrand);
+                            app.messages.push(ChatLine::Info("  — resumed session —".into()));
+                            for (role, text) in messages {
+                                if role == "user" {
+                                    app.push(ChatLine::User(text));
+                                } else if role == "assistant" {
+                                    app.push(ChatLine::Assistant(text));
+                                }
                             }
                         }
                         app.busy = false;
@@ -7349,6 +7409,11 @@ async fn event_loop(
                         last_agent_activity = std::time::Instant::now();
                         let icon = if success { "✓" } else { "✗" };
                         app.push(ChatLine::Info(format!("  {} plan task {} done", icon, task_id)));
+                    }
+                    Some(AgentEvent::Heartbeat) => {
+                        // Silent keep-alive from agent_task during slow LLM responses.
+                        // Just refresh the activity timestamp to prevent false stall detection.
+                        last_agent_activity = std::time::Instant::now();
                     }
                     None => {
                         return Ok(EventLoopExit::Recover(
