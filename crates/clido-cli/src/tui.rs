@@ -912,6 +912,8 @@ struct App {
     last_executed_step_num: Option<usize>,
     /// Shared todo list written by the agent via the TodoWrite tool.
     todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
+    /// Track whether we have already shown the empty-input hint this session.
+    empty_input_hint_shown: bool,
 }
 
 impl App {
@@ -1011,6 +1013,7 @@ impl App {
             last_executed_step_num: None,
             plan_dry_run,
             todo_store,
+            empty_input_hint_shown: false,
         };
         app.messages.push(ChatLine::WelcomeSplash);
         app
@@ -1069,7 +1072,7 @@ impl App {
         if send_result.is_err() {
             // Agent task channel closed — can't send; stay idle and surface an error.
             self.push(ChatLine::Info(
-                "  error: agent is not running. Try restarting clido.".into(),
+                "  ✗ Agent is not running — try restarting clido.".into(),
             ));
             return;
         }
@@ -1092,7 +1095,7 @@ impl App {
         }
         if trimmed == "/" {
             self.push(ChatLine::Info(
-                "  type a command or message (bare '/' not sent)".into(),
+                "  Type a message or command — bare '/' alone is not sent".into(),
             ));
             return;
         }
@@ -1113,7 +1116,7 @@ impl App {
             }
             if trimmed == "/" {
                 self.push(ChatLine::Info(
-                    "  type a command or message (bare '/' not sent)".into(),
+                    "  Type a message or command — bare '/' alone is not sent".into(),
                 ));
                 continue;
             }
@@ -1139,11 +1142,17 @@ impl App {
         }
         let text = self.input.trim().to_string();
         if text.is_empty() {
+            if !self.empty_input_hint_shown && !self.busy {
+                self.empty_input_hint_shown = true;
+                self.push(ChatLine::Info(
+                    "  Type a message to start, or /help for available commands".into(),
+                ));
+            }
             return;
         }
         if text == "/" {
             self.push(ChatLine::Info(
-                "  type a command or message (bare '/' not sent)".into(),
+                "  Type a message or command — bare '/' alone is not sent".into(),
             ));
             self.input.clear();
             self.cursor = 0;
@@ -1441,7 +1450,7 @@ fn render(frame: &mut Frame, app: &mut App) {
         render_welcome(frame, app, chat_area);
     } else {
         // Use ratatui's own line_count() so the scroll calculation matches actual rendering.
-        let lines = build_lines(app);
+        let lines = build_lines_w(app, chat_area.width as usize);
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         let total_height = para.line_count(chat_area.width) as u32;
         let max_scroll = total_height.saturating_sub(chat_area.height as u32);
@@ -4740,6 +4749,25 @@ Once built, the agent can search by concept rather than just filename.".into(),
                     if let Some(max_ctx) = c.max_context_tokens {
                         app.push(ChatLine::Info(format!("  max-context-tokens  {}", max_ctx)));
                     }
+                    // Show live session token usage if available.
+                    if app.session_input_tokens > 0 {
+                        let used = app.session_input_tokens;
+                        let limit = if app.context_max_tokens > 0 {
+                            app.context_max_tokens
+                        } else {
+                            0
+                        };
+                        let usage_str = if limit > 0 {
+                            let pct = (used as f64 / limit as f64 * 100.0).min(100.0);
+                            format!(
+                                "  context now           {} / {} tokens  ({:.0}% used)",
+                                used, limit, pct
+                            )
+                        } else {
+                            format!("  context now           {} tokens used this turn", used)
+                        };
+                        app.push(ChatLine::Info(usage_str));
+                    }
 
                     // Agent slots (global).
                     let agents = &loaded.agents;
@@ -4886,7 +4914,8 @@ Once built, the agent can search by concept rather than just filename.".into(),
     }
 }
 
-fn build_lines(app: &App) -> Vec<Line<'static>> {
+/// Width-aware version; call this from render paths where chat_area.width is known.
+fn build_lines_w(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for msg in &app.messages {
         match msg {
@@ -4897,7 +4926,7 @@ fn build_lines(app: &App) -> Vec<Line<'static>> {
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]));
-                out.extend(render_markdown(text));
+                out.extend(render_markdown(text, width));
                 out.push(Line::raw(""));
             }
             ChatLine::Assistant(text) => {
@@ -4907,7 +4936,7 @@ fn build_lines(app: &App) -> Vec<Line<'static>> {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )]));
-                out.extend(render_markdown(text));
+                out.extend(render_markdown(text, width));
                 out.push(Line::raw(""));
             }
             ChatLine::Thinking(text) => {
@@ -5134,8 +5163,10 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
 /// Supports: headings, bold/italic/strikethrough, inline code, fenced code blocks,
 /// ordered/unordered lists, blockquotes, tables (with box-drawing borders),
 /// horizontal rules, task-list checkboxes, and hard/soft breaks.
-fn render_markdown(text: &str) -> Vec<Line<'static>> {
+fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Tag};
+    // Available content width: subtract 4 chars for left margin / padding.
+    let content_w = width.saturating_sub(4).max(20);
 
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let parser = Parser::new_ext(text, opts);
@@ -5301,7 +5332,7 @@ fn render_markdown(text: &str) -> Vec<Line<'static>> {
                     in_code_block = false;
                     flush!();
                     out.push(Line::from(vec![Span::styled(
-                        "└────────────────────────────────────────".to_string(),
+                        format!("└{}", "─".repeat(content_w.min(60))),
                         Style::default().fg(Color::DarkGray),
                     )]));
                     out.push(Line::raw(""));
@@ -5407,7 +5438,7 @@ fn render_markdown(text: &str) -> Vec<Line<'static>> {
             Event::Rule => {
                 flush!();
                 out.push(Line::from(vec![Span::styled(
-                    "─".repeat(72),
+                    "─".repeat(content_w.min(72)),
                     Style::default().fg(Color::DarkGray),
                 )]));
                 out.push(Line::raw(""));
@@ -8749,6 +8780,87 @@ mod tests {
         assert!(
             export_desc.is_some_and(|d| !d.is_empty()),
             "/export needs a description"
+        );
+    }
+
+    // ── render_markdown responsiveness ───────────────────────────────────────
+
+    #[test]
+    fn code_block_close_scales_with_width() {
+        let md = "```bash\necho hello\n```";
+        let narrow = render_markdown(md, 40);
+        let wide = render_markdown(md, 120);
+        // Find the close-bar line (starts with └)
+        let close_narrow = narrow
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .map(|s| s.content.starts_with('└'))
+                    .unwrap_or(false)
+            })
+            .expect("close bar missing on narrow");
+        let close_wide = wide
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .map(|s| s.content.starts_with('└'))
+                    .unwrap_or(false)
+            })
+            .expect("close bar missing on wide");
+        let narrow_len: usize = close_narrow
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        let wide_len: usize = close_wide
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert!(
+            narrow_len <= wide_len,
+            "narrow close bar ({narrow_len}) should be ≤ wide ({wide_len})"
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_scales_with_width() {
+        let md = "---";
+        let narrow = render_markdown(md, 40);
+        let wide = render_markdown(md, 100);
+        let hr_narrow = narrow
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .map(|s| s.content.starts_with('─'))
+                    .unwrap_or(false)
+            })
+            .expect("hr missing on narrow");
+        let hr_wide = wide
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .map(|s| s.content.starts_with('─'))
+                    .unwrap_or(false)
+            })
+            .expect("hr missing on wide");
+        let n_len: usize = hr_narrow
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        let w_len: usize = hr_wide
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert!(
+            n_len <= w_len,
+            "narrow hr ({n_len}) should be ≤ wide ({w_len})"
         );
     }
 }
