@@ -68,7 +68,7 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/export", "save this conversation to a markdown file"),
             (
                 "/init",
-                "re-run setup wizard — reconfigure provider, model, API key, roles",
+                "reconfigure the current profile — opens in-TUI profile editor",
             ),
         ],
     ),
@@ -186,10 +186,10 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "/profile",
                 "open profile picker — switch, create, or edit profiles",
             ),
-            ("/profile new", "create a new profile via the guided wizard"),
+            ("/profile new", "create a new profile — opens an in-TUI wizard"),
             (
                 "/profile edit",
-                "edit a profile via the guided wizard. Usage: /profile edit [name]",
+                "edit a profile in the TUI overview. Usage: /profile edit [name]",
             ),
             ("/check", "run diagnostics on current project"),
             ("/rules", "show active project rules files (CLIDO.md)"),
@@ -473,6 +473,214 @@ impl ModelPickerState {
             self.selected = self.selected.min(n - 1);
             self.scroll_offset = self.scroll_offset.min(self.selected);
         }
+    }
+}
+
+// ── Profile overview overlay ──────────────────────────────────────────────────
+
+/// Which field of a profile is being inline-edited.
+#[derive(Debug, Clone, PartialEq)]
+enum ProfileEditField {
+    None,
+    Provider,
+    ApiKey,
+    Model,
+    BaseUrl,
+}
+
+/// Screen mode for the profile overlay.
+#[derive(Debug, Clone, PartialEq)]
+enum ProfileOverlayMode {
+    /// Showing all fields; user navigates with arrows and picks one to edit.
+    Overview,
+    /// User is editing a specific field inline.
+    EditField(ProfileEditField),
+    /// User is creating a new profile, step-by-step.
+    Creating { step: ProfileCreateStep },
+}
+
+/// Steps for the in-TUI new profile wizard.
+#[derive(Debug, Clone, PartialEq)]
+enum ProfileCreateStep {
+    Name,
+    Provider,
+    ApiKey,
+    Model,
+}
+
+/// In-TUI profile overview/editor overlay — never exits the TUI.
+struct ProfileOverlayState {
+    /// Profile name being viewed/edited (empty = creating new).
+    name: String,
+    /// Live-editable fields.
+    provider: String,
+    api_key: String,
+    model: String,
+    base_url: String,
+    /// Current cursor row in overview mode (0-based index into PROFILE_FIELDS).
+    cursor: usize,
+    /// Current overlay mode.
+    mode: ProfileOverlayMode,
+    /// Staging buffer for inline text editing.
+    input: String,
+    /// Cursor position inside `input`.
+    input_cursor: usize,
+    /// Status message shown at the bottom.
+    status: Option<String>,
+    /// Config file path for persistence.
+    config_path: std::path::PathBuf,
+    /// Whether this is a new-profile creation flow.
+    is_new: bool,
+}
+
+/// Display labels for the editable profile fields (in order).
+const PROFILE_FIELDS: &[(&str, &str)] = &[
+    ("provider", "Provider"),
+    ("api_key", "API Key"),
+    ("model", "Model"),
+    ("base_url", "Custom Endpoint (optional)"),
+];
+
+impl ProfileOverlayState {
+    /// Open an existing profile for editing.
+    fn for_edit(
+        name: String,
+        entry: &clido_core::ProfileEntry,
+        config_path: std::path::PathBuf,
+    ) -> Self {
+        let api_key = entry
+            .api_key
+            .clone()
+            .or_else(|| {
+                entry
+                    .api_key_env
+                    .as_ref()
+                    .and_then(|e| std::env::var(e).ok())
+            })
+            .unwrap_or_default();
+        Self {
+            name,
+            provider: entry.provider.clone(),
+            api_key,
+            model: entry.model.clone(),
+            base_url: entry.base_url.clone().unwrap_or_default(),
+            cursor: 0,
+            mode: ProfileOverlayMode::Overview,
+            input: String::new(),
+            input_cursor: 0,
+            status: None,
+            config_path,
+            is_new: false,
+        }
+    }
+
+    /// Open a blank state for creating a new profile.
+    fn for_create(config_path: std::path::PathBuf) -> Self {
+        Self {
+            name: String::new(),
+            provider: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            base_url: String::new(),
+            cursor: 0,
+            mode: ProfileOverlayMode::Creating {
+                step: ProfileCreateStep::Name,
+            },
+            input: String::new(),
+            input_cursor: 0,
+            status: None,
+            config_path,
+            is_new: true,
+        }
+    }
+
+    /// Value of the field at `cursor`.
+    fn field_value(&self, field: &ProfileEditField) -> String {
+        match field {
+            ProfileEditField::Provider => self.provider.clone(),
+            ProfileEditField::ApiKey => self.api_key.clone(),
+            ProfileEditField::Model => self.model.clone(),
+            ProfileEditField::BaseUrl => self.base_url.clone(),
+            ProfileEditField::None => String::new(),
+        }
+    }
+
+    /// The `ProfileEditField` corresponding to cursor row.
+    fn cursor_field(&self) -> ProfileEditField {
+        match self.cursor {
+            0 => ProfileEditField::Provider,
+            1 => ProfileEditField::ApiKey,
+            2 => ProfileEditField::Model,
+            3 => ProfileEditField::BaseUrl,
+            _ => ProfileEditField::None,
+        }
+    }
+
+    /// Start editing the field at `cursor`.
+    fn begin_edit(&mut self) {
+        let field = self.cursor_field();
+        self.input = self.field_value(&field);
+        self.input_cursor = self.input.chars().count();
+        self.mode = ProfileOverlayMode::EditField(field);
+    }
+
+    /// Commit the current input to the field being edited and return to overview.
+    fn commit_edit(&mut self) {
+        if let ProfileOverlayMode::EditField(ref field) = self.mode.clone() {
+            match field {
+                ProfileEditField::Provider => self.provider = self.input.trim().to_string(),
+                ProfileEditField::ApiKey => self.api_key = self.input.trim().to_string(),
+                ProfileEditField::Model => self.model = self.input.trim().to_string(),
+                ProfileEditField::BaseUrl => self.base_url = self.input.trim().to_string(),
+                ProfileEditField::None => {}
+            }
+        }
+        self.mode = ProfileOverlayMode::Overview;
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    /// Abandon in-progress edit and return to overview.
+    fn cancel_edit(&mut self) {
+        self.mode = ProfileOverlayMode::Overview;
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    /// Persist the current state to the config file and report result.
+    fn save(&mut self) {
+        let base_url = if self.base_url.is_empty() {
+            None
+        } else {
+            Some(self.base_url.clone())
+        };
+        let api_key_opt = if self.api_key.is_empty() {
+            None
+        } else {
+            Some(self.api_key.clone())
+        };
+        let entry = clido_core::ProfileEntry {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            api_key: api_key_opt,
+            api_key_env: None,
+            base_url,
+            worker: None,
+            reviewer: None,
+        };
+        match clido_core::upsert_profile_in_config(&self.config_path, &self.name, &entry) {
+            Ok(()) => {
+                self.status = Some(format!("  ✓ Profile '{}' saved", self.name));
+            }
+            Err(e) => {
+                self.status = Some(format!("  ✗ Save failed: {e}"));
+            }
+        }
+    }
+
+    /// Masked API key for display (shows last 4 chars).
+    fn masked_api_key(&self) -> String {
+        crate::setup::anonymize_key(&self.api_key)
     }
 }
 
@@ -826,6 +1034,8 @@ struct App {
     role_picker: Option<RolePickerState>,
     /// Settings editor popup (Some = visible).
     settings: Option<SettingsState>,
+    /// In-TUI profile overview/editor overlay (Some = visible).
+    profile_overlay: Option<ProfileOverlayState>,
     /// All known models (built at startup from pricing table + profiles).
     known_models: Vec<ModelEntry>,
     /// User model preferences: favorites, recency, role assignments.
@@ -984,6 +1194,7 @@ impl App {
             profile_picker: None,
             role_picker: None,
             settings: None,
+            profile_overlay: None,
             known_models,
             model_prefs,
             config_roles,
@@ -2296,6 +2507,11 @@ fn render(frame: &mut Frame, app: &mut App) {
         render_settings(frame, area, input_area, st);
     }
 
+    // ── Profile overview/editor overlay ──────────────────────────────────────
+    if let Some(ref st) = app.profile_overlay {
+        render_profile_overlay(frame, area, input_area, st);
+    }
+
     // ── Permission popup ─────────────────────────────────────────────────────
     if let Some(perm) = &app.pending_perm {
         let inner_w = input_area.width.saturating_sub(4) as usize;
@@ -3189,6 +3405,337 @@ fn render_welcome(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
     frame.render_widget(Paragraph::new(content), inner);
+}
+
+// ── Profile overlay renderer ──────────────────────────────────────────────────
+
+fn render_profile_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    input_area: Rect,
+    st: &ProfileOverlayState,
+) {
+    let popup_h = area.height.saturating_sub(6).max(12);
+    let popup_w = area.width.saturating_sub(8).min(80);
+    let popup_rect = popup_above_input(input_area, popup_h, popup_w);
+    frame.render_widget(Clear, popup_rect);
+
+    let inner = Rect {
+        x: popup_rect.x + 1,
+        y: popup_rect.y + 1,
+        width: popup_rect.width.saturating_sub(2),
+        height: popup_rect.height.saturating_sub(2),
+    };
+    let [content_area, hint_area] =
+        ratatui::layout::Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+
+    match &st.mode {
+        ProfileOverlayMode::Overview | ProfileOverlayMode::EditField(_) => {
+            render_profile_overview(frame, popup_rect, content_area, hint_area, st)
+        }
+        ProfileOverlayMode::Creating { step } => {
+            render_profile_create(frame, popup_rect, content_area, hint_area, st, step)
+        }
+    }
+}
+
+fn render_profile_overview(
+    frame: &mut Frame,
+    popup_rect: Rect,
+    content_area: Rect,
+    hint_area: Rect,
+    st: &ProfileOverlayState,
+) {
+    let title = if st.is_new {
+        " New Profile ".to_string()
+    } else {
+        format!(" Profile: {} ", st.name)
+    };
+    frame.render_widget(
+        Block::default()
+            .title(title.as_str())
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+        popup_rect,
+    );
+
+    let editing = matches!(&st.mode, ProfileOverlayMode::EditField(_));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::raw(""));
+
+    for (i, (key, label)) in PROFILE_FIELDS.iter().enumerate() {
+        let selected = st.cursor == i && !editing;
+        let is_editing = matches!(&st.mode, ProfileOverlayMode::EditField(f) if {
+            let expected = match i {
+                0 => ProfileEditField::Provider,
+                1 => ProfileEditField::ApiKey,
+                2 => ProfileEditField::Model,
+                3 => ProfileEditField::BaseUrl,
+                _ => ProfileEditField::None,
+            };
+            *f == expected
+        });
+
+        // Label row
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}", label),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )]));
+
+        // Value row
+        let display_value = if *key == "api_key" {
+            if is_editing {
+                // Show masked version (don't reveal live edit buffer)
+                st.input.clone()
+            } else {
+                st.masked_api_key()
+            }
+        } else if is_editing {
+            st.input.clone()
+        } else {
+            match i {
+                0 => st.provider.clone(),
+                1 => st.masked_api_key(),
+                2 => st.model.clone(),
+                3 => {
+                    if st.base_url.is_empty() {
+                        "—".to_string()
+                    } else {
+                        st.base_url.clone()
+                    }
+                }
+                _ => String::new(),
+            }
+        };
+
+        let cursor_span = if selected {
+            Span::styled(
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("   ")
+        };
+
+        let value_style = if is_editing {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+
+        let mut spans = vec![cursor_span, Span::styled(display_value, value_style)];
+
+        if is_editing {
+            spans.push(Span::styled("▌", Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(
+                "  Esc=cancel  Enter=save",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+        } else if selected {
+            spans.push(Span::styled(
+                "  (Enter to edit)",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+        lines.push(Line::raw(""));
+    }
+
+    // Status message
+    if let Some(ref msg) = st.status {
+        lines.push(Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(Color::Green),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
+
+    // Hint footer
+    let hint = if editing {
+        "Type to edit  ·  Enter=save  ·  Esc=cancel"
+    } else {
+        "↑↓ navigate  ·  Enter=edit field  ·  Ctrl+S=save all  ·  Esc=close"
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        hint_area,
+    );
+
+    // Show cursor in the correct text field when editing.
+    if let ProfileOverlayMode::EditField(_) = &st.mode {
+        // Cursor position: value row is at content_area.y + 2 + row_offset
+        // Each field takes 3 lines (label + value + blank), preceded by 1 blank line.
+        let row_offset = (st.cursor * 3 + 1) as u16; // +1 for leading blank
+        let cursor_y = content_area.y + row_offset + 1; // +1 for label row
+        let cursor_x = content_area.x + 3 + st.input_cursor as u16; // 3 = " ▶ " prefix
+        if cursor_y < content_area.y + content_area.height {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+}
+
+fn render_profile_create(
+    frame: &mut Frame,
+    popup_rect: Rect,
+    content_area: Rect,
+    hint_area: Rect,
+    st: &ProfileOverlayState,
+    step: &ProfileCreateStep,
+) {
+    frame.render_widget(
+        Block::default()
+            .title(" New Profile ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+        popup_rect,
+    );
+
+    let (step_num, step_total, step_label, current_value, placeholder) = match step {
+        ProfileCreateStep::Name => (1, 4, "Profile name", &st.name, "e.g. work, personal, fast"),
+        ProfileCreateStep::Provider => (
+            2,
+            4,
+            "Provider",
+            &st.provider,
+            "e.g. anthropic, openai, ollama",
+        ),
+        ProfileCreateStep::ApiKey => (3, 4, "API key", &st.api_key, "paste your key here"),
+        ProfileCreateStep::Model => (
+            4,
+            4,
+            "Default model",
+            &st.model,
+            "e.g. claude-opus-4-5, gpt-4o",
+        ),
+    };
+    let _ = current_value;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("  Step {step_num} of {step_total} — {step_label}"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    )));
+    lines.push(Line::raw(""));
+
+    let display_input = if matches!(step, ProfileCreateStep::ApiKey) && !st.input.is_empty() {
+        crate::setup::anonymize_key(&st.input)
+    } else {
+        st.input.clone()
+    };
+
+    let value_display = if display_input.is_empty() {
+        Span::styled(
+            format!("   {placeholder}"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )
+    } else {
+        Span::styled(
+            format!("   {display_input}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    lines.push(Line::from(vec![
+        value_display,
+        Span::styled("▌", Style::default().fg(Color::Yellow)),
+    ]));
+    lines.push(Line::raw(""));
+
+    // Summary of already-entered fields
+    if step_num > 1 {
+        lines.push(Line::from(Span::styled(
+            "  Already entered:",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+        if !st.name.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    name       {}", st.name),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if !st.provider.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    provider   {}", st.provider),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    if let Some(ref msg) = st.status {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(if msg.starts_with("  ✓") {
+                Color::Green
+            } else {
+                Color::Red
+            }),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
+
+    let hint = if matches!(step, ProfileCreateStep::ApiKey) {
+        "Type API key  ·  Enter=next  ·  Esc=cancel"
+    } else {
+        "Type value  ·  Enter=next  ·  Esc=cancel"
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        hint_area,
+    );
+
+    // Cursor inside the input line (line index 3 = blank + hint + blank + input)
+    let cursor_y = content_area.y + 4;
+    let shown_len = if matches!(step, ProfileCreateStep::ApiKey) {
+        crate::setup::anonymize_key(&st.input).chars().count()
+    } else {
+        st.input_cursor
+    };
+    let cursor_x = content_area.x + 3 + shown_len as u16;
+    if cursor_y < content_area.y + content_area.height {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 // ── Modal component helpers ───────────────────────────────────────────────────
@@ -4636,11 +5183,9 @@ Once built, the agent can search by concept rather than just filename.".into(),
             }
         }
         "/profile new" => {
-            app.push(ChatLine::Info(
-                "  launching profile creation wizard…".into(),
-            ));
-            app.wants_profile_create = true;
-            app.quit = true;
+            let config_path = clido_core::global_config_path()
+                .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+            app.profile_overlay = Some(ProfileOverlayState::for_create(config_path));
         }
         cmd if cmd == "/profile edit" || cmd.starts_with("/profile edit ") => {
             let arg = cmd.trim_start_matches("/profile edit").trim();
@@ -4649,13 +5194,25 @@ Once built, the agent can search by concept rather than just filename.".into(),
             } else {
                 arg.to_string()
             };
-            app.push(ChatLine::Info(format!(
-                "  launching editor for profile '{}'…",
-                name
-            )));
-            app.restart_resume_session = app.current_session_id.clone();
-            app.wants_profile_edit = Some(name);
-            app.quit = true;
+            let config_path = clido_core::global_config_path()
+                .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+            match clido_core::load_config(&app.workspace_root) {
+                Err(e) => {
+                    app.push(ChatLine::Info(format!("  ✗ Could not load config: {e}")));
+                }
+                Ok(loaded) => match loaded.profiles.get(&name).cloned() {
+                    None => {
+                        app.push(ChatLine::Info(format!(
+                            "  ✗ Profile '{}' not found. Use /profiles to list.",
+                            name
+                        )));
+                    }
+                    Some(entry) => {
+                        app.profile_overlay =
+                            Some(ProfileOverlayState::for_edit(name, &entry, config_path));
+                    }
+                },
+            }
         }
         cmd if cmd.starts_with("/profile ") => {
             let name = cmd.trim_start_matches("/profile ").trim();
@@ -4986,9 +5543,28 @@ Once built, the agent can search by concept rather than just filename.".into(),
             }
         }
         "/init" => {
-            app.push(ChatLine::Info("  launching setup wizard…".into()));
-            app.wants_reinit = true;
-            app.quit = true;
+            // Open the active profile in the in-TUI editor instead of exiting.
+            let config_path = clido_core::global_config_path()
+                .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+            match clido_core::load_config(&app.workspace_root) {
+                Err(e) => {
+                    app.push(ChatLine::Info(format!("  ✗ Could not load config: {e}")));
+                }
+                Ok(loaded) => {
+                    let name = app.current_profile.clone();
+                    match loaded.profiles.get(&name).cloned() {
+                        Some(entry) => {
+                            app.profile_overlay =
+                                Some(ProfileOverlayState::for_edit(name, &entry, config_path));
+                        }
+                        None => {
+                            // No matching profile — open a create flow for the default profile
+                            app.profile_overlay =
+                                Some(ProfileOverlayState::for_create(config_path));
+                        }
+                    }
+                }
+            }
         }
 
         // ── Prompt Enhancement ──────────────────────────────────────────────
@@ -6171,6 +6747,264 @@ fn handle_plan_editor_key(app: &mut App, event: crossterm::event::KeyEvent) {
     }
 }
 
+// ── Profile overlay keyboard handler ─────────────────────────────────────────
+
+fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) {
+    use KeyCode::*;
+    use KeyModifiers as Km;
+
+    let st = match app.profile_overlay.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+    st.status = None;
+
+    match &st.mode.clone() {
+        // ── Creating: step-by-step wizard ─────────────────────────────────
+        ProfileOverlayMode::Creating { step } => {
+            match event.code {
+                Esc => {
+                    app.profile_overlay = None;
+                    app.push(ChatLine::Info("  Profile creation cancelled.".into()));
+                }
+                Enter => {
+                    let value = st.input.trim().to_string();
+                    match step {
+                        ProfileCreateStep::Name => {
+                            if value.is_empty() {
+                                st.status = Some("  ✗ Profile name cannot be empty".into());
+                                return;
+                            }
+                            // Check for duplicate name
+                            let dup = clido_core::load_config(&app.workspace_root)
+                                .ok()
+                                .map(|c| c.profiles.contains_key(&value))
+                                .unwrap_or(false);
+                            if dup {
+                                st.status = Some(format!("  ✗ Profile '{}' already exists", value));
+                                return;
+                            }
+                            st.name = value;
+                            st.input.clear();
+                            st.input_cursor = 0;
+                            st.mode = ProfileOverlayMode::Creating {
+                                step: ProfileCreateStep::Provider,
+                            };
+                        }
+                        ProfileCreateStep::Provider => {
+                            if value.is_empty() {
+                                st.status = Some("  ✗ Provider cannot be empty".into());
+                                return;
+                            }
+                            st.provider = value;
+                            st.input.clear();
+                            st.input_cursor = 0;
+                            st.mode = ProfileOverlayMode::Creating {
+                                step: ProfileCreateStep::ApiKey,
+                            };
+                        }
+                        ProfileCreateStep::ApiKey => {
+                            // API key may be empty for local providers
+                            st.api_key = value;
+                            st.input.clear();
+                            st.input_cursor = 0;
+                            st.mode = ProfileOverlayMode::Creating {
+                                step: ProfileCreateStep::Model,
+                            };
+                        }
+                        ProfileCreateStep::Model => {
+                            if value.is_empty() {
+                                st.status = Some("  ✗ Model cannot be empty".into());
+                                return;
+                            }
+                            st.model = value;
+                            st.input.clear();
+                            st.input_cursor = 0;
+                            // Save and switch to overview
+                            st.mode = ProfileOverlayMode::Overview;
+                            let st = app.profile_overlay.as_mut().unwrap();
+                            st.save();
+                            let name = st.name.clone();
+                            let msg = st.status.clone().unwrap_or_default();
+                            app.push(ChatLine::Info(msg));
+                            // Switch to the new profile
+                            app.push(ChatLine::Info(format!(
+                                "  Use /profile {} to switch to it.",
+                                name
+                            )));
+                            app.profile_overlay = None;
+                        }
+                    }
+                }
+                Backspace => {
+                    if !st.input.is_empty() {
+                        if event.modifiers.contains(Km::CONTROL) {
+                            // Ctrl+Backspace: delete word
+                            while st.input_cursor > 0 {
+                                let b = char_byte_pos_tui(&st.input, st.input_cursor - 1);
+                                let ch = st.input[..b].chars().last();
+                                if ch.map(|c| c == ' ').unwrap_or(false) && st.input_cursor > 1 {
+                                    break;
+                                }
+                                st.input_cursor -= 1;
+                                let pos = char_byte_pos_tui(&st.input, st.input_cursor);
+                                st.input.remove(pos);
+                            }
+                        } else {
+                            delete_char_before_cursor_pe(st);
+                        }
+                    }
+                }
+                Delete => {
+                    delete_char_at_cursor_pe(st);
+                }
+                Left => {
+                    if st.input_cursor > 0 {
+                        st.input_cursor -= 1;
+                    }
+                }
+                Right => {
+                    if st.input_cursor < st.input.chars().count() {
+                        st.input_cursor += 1;
+                    }
+                }
+                Home | KeyCode::Up => {
+                    st.input_cursor = 0;
+                }
+                End | KeyCode::Down => {
+                    st.input_cursor = st.input.chars().count();
+                }
+                Char(c) => {
+                    let b = char_byte_pos_tui(&st.input, st.input_cursor);
+                    st.input.insert(b, c);
+                    st.input_cursor += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // ── Overview: navigate fields ──────────────────────────────────────
+        ProfileOverlayMode::Overview => {
+            match event.code {
+                Esc => {
+                    app.profile_overlay = None;
+                }
+                Up => {
+                    if st.cursor > 0 {
+                        st.cursor -= 1;
+                    }
+                }
+                Down => {
+                    if st.cursor + 1 < PROFILE_FIELDS.len() {
+                        st.cursor += 1;
+                    }
+                }
+                Enter => {
+                    st.begin_edit();
+                }
+                KeyCode::Char('s') if event.modifiers.contains(Km::CONTROL) => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    st.save();
+                    // Update live app state if it's the active profile
+                    let name = st.name.clone();
+                    let provider = st.provider.clone();
+                    let model = st.model.clone();
+                    if app.current_profile == name {
+                        app.provider = provider;
+                        app.model = model;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── EditField: typing into a single field ──────────────────────────
+        ProfileOverlayMode::EditField(_) => {
+            match event.code {
+                Esc => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    st.cancel_edit();
+                }
+                Enter => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    st.commit_edit();
+                    // Auto-save on field commit
+                    st.save();
+                    let name = st.name.clone();
+                    let provider = st.provider.clone();
+                    let model = st.model.clone();
+                    if app.current_profile == name {
+                        app.provider = provider;
+                        app.model = model;
+                    }
+                }
+                Backspace => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    delete_char_before_cursor_pe(st);
+                }
+                Delete => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    delete_char_at_cursor_pe(st);
+                }
+                Left => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    if st.input_cursor > 0 {
+                        st.input_cursor -= 1;
+                    }
+                }
+                Right => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    if st.input_cursor < st.input.chars().count() {
+                        st.input_cursor += 1;
+                    }
+                }
+                Home => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    st.input_cursor = 0;
+                }
+                End => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    st.input_cursor = st.input.chars().count();
+                }
+                Char(c) => {
+                    let st = app.profile_overlay.as_mut().unwrap();
+                    let b = char_byte_pos_tui(&st.input, st.input_cursor);
+                    st.input.insert(b, c);
+                    st.input_cursor += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Delete the character before the cursor in `ProfileOverlayState.input`.
+fn delete_char_before_cursor_pe(st: &mut ProfileOverlayState) {
+    if st.input_cursor == 0 || st.input.is_empty() {
+        return;
+    }
+    st.input_cursor -= 1;
+    let b = char_byte_pos_tui(&st.input, st.input_cursor);
+    st.input.remove(b);
+}
+
+/// Delete the character at the cursor in `ProfileOverlayState.input`.
+fn delete_char_at_cursor_pe(st: &mut ProfileOverlayState) {
+    if st.input_cursor >= st.input.chars().count() {
+        return;
+    }
+    let b = char_byte_pos_tui(&st.input, st.input_cursor);
+    st.input.remove(b);
+}
+
+/// char_byte_pos for ProfileOverlayState (same logic as the TUI char_byte_pos helper).
+fn char_byte_pos_tui(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
+}
+
 // ── Input handling ────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
@@ -6404,6 +7238,12 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                 }
             }
         }
+        return;
+    }
+
+    // ── Profile overlay (overview / field editor / create wizard) ────────────
+    if app.profile_overlay.is_some() {
+        handle_profile_overlay_key(app, event);
         return;
     }
 
@@ -6652,22 +7492,20 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
             }
             KeyCode::Char('n') => {
                 app.profile_picker = None;
-                app.push(ChatLine::Info(
-                    "  launching profile creation wizard…".into(),
-                ));
-                app.wants_profile_create = true;
-                app.quit = true;
+                let config_path = clido_core::global_config_path()
+                    .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+                app.profile_overlay = Some(ProfileOverlayState::for_create(config_path));
             }
             KeyCode::Char('e') => {
                 if let Some(picker) = app.profile_picker.take() {
-                    if let Some((name, _)) = picker.profiles.get(picker.selected) {
-                        app.push(ChatLine::Info(format!(
-                            "  launching editor for profile '{}'…",
-                            name
-                        )));
-                        app.restart_resume_session = app.current_session_id.clone();
-                        app.wants_profile_edit = Some(name.clone());
-                        app.quit = true;
+                    if let Some((name, entry)) = picker.profiles.get(picker.selected) {
+                        let config_path = clido_core::global_config_path()
+                            .unwrap_or_else(|| app.workspace_root.join(".clido/config.toml"));
+                        app.profile_overlay = Some(ProfileOverlayState::for_edit(
+                            name.clone(),
+                            entry,
+                            config_path,
+                        ));
                     }
                 }
             }
@@ -9099,5 +9937,168 @@ mod tests {
             n_len <= w_len,
             "narrow hr ({n_len}) should be ≤ wide ({w_len})"
         );
+    }
+
+    // ── Profile overlay unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn profile_overlay_for_edit_initializes_correctly() {
+        let entry = clido_core::ProfileEntry {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-5".into(),
+            api_key: Some("sk-test-1234".into()),
+            api_key_env: None,
+            base_url: Some("https://custom.api.example.com".into()),
+            worker: None,
+            reviewer: None,
+        };
+        let ov = ProfileOverlayState::for_edit(
+            "myprofile".into(),
+            &entry,
+            std::path::PathBuf::from("/tmp/test-config.toml"),
+        );
+        assert_eq!(ov.name, "myprofile");
+        assert_eq!(ov.provider, "anthropic");
+        assert_eq!(ov.model, "claude-opus-4-5");
+        assert_eq!(ov.api_key, "sk-test-1234");
+        assert_eq!(ov.base_url, "https://custom.api.example.com");
+        assert!(!ov.is_new);
+        assert_eq!(ov.mode, ProfileOverlayMode::Overview);
+        assert_eq!(ov.cursor, 0);
+    }
+
+    #[test]
+    fn profile_overlay_for_create_starts_in_create_mode() {
+        let ov = ProfileOverlayState::for_create(std::path::PathBuf::from("/tmp/test.toml"));
+        assert!(ov.is_new);
+        assert_eq!(
+            ov.mode,
+            ProfileOverlayMode::Creating {
+                step: ProfileCreateStep::Name
+            }
+        );
+        assert!(ov.name.is_empty());
+    }
+
+    #[test]
+    fn profile_overlay_begin_and_cancel_edit() {
+        let entry = clido_core::ProfileEntry {
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            api_key: None,
+            api_key_env: None,
+            base_url: None,
+            worker: None,
+            reviewer: None,
+        };
+        let mut ov = ProfileOverlayState::for_edit(
+            "p".into(),
+            &entry,
+            std::path::PathBuf::from("/tmp/t.toml"),
+        );
+        // Navigate to model field (cursor=2)
+        ov.cursor = 2;
+        ov.begin_edit();
+        assert_eq!(
+            ov.mode,
+            ProfileOverlayMode::EditField(ProfileEditField::Model)
+        );
+        assert_eq!(ov.input, "gpt-4o");
+        assert_eq!(ov.input_cursor, 6); // char count of "gpt-4o"
+
+        // Cancel should restore overview
+        ov.cancel_edit();
+        assert_eq!(ov.mode, ProfileOverlayMode::Overview);
+        assert!(ov.input.is_empty());
+        assert_eq!(ov.input_cursor, 0);
+        // Original value unchanged
+        assert_eq!(ov.model, "gpt-4o");
+    }
+
+    #[test]
+    fn profile_overlay_commit_edit_updates_field() {
+        let entry = clido_core::ProfileEntry {
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            api_key: None,
+            api_key_env: None,
+            base_url: None,
+            worker: None,
+            reviewer: None,
+        };
+        let mut ov = ProfileOverlayState::for_edit(
+            "p".into(),
+            &entry,
+            std::path::PathBuf::from("/tmp/t.toml"),
+        );
+        ov.cursor = 2; // Model field
+        ov.begin_edit();
+        ov.input = "claude-haiku-4-5".into();
+        ov.commit_edit();
+        assert_eq!(ov.model, "claude-haiku-4-5");
+        assert_eq!(ov.mode, ProfileOverlayMode::Overview);
+    }
+
+    #[test]
+    fn profile_overlay_cursor_field_mapping() {
+        let entry = clido_core::ProfileEntry {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-5".into(),
+            api_key: None,
+            api_key_env: None,
+            base_url: None,
+            worker: None,
+            reviewer: None,
+        };
+        let mut ov = ProfileOverlayState::for_edit(
+            "p".into(),
+            &entry,
+            std::path::PathBuf::from("/tmp/t.toml"),
+        );
+        ov.cursor = 0;
+        assert_eq!(ov.cursor_field(), ProfileEditField::Provider);
+        ov.cursor = 1;
+        assert_eq!(ov.cursor_field(), ProfileEditField::ApiKey);
+        ov.cursor = 2;
+        assert_eq!(ov.cursor_field(), ProfileEditField::Model);
+        ov.cursor = 3;
+        assert_eq!(ov.cursor_field(), ProfileEditField::BaseUrl);
+    }
+
+    #[test]
+    fn profile_overlay_masked_api_key() {
+        let entry = clido_core::ProfileEntry {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-5".into(),
+            api_key: Some("sk-ant-api03-verylongkeyvalue".into()),
+            api_key_env: None,
+            base_url: None,
+            worker: None,
+            reviewer: None,
+        };
+        let ov = ProfileOverlayState::for_edit(
+            "p".into(),
+            &entry,
+            std::path::PathBuf::from("/tmp/t.toml"),
+        );
+        let masked = ov.masked_api_key();
+        // Should not reveal full key
+        assert!(!masked.contains("verylongkeyvalue"));
+        // Should not be empty
+        assert!(!masked.is_empty());
+    }
+
+    #[test]
+    fn char_byte_pos_tui_works_for_ascii_and_unicode() {
+        let s = "hello";
+        assert_eq!(char_byte_pos_tui(s, 0), 0);
+        assert_eq!(char_byte_pos_tui(s, 3), 3);
+        assert_eq!(char_byte_pos_tui(s, 5), 5); // end
+
+        // Unicode: each emoji is >1 byte
+        let u = "hé";
+        assert_eq!(char_byte_pos_tui(u, 0), 0);
+        assert_eq!(char_byte_pos_tui(u, 1), 1); // 'h' is 1 byte
+        assert_eq!(char_byte_pos_tui(u, 2), 3); // 'é' is 2 bytes
     }
 }
