@@ -36,6 +36,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::agent_setup::AgentSetup;
 use crate::cli::Cli;
 use crate::image_input::ImageAttachment;
+use crate::prompt_enhance::{
+    load_prompt_mode, load_rules, project_rules_path, project_settings_path, save_prompt_mode,
+    save_rules, EnhancementCtx, PromptMode, PromptRules, RuleEntry,
+};
 use clido_index::RepoIndex;
 use clido_memory::MemoryStore;
 use clido_planner::{Complexity, Plan, PlanEditor, TaskStatus};
@@ -82,6 +86,18 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             (
                 "/settings",
                 "open settings editor — manage roles and default model",
+            ),
+            (
+                "/prompt-mode",
+                "show or set prompt enhancement mode. Usage: /prompt-mode [auto|off|status]",
+            ),
+            (
+                "/prompt-preview",
+                "preview the enhanced version of your next message before sending",
+            ),
+            (
+                "/prompt-rules",
+                "manage prompt enhancement rules. Usage: /prompt-rules [list|add <text>|remove <id>|reset]",
             ),
         ],
     ),
@@ -914,6 +930,12 @@ struct App {
     todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
     /// Track whether we have already shown the empty-input hint this session.
     empty_input_hint_shown: bool,
+    /// Current prompt enhancement mode (auto / off).
+    prompt_mode: PromptMode,
+    /// Active prompt rules (global + project, merged).
+    prompt_rules: PromptRules,
+    /// When Some, holds an enhanced preview that /prompt-preview is waiting to display.
+    prompt_preview_text: Option<String>,
 }
 
 impl App {
@@ -1014,7 +1036,12 @@ impl App {
             plan_dry_run,
             todo_store,
             empty_input_hint_shown: false,
+            prompt_mode: PromptMode::Auto,
+            prompt_rules: PromptRules::default(),
+            prompt_preview_text: None,
         };
+        app.prompt_mode = load_prompt_mode(&app.workspace_root);
+        app.prompt_rules = load_rules(&app.workspace_root);
         app.messages.push(ChatLine::WelcomeSplash);
         app
     }
@@ -1101,9 +1128,40 @@ impl App {
         }
         if is_known_slash_cmd(&trimmed) {
             execute_slash(self, &trimmed);
-        } else {
-            self.send_now(trimmed);
+        } else if let Some(send_text) = self.maybe_enhance_prompt(trimmed) {
+            self.send_now(send_text);
         }
+    }
+
+    /// Apply prompt enhancement if mode is Auto.  Shows a dim indicator when the
+    /// prompt is modified.  When preview mode is active (`prompt_preview_text` is Some),
+    /// displays the enhanced prompt without sending and returns None.
+    fn maybe_enhance_prompt(&mut self, raw: String) -> Option<String> {
+        let ctx = EnhancementCtx {
+            mode: self.prompt_mode,
+            rules: &self.prompt_rules,
+        };
+        let (enhanced, was_modified) = crate::prompt_enhance::enhance_prompt(&raw, &ctx);
+
+        // Preview mode: show the enhanced text, don't send.
+        if self.prompt_preview_text.is_some() {
+            self.prompt_preview_text = None;
+            self.push(ChatLine::Info("".into()));
+            self.push(ChatLine::Section("Enhanced Prompt Preview".into()));
+            for line in enhanced.lines() {
+                self.push(ChatLine::Info(format!("  {line}")));
+            }
+            self.push(ChatLine::Info("".into()));
+            self.push(ChatLine::Info(
+                "  — preview only, not sent.  Type message again to send.".into(),
+            ));
+            return None;
+        }
+
+        if was_modified {
+            self.push(ChatLine::Info("  ✦ Prompt enhanced".into()));
+        }
+        Some(enhanced)
     }
 
     /// After the agent is idle, drain the FIFO queue: slash commands run in order until one
@@ -1270,6 +1328,21 @@ impl App {
             }
         }
         self.last_executed_step_num = None;
+        // Rule evolution: observe the completed user turn for learnable patterns.
+        if let Some(user_text) = self.last_user_text().map(|s| s.to_string()) {
+            let promoted = self.prompt_rules.observe_turn(&user_text);
+            if !promoted.is_empty() {
+                // Persist the updated rules to the project rules file (silently).
+                let rules_path = project_rules_path(&self.workspace_root);
+                let _ = save_rules(&rules_path, &self.prompt_rules);
+                for phrase in &promoted {
+                    self.push(ChatLine::Info(format!(
+                        "  ✦ Learned rule: \"{}\"  (use /prompt-rules to view)",
+                        phrase
+                    )));
+                }
+            }
+        }
         if self.awaiting_plan_response {
             self.awaiting_plan_response = false;
             if let Some(text) = self.last_assistant_text().map(|s| s.to_string()) {
@@ -1300,6 +1373,13 @@ impl App {
     fn last_assistant_text(&self) -> Option<&str> {
         self.messages.iter().rev().find_map(|line| match line {
             ChatLine::Assistant(text) if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    fn last_user_text(&self) -> Option<&str> {
+        self.messages.iter().rev().find_map(|line| match line {
+            ChatLine::User(text) if !text.trim().is_empty() => Some(text.as_str()),
             _ => None,
         })
     }
@@ -4910,6 +4990,163 @@ Once built, the agent can search by concept rather than just filename.".into(),
             app.wants_reinit = true;
             app.quit = true;
         }
+
+        // ── Prompt Enhancement ──────────────────────────────────────────────
+        _ if cmd == "/prompt-mode" || cmd.starts_with("/prompt-mode ") => {
+            let arg = cmd.trim_start_matches("/prompt-mode").trim();
+            match arg {
+                "auto" => {
+                    app.prompt_mode = PromptMode::Auto;
+                    let path = project_settings_path(&app.workspace_root);
+                    if let Err(e) = save_prompt_mode(&path, PromptMode::Auto) {
+                        app.push(ChatLine::Info(format!("  ⚠ Could not save: {e}")));
+                    }
+                    app.push(ChatLine::Info(
+                        "  ✓ Prompt enhancement: auto — prompts will be enhanced automatically"
+                            .into(),
+                    ));
+                }
+                "off" => {
+                    app.prompt_mode = PromptMode::Off;
+                    let path = project_settings_path(&app.workspace_root);
+                    if let Err(e) = save_prompt_mode(&path, PromptMode::Off) {
+                        app.push(ChatLine::Info(format!("  ⚠ Could not save: {e}")));
+                    }
+                    app.push(ChatLine::Info(
+                        "  ✓ Prompt enhancement: off — raw input sent unchanged".into(),
+                    ));
+                }
+                "" | "status" => {
+                    let n_active = app.prompt_rules.active_rules().len();
+                    let n_total = app.prompt_rules.rules.len();
+                    app.push(ChatLine::Info("".into()));
+                    app.push(ChatLine::Section("Prompt Enhancement".into()));
+                    app.push(ChatLine::Info(format!(
+                        "  mode     {}",
+                        app.prompt_mode.as_str()
+                    )));
+                    app.push(ChatLine::Info(format!(
+                        "  rules    {n_active} active / {n_total} total"
+                    )));
+                    app.push(ChatLine::Info("".into()));
+                    app.push(ChatLine::Info(
+                        "  /prompt-mode auto      enable automatic enhancement".into(),
+                    ));
+                    app.push(ChatLine::Info(
+                        "  /prompt-mode off       send raw input unchanged".into(),
+                    ));
+                    app.push(ChatLine::Info(
+                        "  /prompt-rules          view and manage rules".into(),
+                    ));
+                    app.push(ChatLine::Info(
+                        "  /prompt-preview        preview enhanced prompt before sending".into(),
+                    ));
+                    app.push(ChatLine::Info("".into()));
+                }
+                _ => {
+                    app.push(ChatLine::Info(
+                        "  Usage: /prompt-mode [auto|off|status]".into(),
+                    ));
+                }
+            }
+        }
+
+        "/prompt-preview" => {
+            app.prompt_preview_text = Some(String::new());
+            app.push(ChatLine::Info(
+                "  ✦ Preview mode — next message will be shown enhanced but not sent. Press Enter to send or Esc to cancel.".into(),
+            ));
+        }
+
+        _ if cmd == "/prompt-rules" || cmd.starts_with("/prompt-rules ") => {
+            let arg = cmd.trim_start_matches("/prompt-rules").trim();
+            if arg.is_empty() || arg == "list" {
+                // Collect before any mutable borrows.
+                let (active_lines, total): (Vec<String>, usize) = {
+                    let active = app.prompt_rules.active_rules();
+                    let total = app.prompt_rules.rules.len();
+                    let lines: Vec<String> = active
+                        .iter()
+                        .map(|r| {
+                            let badge = if r.source == "inferred" {
+                                "inferred"
+                            } else {
+                                "manual"
+                            };
+                            format!("  [{}]  {}  ({})", r.id, r.text, badge)
+                        })
+                        .collect();
+                    (lines, total)
+                };
+                app.push(ChatLine::Info("".into()));
+                app.push(ChatLine::Section("Prompt Rules".into()));
+                if active_lines.is_empty() {
+                    app.push(ChatLine::Info(
+                        "  No active rules.  Use /prompt-rules add <text> to add one.".into(),
+                    ));
+                    if total > 0 {
+                        app.push(ChatLine::Info(format!(
+                            "  ({total} rules below confidence threshold — not yet applied)"
+                        )));
+                    }
+                } else {
+                    for line in active_lines {
+                        app.push(ChatLine::Info(line));
+                    }
+                }
+                app.push(ChatLine::Info("".into()));
+                app.push(ChatLine::Info(
+                    "  /prompt-rules add <text>     add a new rule".into(),
+                ));
+                app.push(ChatLine::Info(
+                    "  /prompt-rules remove <id>    remove a rule by id".into(),
+                ));
+                app.push(ChatLine::Info(
+                    "  /prompt-rules reset          clear all rules".into(),
+                ));
+                app.push(ChatLine::Info("".into()));
+            } else if let Some(text) = arg.strip_prefix("add ") {
+                let text = text.trim();
+                if text.is_empty() {
+                    app.push(ChatLine::Info(
+                        "  Usage: /prompt-rules add <rule text>".into(),
+                    ));
+                } else {
+                    let id = text
+                        .to_lowercase()
+                        .split_whitespace()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .join("-");
+                    let rule = RuleEntry::new_manual(id, text);
+                    app.prompt_rules.upsert(rule);
+                    let path = project_rules_path(&app.workspace_root);
+                    if let Err(e) = save_rules(&path, &app.prompt_rules) {
+                        app.push(ChatLine::Info(format!("  ⚠ Could not save rules: {e}")));
+                    }
+                    app.push(ChatLine::Info(format!("  ✓ Rule added: \"{text}\"")));
+                }
+            } else if let Some(id) = arg.strip_prefix("remove ") {
+                let id = id.trim();
+                if app.prompt_rules.remove(id) {
+                    let path = project_rules_path(&app.workspace_root);
+                    let _ = save_rules(&path, &app.prompt_rules);
+                    app.push(ChatLine::Info(format!("  ✓ Rule removed: {id}")));
+                } else {
+                    app.push(ChatLine::Info(format!("  ✗ No rule with id: {id}")));
+                }
+            } else if arg == "reset" {
+                app.prompt_rules = PromptRules::default();
+                let path = project_rules_path(&app.workspace_root);
+                let _ = save_rules(&path, &app.prompt_rules);
+                app.push(ChatLine::Info("  ✓ All rules cleared".into()));
+            } else {
+                app.push(ChatLine::Info(
+                    "  Usage: /prompt-rules [list|add <text>|remove <id>|reset]".into(),
+                ));
+            }
+        }
+
         _ => {}
     }
 }

@@ -40,6 +40,7 @@ clido-tools = { path = "../clido-tools" }
 clido-workflows = { path = "../clido-workflows" }
 clido-checkpoint = { path = "../clido-checkpoint" }
 clap = { workspace = true, features = ["derive", "env"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

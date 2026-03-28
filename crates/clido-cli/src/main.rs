@@ -17,6 +17,7 @@ mod notify;
 mod plan_cmd;
 mod pricing_cmd;
 mod profiles;
+pub(crate) mod prompt_enhance;
 mod provider;
 mod repl;
 mod run;
