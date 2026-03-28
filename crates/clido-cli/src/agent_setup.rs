@@ -6,7 +6,7 @@ use clido_core::{
     agent_config_from_loaded, load_config, load_pricing, AgentConfig, LoadedConfig, PermissionMode,
     PricingTable,
 };
-use clido_tools::{default_registry_with_options, McpTool, ToolRegistry};
+use clido_tools::{default_registry_with_todo_store, McpTool, TodoItem, ToolRegistry};
 use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -18,12 +18,17 @@ use crate::git_context::GitContext;
 use crate::provider::{make_provider, StdinAskUser};
 use crate::spawn_tools::{SpawnReviewerTool, SpawnWorkerTool};
 
+type TodoStore = std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>;
+
 pub struct AgentSetup {
     pub provider: Arc<dyn clido_providers::ModelProvider>,
     pub registry: ToolRegistry,
     pub config: AgentConfig,
     pub ask_user: Option<Arc<dyn AskUser>>,
     pub pricing_table: PricingTable,
+    /// Shared todo list written by the agent's TodoWrite tool.
+    #[allow(dead_code)]
+    pub todo_store: TodoStore,
 }
 
 impl AgentSetup {
@@ -39,6 +44,24 @@ impl AgentSetup {
         loaded: LoadedConfig,
         pricing_table: PricingTable,
         reviewer_enabled: Arc<AtomicBool>,
+    ) -> Result<Self, anyhow::Error> {
+        Self::build_with_preloaded_and_store(
+            cli,
+            workspace_root,
+            loaded,
+            pricing_table,
+            reviewer_enabled,
+            None,
+        )
+    }
+
+    pub fn build_with_preloaded_and_store(
+        cli: &Cli,
+        workspace_root: &Path,
+        loaded: LoadedConfig,
+        pricing_table: PricingTable,
+        reviewer_enabled: Arc<AtomicBool>,
+        external_todo_store: Option<TodoStore>,
     ) -> Result<Self, anyhow::Error> {
         let profile_name = cli
             .profile
@@ -58,7 +81,8 @@ impl AgentSetup {
         )
         .map_err(CliError::Usage)?;
 
-        let mut registry = build_registry(cli, &loaded, workspace_root)?;
+        let (mut registry, todo_store) =
+            build_registry(cli, &loaded, workspace_root, external_todo_store)?;
         registry = load_mcp_tools(cli, registry);
 
         let permission_mode = parse_permission_mode(cli.permission_mode.as_deref());
@@ -205,6 +229,7 @@ impl AgentSetup {
             config,
             ask_user,
             pricing_table,
+            todo_store,
         })
     }
 
@@ -360,6 +385,14 @@ pub(crate) fn load_mcp_tools_from_path(
                         let client_arc = Arc::new(client);
                         for tool_def in tools {
                             let tool_name = tool_def.name.clone();
+                            // Guard: MCP tool names must not collide with built-in tools.
+                            if registry.get(&tool_name).is_some() {
+                                eprintln!(
+                                    "MCP tool '{}' from '{}' conflicts with a built-in tool — skipping.",
+                                    tool_name, server_name
+                                );
+                                continue;
+                            }
                             let mcp_tool = McpTool::new(tool_def, client_arc.clone());
                             registry.register(mcp_tool);
                             if !quiet {
@@ -382,7 +415,8 @@ fn build_registry(
     cli: &Cli,
     loaded: &clido_core::LoadedConfig,
     workspace_root: &Path,
-) -> Result<ToolRegistry, anyhow::Error> {
+    external_todo_store: Option<TodoStore>,
+) -> Result<(ToolRegistry, TodoStore), anyhow::Error> {
     let allowed = cli
         .allowed_tools
         .clone()
@@ -409,8 +443,15 @@ fn build_registry(
     // Block the config file from all tool access so its contents never leave the local system.
     let blocked = global_config_path().into_iter().collect::<Vec<_>>();
     let sandbox = cli.sandbox;
-    let registry = default_registry_with_options(workspace_root.to_path_buf(), blocked, sandbox)
-        .with_filters(allowed, disallowed);
+    let (mut registry, mut todo_store) =
+        default_registry_with_todo_store(workspace_root.to_path_buf(), blocked, sandbox);
+    // If an external store was provided, replace so the TUI and agent share the same Arc.
+    if let Some(ext) = external_todo_store {
+        // Re-register TodoWriteTool with the external store.
+        registry.register(clido_tools::TodoWriteTool::with_store(ext.clone()));
+        todo_store = ext;
+    }
+    let registry = registry.with_filters(allowed, disallowed);
     if registry.schemas().is_empty() {
         return Err(CliError::Usage(
             "No tools left after --allowed-tools/--disallowed-tools/--tools. Check your filters."
@@ -418,7 +459,7 @@ fn build_registry(
         )
         .into());
     }
-    Ok(registry)
+    Ok((registry, todo_store))
 }
 
 pub fn parse_permission_mode(s: Option<&str>) -> PermissionMode {

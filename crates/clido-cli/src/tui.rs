@@ -124,6 +124,10 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "/memory",
                 "search saved memories (FTS). Usage: /memory <query>",
             ),
+            (
+                "/todo",
+                "show the agent's current todo list (from TodoWrite tool)",
+            ),
         ],
     ),
     (
@@ -765,6 +769,8 @@ struct App {
     /// Max scroll as computed during the last render — used by handle_key to scroll up correctly.
     max_scroll: u32,
     following: bool,
+    /// If set after a terminal resize, restore scroll to this ratio of max_scroll on next render.
+    pending_scroll_ratio: Option<f64>,
     busy: bool,
     spinner_tick: usize,
     pending_perm: Option<PendingPerm>,
@@ -886,6 +892,8 @@ struct App {
     /// The step number most recently seen while the agent was executing a plan.
     /// Used after agent finishes to show which steps remain.
     last_executed_step_num: Option<usize>,
+    /// Shared todo list written by the agent via the TodoWrite tool.
+    todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
 }
 
 impl App {
@@ -909,6 +917,7 @@ impl App {
         current_profile: String,
         reviewer_enabled: Arc<AtomicBool>,
         reviewer_configured: bool,
+        todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
     ) -> Self {
         let mut app = Self {
             messages: Vec::new(),
@@ -918,6 +927,7 @@ impl App {
             scroll: 0,
             max_scroll: 0,
             following: true,
+            pending_scroll_ratio: None,
             busy: false,
             spinner_tick: 0,
             pending_perm: None,
@@ -981,6 +991,7 @@ impl App {
             current_step: None,
             last_executed_step_num: None,
             plan_dry_run,
+            todo_store,
         };
         app.messages.push(ChatLine::WelcomeSplash);
         app
@@ -1400,6 +1411,10 @@ fn render(frame: &mut Frame, app: &mut App) {
         let max_scroll = total_height.saturating_sub(chat_area.height as u32);
         // Store for use in handle_key (Up/PageUp need the current max_scroll).
         app.max_scroll = max_scroll;
+        // If a resize just occurred, restore scroll to the saved ratio.
+        if let Some(ratio) = app.pending_scroll_ratio.take() {
+            app.scroll = ((ratio * max_scroll as f64).round() as u32).min(max_scroll);
+        }
         let scroll = if app.following {
             max_scroll
         } else {
@@ -1559,7 +1574,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     Style::default().fg(Color::LightMagenta),
                 ),
                 Span::styled(
-                    "thinking…  (type to queue, Ctrl+Enter to interrupt)".to_string(),
+                    "thinking…  (type a follow-up to queue, Ctrl+Enter to interrupt)".to_string(),
                     Style::default().fg(Color::LightMagenta),
                 ),
             ])
@@ -2148,14 +2163,20 @@ fn render(frame: &mut Frame, app: &mut App) {
         let preview = truncate_chars(&perm.preview, inner_w);
 
         const OPTIONS: &[(&str, &str)] = &[
-            ("Allow once", "this invocation only"),
-            ("Allow for session", "all calls to this tool until you quit"),
+            ("Allow once", "(1) this invocation only"),
+            (
+                "Allow for session",
+                "(2) all calls to this tool until you quit",
+            ),
             (
                 "Allow all tools",
-                "skip permission checks for the rest of this session",
+                "(3) skip all permission checks this session",
             ),
-            ("Deny", "block this call"),
-            ("Deny with feedback", "block and explain why to the agent"),
+            ("Deny", "(4) block this call, agent continues"),
+            (
+                "Deny with feedback",
+                "(5) block and explain why to the agent",
+            ),
         ];
 
         let mut content = vec![
@@ -2200,7 +2221,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         content.push(Line::from(vec![Span::styled(
-            "  ↑↓ navigate   Enter select   Esc deny",
+            "  ↑↓/1-5 select   Enter confirm   Esc deny",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -3731,6 +3752,38 @@ fn execute_slash(app: &mut App, cmd: &str) {
             } else {
                 app.push(ChatLine::Info("  compacting context window…".into()));
                 let _ = app.compact_now_tx.send(());
+            }
+        }
+        "/todo" => {
+            let todos = app.todo_store.lock().map(|g| g.clone()).unwrap_or_default();
+            if todos.is_empty() {
+                app.push(ChatLine::Info(
+                    "  todo: no items — agent hasn't written a todo list yet (TodoWrite tool)"
+                        .into(),
+                ));
+            } else {
+                app.push(ChatLine::Info(format!(
+                    "  todo list ({} item{}):",
+                    todos.len(),
+                    if todos.len() == 1 { "" } else { "s" }
+                )));
+                for item in &todos {
+                    let icon = match item.status {
+                        clido_tools::TodoStatus::Done => "✓",
+                        clido_tools::TodoStatus::InProgress => "▶",
+                        clido_tools::TodoStatus::Blocked => "✗",
+                        clido_tools::TodoStatus::Pending => "○",
+                    };
+                    let pri = match item.priority {
+                        clido_tools::TodoPriority::High => "!",
+                        clido_tools::TodoPriority::Medium => " ",
+                        clido_tools::TodoPriority::Low => "·",
+                    };
+                    app.push(ChatLine::Info(format!(
+                        "  {} [{}] {}  {}",
+                        icon, pri, item.id, item.content
+                    )));
+                }
             }
         }
         "/undo" => {
@@ -5734,6 +5787,12 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     app.perm_selected = 0;
                 }
             }
+            // Number shortcuts: 1-5 for quick selection.
+            Char('1') => app.perm_selected = 0,
+            Char('2') => app.perm_selected = 1,
+            Char('3') => app.perm_selected = 2,
+            Char('4') => app.perm_selected = 3,
+            Char('5') => app.perm_selected = 4,
             _ => {} // all other keys ignored while popup is active
         }
         return;
@@ -6048,14 +6107,16 @@ async fn agent_task(
     cancel: std::sync::Arc<AtomicBool>,
     image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     reviewer_enabled: Arc<AtomicBool>,
+    todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
 ) {
     let setup_result = match preloaded_config {
-        Some(loaded) => AgentSetup::build_with_preloaded(
+        Some(loaded) => AgentSetup::build_with_preloaded_and_store(
             &cli,
             &workspace_root,
             loaded,
             preloaded_pricing,
             reviewer_enabled,
+            Some(todo_store),
         ),
         None => AgentSetup::build(&cli, &workspace_root),
     };
@@ -6627,6 +6688,8 @@ struct AgentRuntimeHandles {
     compact_now_tx: mpsc::UnboundedSender<()>,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     perm_rx: mpsc::UnboundedReceiver<PermRequest>,
+    /// Shared todo list written by the agent's TodoWrite tool — readable by the TUI.
+    todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
 }
 
 fn start_agent_runtime(
@@ -6646,6 +6709,10 @@ fn start_agent_runtime(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (perm_tx, perm_rx) = mpsc::unbounded_channel::<PermRequest>();
 
+    // Pre-create the shared todo store so both the agent task and the TUI app can share it.
+    let todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
     tokio::spawn(agent_task(
         cli,
         workspace_root,
@@ -6661,6 +6728,7 @@ fn start_agent_runtime(
         cancel,
         image_state,
         reviewer_enabled,
+        todo_store.clone(),
     ));
 
     AgentRuntimeHandles {
@@ -6671,6 +6739,7 @@ fn start_agent_runtime(
         compact_now_tx,
         event_rx,
         perm_rx,
+        todo_store,
     }
 }
 
@@ -6814,6 +6883,7 @@ async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
         current_profile,
         reviewer_enabled,
         reviewer_configured,
+        runtime.todo_store.clone(),
     );
     let mut recovery_attempts: u8 = 0;
     let result = loop {
@@ -7021,7 +7091,16 @@ async fn event_loop(
                     }
                     Some(Ok(Event::Resize(_, _))) => {
                         // Force a clean redraw after terminal resize to avoid stale cells.
+                        // Preserve scroll ratio so user doesn't lose their place.
+                        let ratio = if app.max_scroll > 0 && !app.following {
+                            Some(app.scroll as f64 / app.max_scroll as f64)
+                        } else {
+                            None
+                        };
                         let _ = terminal.clear();
+                        // Restore approximate scroll position after redraw recalculates max_scroll.
+                        // The actual clamping is done in render_frame when max_scroll is recomputed.
+                        app.pending_scroll_ratio = ratio;
                     }
                     None => break,
                     _ => {}
@@ -7292,6 +7371,7 @@ mod tests {
             "default".to_string(),
             Arc::new(AtomicBool::new(false)),
             false,
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         )
     }
 

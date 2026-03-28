@@ -11,6 +11,7 @@ mod glob_tool;
 mod grep_tool;
 mod ls_tool;
 pub mod mcp;
+mod multi_edit;
 mod path_guard;
 mod read;
 mod registry;
@@ -18,6 +19,8 @@ pub mod secrets;
 mod semantic_search;
 mod test_loop;
 pub mod test_runner;
+mod todo_write;
+pub mod truncate;
 pub mod web_fetch;
 pub mod web_search;
 mod write;
@@ -37,11 +40,13 @@ pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
 pub use ls_tool::LsTool;
 pub use mcp::{load_mcp_config, McpClient, McpConfig, McpServerConfig, McpTool, McpToolDef};
+pub use multi_edit::MultiEditTool;
 pub use path_guard::PathGuard;
 pub use read::ReadTool;
 pub use registry::ToolRegistry;
 pub use semantic_search::SemanticSearchTool;
 pub use test_loop::TestLoopTool;
+pub use todo_write::{TodoItem, TodoPriority, TodoStatus, TodoWriteTool};
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteTool;
@@ -65,6 +70,19 @@ pub fn default_registry_with_options(
     blocked: Vec<PathBuf>,
     sandbox: bool,
 ) -> ToolRegistry {
+    default_registry_with_todo_store(workspace_root, blocked, sandbox).0
+}
+
+/// Build registry and return both the registry and the agent's shared todo store.
+/// The todo store can be read by the TUI to display agent task progress.
+pub fn default_registry_with_todo_store(
+    workspace_root: PathBuf,
+    blocked: Vec<PathBuf>,
+    sandbox: bool,
+) -> (
+    ToolRegistry,
+    std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>,
+) {
     let guard = PathGuard::new(workspace_root.clone()).with_blocked(blocked.clone());
     let tracker = FileTracker::new();
     let read_cache = clido_context::read_cache::ReadCache::new();
@@ -82,6 +100,13 @@ pub fn default_registry_with_options(
     ));
     r.register(WriteTool::new_with_tracker(guard.clone(), tracker.clone()));
     r.register(EditTool::new_with_tracker(guard.clone(), tracker.clone()));
+    r.register(MultiEditTool::new_with_tracker(
+        guard.clone(),
+        tracker.clone(),
+    ));
+    let todo_tool = TodoWriteTool::new();
+    let todo_store = todo_tool.store();
+    r.register(todo_tool);
     r.register(GlobTool::new_with_guard(guard.clone()));
     r.register(LsTool::new_with_guard(guard.clone()));
     r.register(ApplyPatchTool::new(guard.clone()));
@@ -92,7 +117,8 @@ pub fn default_registry_with_options(
     r.register(WebSearchTool::new());
     r.register(DiagnosticsTool::new());
     r.register(TestLoopTool::new(workspace_root));
-    r
+    r.register(truncate::TruncateTool::new());
+    (r, todo_store)
 }
 
 /// Output of a tool execution.
