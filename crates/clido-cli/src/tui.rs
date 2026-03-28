@@ -69,6 +69,23 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Settings",
+        &[
+            (
+                "/config",
+                "show all settings — provider, model, roles, agent, context",
+            ),
+            (
+                "/configure",
+                "change settings with natural language. Usage: /configure <intent>",
+            ),
+            (
+                "/settings",
+                "open settings editor — manage roles and default model",
+            ),
+        ],
+    ),
+    (
         "Git",
         &[
             ("/ship", "stage → commit → push. Usage: /ship [message]"),
@@ -160,10 +177,6 @@ const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ),
             ("/check", "run diagnostics on current project"),
             ("/rules", "show active project rules files (CLIDO.md)"),
-            (
-                "/settings",
-                "open settings — manage roles and default model",
-            ),
             (
                 "/image",
                 "attach an image to the next message. Usage: /image <path>",
@@ -4579,6 +4592,276 @@ Once built, the agent can search by concept rather than just filename.".into(),
                 app.model.clone(),
                 profile,
             ));
+        }
+        "/config" => {
+            // Show a complete, structured overview of all current settings.
+            match clido_core::load_config(&app.workspace_root) {
+                Err(e) => app.push(ChatLine::Info(format!("  ✗ Could not load config: {}", e))),
+                Ok(loaded) => {
+                    // Config file location.
+                    let global_path = clido_core::global_config_path();
+                    let project_path_opt = app.workspace_root.join(".clido/config.toml");
+                    let project_exists = project_path_opt.exists();
+                    let config_file_label = if project_exists {
+                        format!("{}", project_path_opt.display())
+                    } else {
+                        global_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "~/.config/clido/config.toml".to_string())
+                    };
+
+                    app.push(ChatLine::Info("".into()));
+                    app.push(ChatLine::Section("Active Profile".into()));
+                    let active = &loaded.default_profile;
+                    if let Some(p) = loaded.profiles.get(active) {
+                        let key_status = if p.api_key.is_some() {
+                            "key ✓ (in config)"
+                        } else if p.api_key_env.is_some() {
+                            "key ✓ (from env)"
+                        } else {
+                            "key ✗ (not set)"
+                        };
+                        app.push(ChatLine::Info(format!(
+                            "  {} — {} / {}  {}",
+                            active, p.provider, p.model, key_status
+                        )));
+                        if let Some(ref url) = p.base_url {
+                            app.push(ChatLine::Info(format!("  base_url: {}", url)));
+                        }
+                    }
+
+                    // All profiles.
+                    if loaded.profiles.len() > 1 {
+                        app.push(ChatLine::Info("".into()));
+                        app.push(ChatLine::Section("All Profiles".into()));
+                        let mut names: Vec<&String> = loaded.profiles.keys().collect();
+                        names.sort();
+                        for name in names {
+                            let p = &loaded.profiles[name];
+                            let marker = if name == active { "▶" } else { " " };
+                            let worker_s = if let Some(ref w) = p.worker {
+                                format!("  worker: {}/{}", w.provider, w.model)
+                            } else {
+                                String::new()
+                            };
+                            let reviewer_s = if let Some(ref r) = p.reviewer {
+                                format!("  reviewer: {}/{}", r.provider, r.model)
+                            } else {
+                                String::new()
+                            };
+                            app.push(ChatLine::Info(format!(
+                                "  {} {:<14}  {}/{}{}{}",
+                                marker, name, p.provider, p.model, worker_s, reviewer_s
+                            )));
+                        }
+                    }
+
+                    // Roles.
+                    let roles_map = loaded.roles.as_map();
+                    if !roles_map.is_empty() {
+                        app.push(ChatLine::Info("".into()));
+                        app.push(ChatLine::Section("Roles".into()));
+                        app.push(ChatLine::Info(
+                            "  (use /role <name> to switch, /fast = fast role, /smart = reasoning role)".into(),
+                        ));
+                        let mut role_names: Vec<&String> = roles_map.keys().collect();
+                        role_names.sort();
+                        for name in role_names {
+                            app.push(ChatLine::Info(format!(
+                                "  {:<14}  {}",
+                                name, roles_map[name]
+                            )));
+                        }
+                    }
+
+                    // Agent behaviour.
+                    app.push(ChatLine::Info("".into()));
+                    app.push(ChatLine::Section("Agent Behaviour".into()));
+                    let a = &loaded.agent;
+                    app.push(ChatLine::Info(format!(
+                        "  max-turns           {}",
+                        a.max_turns
+                    )));
+                    if let Some(budget) = a.max_budget_usd {
+                        app.push(ChatLine::Info(format!(
+                            "  max-budget-usd      ${:.2}",
+                            budget
+                        )));
+                    } else {
+                        app.push(ChatLine::Info("  max-budget-usd      unlimited".into()));
+                    }
+                    if let Some(tools) = a.max_concurrent_tools {
+                        app.push(ChatLine::Info(format!("  max-concurrent-tools {}", tools)));
+                    }
+                    if let Some(out_tok) = a.max_output_tokens {
+                        app.push(ChatLine::Info(format!("  max-output-tokens   {}", out_tok)));
+                    }
+                    app.push(ChatLine::Info(format!(
+                        "  auto-checkpoint     {}",
+                        if a.auto_checkpoint { "on" } else { "off" }
+                    )));
+                    app.push(ChatLine::Info(format!(
+                        "  quiet               {}",
+                        if a.quiet { "on" } else { "off" }
+                    )));
+                    app.push(ChatLine::Info(format!(
+                        "  notify              {}",
+                        if a.notify { "on" } else { "off" }
+                    )));
+                    if a.no_rules {
+                        app.push(ChatLine::Info(
+                            "  no-rules            on (CLIDO.md ignored)".into(),
+                        ));
+                    }
+
+                    // Context.
+                    app.push(ChatLine::Info("".into()));
+                    app.push(ChatLine::Section("Context".into()));
+                    let c = &loaded.context;
+                    app.push(ChatLine::Info(format!(
+                        "  compaction-threshold  {:.0}%  (compress when context is this full)",
+                        c.compaction_threshold * 100.0
+                    )));
+                    if let Some(max_ctx) = c.max_context_tokens {
+                        app.push(ChatLine::Info(format!("  max-context-tokens  {}", max_ctx)));
+                    }
+
+                    // Agent slots (global).
+                    let agents = &loaded.agents;
+                    if agents.main.is_some() || agents.worker.is_some() || agents.reviewer.is_some()
+                    {
+                        app.push(ChatLine::Info("".into()));
+                        app.push(ChatLine::Section("Agent Slots (global)".into()));
+                        if let Some(ref m) = agents.main {
+                            app.push(ChatLine::Info(format!(
+                                "  main      {}/{}",
+                                m.provider, m.model
+                            )));
+                        }
+                        if let Some(ref w) = agents.worker {
+                            app.push(ChatLine::Info(format!(
+                                "  worker    {}/{}",
+                                w.provider, w.model
+                            )));
+                        }
+                        if let Some(ref r) = agents.reviewer {
+                            app.push(ChatLine::Info(format!(
+                                "  reviewer  {}/{}",
+                                r.provider, r.model
+                            )));
+                        }
+                    }
+
+                    // Config file path.
+                    app.push(ChatLine::Info("".into()));
+                    app.push(ChatLine::Info(format!(
+                        "  Config file: {}",
+                        config_file_label
+                    )));
+                    app.push(ChatLine::Info(
+                        "  Use /configure <intent> to change settings in natural language".into(),
+                    ));
+                    app.push(ChatLine::Info("".into()));
+                }
+            }
+        }
+        _ if cmd == "/configure" || cmd.starts_with("/configure ") => {
+            let intent = cmd.trim_start_matches("/configure").trim();
+            if intent.is_empty() {
+                app.push(ChatLine::Info("  Usage: /configure <intent>".into()));
+                app.push(ChatLine::Info(
+                    "  Examples:  /configure optimize for speed".into(),
+                ));
+                app.push(ChatLine::Info(
+                    "             /configure use gpt-4o as default".into(),
+                ));
+                app.push(ChatLine::Info(
+                    "             /configure set max turns to 50".into(),
+                ));
+                app.push(ChatLine::Info(
+                    "             /configure add a fast role with claude-haiku".into(),
+                ));
+            } else {
+                let global_path = clido_core::global_config_path();
+                let project_path = app.workspace_root.join(".clido/config.toml");
+                let (config_path, config_path_label) = if project_path.exists() {
+                    (project_path.clone(), project_path.display().to_string())
+                } else {
+                    let gp = global_path
+                        .clone()
+                        .unwrap_or_else(|| std::path::PathBuf::from("~/.config/clido/config.toml"));
+                    let label = gp.display().to_string();
+                    (gp, label)
+                };
+                let intent = intent.to_string();
+                let prompt = format!(
+                    "The user wants to change their Clido configuration.\n\
+                    \n\
+                    Config file path: {config_path_label}\n\
+                    \n\
+                    User intent: \"{intent}\"\n\
+                    \n\
+                    Steps:\n\
+                    1. Read the current config file at `{config_path_label}` to understand the \
+                       exact format and current values.\n\
+                    2. Determine the minimum set of changes needed to fulfil the intent.\n\
+                    3. Before changing anything, summarise: what you will change and why.\n\
+                    4. Apply the changes using the Edit or Write tool. Make surgical changes only — \
+                       do NOT rewrite the entire file unless it does not exist yet.\n\
+                    5. Confirm what was changed with a brief summary.\n\
+                    \n\
+                    Config file format reference (TOML):\n\
+                    ```toml\n\
+                    default-profile = \"default\"\n\
+                    \n\
+                    [profile.default]\n\
+                    provider = \"anthropic\"  # anthropic | openai | openrouter | mistral | local | alibabacloud\n\
+                    model    = \"claude-sonnet-4-6\"\n\
+                    api_key  = \"sk-...\"      # optional; prefer api_key_env for safety\n\
+                    api_key_env = \"ANTHROPIC_API_KEY\"  # env var name\n\
+                    base_url = \"\"            # optional custom endpoint\n\
+                    \n\
+                    # Per-profile sub-agents (override global [agents.*]):\n\
+                    # [profile.default.worker]\n\
+                    # provider = \"anthropic\"\n\
+                    # model    = \"claude-haiku-4-5-20251001\"\n\
+                    \n\
+                    [agent]\n\
+                    max-turns            = 200     # maximum tool-use turns per run\n\
+                    max-budget-usd       = 5.0     # cost cap per run (omit for unlimited)\n\
+                    max-concurrent-tools = 4       # parallel tool calls\n\
+                    max-output-tokens    = 8192    # max tokens per LLM response\n\
+                    quiet                = false   # suppress spinner / cost footer\n\
+                    notify               = false   # desktop notification on completion\n\
+                    auto-checkpoint      = true    # checkpoint before file-mutating turns\n\
+                    no-rules             = false   # ignore CLIDO.md rules files\n\
+                    \n\
+                    [context]\n\
+                    compaction-threshold = 0.75    # compress context when 75% full\n\
+                    max-context-tokens   = 100000  # optional hard cap on context size\n\
+                    \n\
+                    [roles]\n\
+                    fast      = \"claude-haiku-4-5-20251001\"  # /fast role\n\
+                    reasoning = \"claude-opus-4-6\"            # /smart role\n\
+                    # any extra role name = \"model-id\"       # /role <name>\n\
+                    \n\
+                    [index]\n\
+                    exclude-patterns = [\"*.lock\", \"vendor/**\"]\n\
+                    include-ignored  = false\n\
+                    ```\n\
+                    \n\
+                    Valid providers: anthropic, openai, openrouter, mistral, local, alibabacloud\n\
+                    \n\
+                    If the config file does not exist at `{config_path_label}`, create it with \
+                    sensible defaults plus the requested changes.\n\
+                    After writing, ask the user to restart clido or type /init to reload the config.",
+                    config_path_label = config_path_label,
+                    intent = intent,
+                );
+                let _ = config_path; // suppress unused warning
+                app.send_now(prompt);
+            }
         }
         "/init" => {
             app.push(ChatLine::Info("  launching setup wizard…".into()));
