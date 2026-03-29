@@ -29,6 +29,10 @@ if [ -z "${CLIDO_CONFIG:-}" ]; then
   export CLIDO_CONFIG="$TEST_DIR/config.toml"
 fi
 
+# Spoof User-Agent for providers that require a known coding-agent identity (e.g. Kimi Code).
+# Override with CLIDO_USER_AGENT=... before calling this script to use a different value.
+export CLIDO_USER_AGENT="${CLIDO_USER_AGENT:-RooCode/3.0.0}"
+
 run_verify() {
   echo "=== Build ==="
   cargo build --all-targets

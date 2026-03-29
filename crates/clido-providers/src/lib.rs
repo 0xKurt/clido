@@ -47,8 +47,8 @@ pub fn build_provider(
 ///
 /// Resolution order (first non-empty wins):
 ///   1. `user_agent` argument — explicit override from profile/slot config
-///   2. `ProviderDef::required_user_agent` — provider-specific default (e.g. Kimi Code)
-///   3. `"clido/<version>"` — global fallback
+///   2. `CLIDO_USER_AGENT` environment variable — process-wide override (e.g. set in test scripts)
+///   3. `"clido/<version>"` — default
 pub fn build_provider_with_ua(
     provider_name: &str,
     api_key: String,
@@ -57,12 +57,16 @@ pub fn build_provider_with_ua(
     user_agent: Option<String>,
 ) -> Result<Arc<dyn ModelProvider>> {
     let model = resolve_model_alias(&model).to_string();
-    if let Some(def) = PROVIDER_REGISTRY.iter().find(|d| d.id == provider_name) {
-        let ua = user_agent
-            .filter(|s| !s.is_empty())
-            .or_else(|| def.required_user_agent.map(|s| s.to_string()))
-            .unwrap_or_else(|| format!("clido/{}", env!("CARGO_PKG_VERSION")));
+    let ua = user_agent
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("CLIDO_USER_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| format!("clido/{}", env!("CARGO_PKG_VERSION")));
 
+    if let Some(def) = PROVIDER_REGISTRY.iter().find(|d| d.id == provider_name) {
         if def.is_anthropic {
             return Ok(Arc::new(AnthropicProvider::new_with_user_agent(
                 api_key,
