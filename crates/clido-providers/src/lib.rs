@@ -29,6 +29,7 @@ pub fn build_provider(
         "mistral" => Ok(Arc::new(OpenAICompatProvider::new_mistral(api_key, model))),
         "minimax" => Ok(Arc::new(OpenAICompatProvider::new_minimax(api_key, model))),
         "kimi" => Ok(Arc::new(OpenAICompatProvider::new_kimi(api_key, model))),
+        "kimi-code" => Ok(Arc::new(OpenAICompatProvider::new_kimi_code(api_key, model))),
         "local" => {
             let url = base_url.unwrap_or("http://localhost:11434").to_string();
             Ok(Arc::new(OpenAICompatProvider::new(
@@ -50,7 +51,7 @@ pub fn build_provider(
             )))
         }
         p => Err(ClidoError::Config(format!(
-            "Provider '{}' is not supported. Available: anthropic, openrouter, openai, mistral, minimax, kimi, local, alibabacloud.",
+            "Provider '{}' is not supported. Available: anthropic, openrouter, openai, mistral, minimax, kimi, kimi-code, local, alibabacloud.",
             p
         ))),
     }
@@ -152,6 +153,18 @@ mod tests {
             "kimi",
             "sk-kimi-fake".to_string(),
             "moonshot-v1-32k".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_kimi_code_returns_ok() {
+        let p = build_provider(
+            "kimi-code",
+            "sk-kimi-fake".to_string(),
+            "kimi-for-coding".to_string(),
             None,
         )
         .unwrap();

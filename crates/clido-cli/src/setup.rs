@@ -36,7 +36,7 @@ const PROFILE_NAME_PREFIX: &str = "  Profile name: ";
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
 /// (display name, internal provider ID, description)
-const PROVIDERS: [(&str, &str, &str); 7] = [
+const PROVIDERS: [(&str, &str, &str); 9] = [
     (
         "OpenRouter",
         "openrouter",
@@ -54,6 +54,8 @@ const PROVIDERS: [(&str, &str, &str); 7] = [
         "minimax",
         "MiniMax-M2.7 coding model — minimax.io",
     ),
+    ("Kimi", "kimi", "Moonshot AI models — platform.moonshot.ai"),
+    ("Kimi Code", "kimi-code", "coding model — api.kimi.com"),
     (
         "Alibaba Cloud",
         "alibabacloud",
@@ -66,12 +68,14 @@ const PROVIDERS: [(&str, &str, &str); 7] = [
     ),
 ];
 
-const PROVIDER_KEY_ENV: [&str; 7] = [
+const PROVIDER_KEY_ENV: [&str; 9] = [
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "MISTRAL_API_KEY",
     "MINIMAX_API_KEY",
+    "MOONSHOT_API_KEY",
+    "KIMI_CODE_API_KEY",
     "DASHSCOPE_API_KEY",
     "", // local: no key
 ];
@@ -3360,7 +3364,7 @@ mod tests {
     #[test]
     fn build_toml_local_provider() {
         let mut s = SetupState::new();
-        s.provider = 6; // Local / Ollama
+        s.provider = 8; // Local / Ollama
         s.model = "llama3.2".to_string();
         s.credential.clear();
         let toml = build_toml(&s);
@@ -3373,7 +3377,7 @@ mod tests {
     #[test]
     fn build_toml_local_provider_custom_url() {
         let mut s = SetupState::new();
-        s.provider = 6;
+        s.provider = 8;
         s.model = "mistral".to_string();
         s.credential = "http://127.0.0.1:8080".to_string();
         let toml = build_toml(&s);
@@ -3454,7 +3458,7 @@ mod tests {
     #[test]
     fn setup_state_is_local() {
         let mut s = SetupState::new();
-        s.provider = 6; // Local / Ollama is index 6
+        s.provider = 8; // Local / Ollama is index 8
         assert!(s.is_local());
         s.provider = 0;
         assert!(!s.is_local());
@@ -3579,7 +3583,7 @@ mod tests {
         s.model = "claude-sonnet-4-5".to_string();
         s.credential = "sk-ant-key".to_string();
         s.configure_worker = true;
-        s.worker_provider = 6; // Local
+        s.worker_provider = 8; // Local
         s.worker_model = "llama3.2".to_string();
         s.worker_credential = "http://127.0.0.1:8080".to_string();
         let toml = build_toml(&s);

@@ -61,6 +61,8 @@ pub fn default_api_key_env(provider: &str) -> &'static str {
         "openai" => "OPENAI_API_KEY",
         "mistral" => "MISTRAL_API_KEY",
         "minimax" => "MINIMAX_API_KEY",
+        "kimi" => "MOONSHOT_API_KEY",
+        "kimi-code" => "KIMI_CODE_API_KEY",
         "alibabacloud" => "DASHSCOPE_API_KEY",
         _ => "",
     }

@@ -221,6 +221,9 @@ pub enum ProviderType {
     OpenAI,
     OpenRouter,
     MiniMax,
+    Kimi,
+    #[serde(rename = "kimi-code")]
+    KimiCode,
     Alibaba,
     Local,
 }

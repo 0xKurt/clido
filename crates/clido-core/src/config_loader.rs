@@ -307,6 +307,8 @@ impl LoadedConfig {
             "openai",
             "mistral",
             "minimax",
+            "kimi",
+            "kimi-code",
             "local",
             "alibabacloud",
         ];

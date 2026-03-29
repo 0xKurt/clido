@@ -89,7 +89,17 @@ impl OpenAICompatProvider {
         Self::new(
             api_key,
             model,
-            "https://api.moonshot.cn/v1".to_string(),
+            "https://api.moonshot.ai/v1".to_string(),
+            vec![],
+        )
+    }
+
+    /// Kimi Code: coding-optimised Kimi endpoint.
+    pub fn new_kimi_code(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.kimi.com/coding/v1".to_string(),
             vec![],
         )
     }
