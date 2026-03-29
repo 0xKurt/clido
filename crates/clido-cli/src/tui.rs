@@ -2422,22 +2422,15 @@ fn render(frame: &mut Frame, app: &mut App) {
 
         // Scroll indicators — same style as session / model pickers.
         if has_above || has_below {
-            let mut parts = Vec::new();
-            if has_above {
-                parts.push(format!("↑↑ {} more", scroll_offset));
+            let above_n = if has_above { scroll_offset } else { 0 };
+            let below_n = if has_below {
+                rows.len() - (scroll_offset + VISIBLE)
+            } else {
+                0
+            };
+            if let Some(line) = scroll_indicator_line(above_n, below_n) {
+                content.push(line);
             }
-            if has_below {
-                parts.push(format!(
-                    "↓↓ {} more",
-                    rows.len() - (scroll_offset + VISIBLE)
-                ));
-            }
-            content.push(Line::from(Span::styled(
-                format!("  {}", parts.join("  ")),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )));
         }
 
         let n_cmds = rows
@@ -2473,13 +2466,7 @@ fn render(frame: &mut Frame, app: &mut App) {
         let mut content: Vec<Line<'static>> = Vec::new();
         // Filter line
         if !picker.picker.filter.text.is_empty() {
-            content.push(Line::from(vec![
-                Span::styled("  🔍 ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    picker.picker.filter.text.clone(),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]));
+            content.push(filter_indicator_line(&picker.picker.filter.text));
         }
         content.push(Line::from(vec![Span::styled(
             format!(
@@ -2527,20 +2514,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         let below = filtered
             .len()
             .saturating_sub(picker.picker.scroll_offset + VISIBLE);
-        if above > 0 || below > 0 {
-            let mut scroll_parts = Vec::new();
-            if above > 0 {
-                scroll_parts.push(format!("↑↑ {} more above", above));
-            }
-            if below > 0 {
-                scroll_parts.push(format!("↓↓ {} more below", below));
-            }
-            content.push(Line::from(vec![Span::styled(
-                format!("  {}", scroll_parts.join("  ")),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )]));
+        if let Some(line) = scroll_indicator_line(above, below) {
+            content.push(line);
         }
 
         let total = filtered.len();
@@ -2677,20 +2652,8 @@ fn render(frame: &mut Frame, app: &mut App) {
             let below = filtered
                 .len()
                 .saturating_sub(picker.scroll_offset + VISIBLE);
-            if above > 0 || below > 0 {
-                let mut parts = Vec::new();
-                if above > 0 {
-                    parts.push(format!("↑↑ {} more", above));
-                }
-                if below > 0 {
-                    parts.push(format!("↓↓ {} more", below));
-                }
-                content.push(Line::from(vec![Span::styled(
-                    format!("  {}", parts.join("  ")),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                )]));
+            if let Some(line) = scroll_indicator_line(above, below) {
+                content.push(line);
             }
         }
 
@@ -2720,13 +2683,7 @@ fn render(frame: &mut Frame, app: &mut App) {
 
         let mut content: Vec<Line<'static>> = Vec::new();
         if !picker.picker.filter.text.is_empty() {
-            content.push(Line::from(vec![
-                Span::styled("  🔍 ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    picker.picker.filter.text.clone(),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]));
+            content.push(filter_indicator_line(&picker.picker.filter.text));
         }
         content.push(Line::from(Span::styled(
             format!("  {:<20}  {}", "profile", "provider / model"),
@@ -2776,20 +2733,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         let below = filtered
             .len()
             .saturating_sub(picker.picker.scroll_offset + VISIBLE);
-        if above > 0 || below > 0 {
-            let mut parts = Vec::new();
-            if above > 0 {
-                parts.push(format!("↑↑ {} more", above));
-            }
-            if below > 0 {
-                parts.push(format!("↓↓ {} more", below));
-            }
-            content.push(Line::from(Span::styled(
-                format!("  {}", parts.join("  ")),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )));
+        if let Some(line) = scroll_indicator_line(above, below) {
+            content.push(line);
         }
 
         let title = format!(" Profiles — {} ", picker.active);
@@ -2812,13 +2757,7 @@ fn render(frame: &mut Frame, app: &mut App) {
 
         let mut content: Vec<Line<'static>> = Vec::new();
         if !picker.picker.filter.text.is_empty() {
-            content.push(Line::from(vec![
-                Span::styled("  🔍 ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    picker.picker.filter.text.clone(),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]));
+            content.push(filter_indicator_line(&picker.picker.filter.text));
         }
         content.push(Line::from(Span::styled(
             format!("  {:<16}  {}", "role", "model"),
@@ -2852,20 +2791,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         let below = filtered
             .len()
             .saturating_sub(picker.picker.scroll_offset + VISIBLE);
-        if above > 0 || below > 0 {
-            let mut parts = Vec::new();
-            if above > 0 {
-                parts.push(format!("↑↑ {} more", above));
-            }
-            if below > 0 {
-                parts.push(format!("↓↓ {} more", below));
-            }
-            content.push(Line::from(Span::styled(
-                format!("  {}", parts.join("  ")),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )));
+        if let Some(line) = scroll_indicator_line(above, below) {
+            content.push(line);
         }
 
         let title = format!(" Roles — {} ", filtered.len());
@@ -4108,20 +4035,8 @@ fn render_profile_provider_picker(
 
     let above = picker.scroll_offset;
     let below = indices.len().saturating_sub(picker.scroll_offset + visible);
-    if above > 0 || below > 0 {
-        let mut parts = Vec::new();
-        if above > 0 {
-            parts.push(format!("↑↑ {} more", above));
-        }
-        if below > 0 {
-            parts.push(format!("↓↓ {} more", below));
-        }
-        lines.push(Line::from(Span::styled(
-            format!("  {}", parts.join("  ")),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        )));
+    if let Some(line) = scroll_indicator_line(above, below) {
+        lines.push(line);
     }
 
     frame.render_widget(
@@ -4205,20 +4120,8 @@ fn render_profile_model_picker(
     let below = filtered
         .len()
         .saturating_sub(picker.scroll_offset + visible);
-    if above > 0 || below > 0 {
-        let mut parts = Vec::new();
-        if above > 0 {
-            parts.push(format!("↑↑ {} more", above));
-        }
-        if below > 0 {
-            parts.push(format!("↓↓ {} more", below));
-        }
-        lines.push(Line::from(Span::styled(
-            format!("  {}", parts.join("  ")),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        )));
+    if let Some(line) = scroll_indicator_line(above, below) {
+        lines.push(line);
     }
 
     frame.render_widget(
@@ -4314,6 +4217,34 @@ fn modal_block_with_hint(title: &str, hint: &str, border_color: Color) -> Block<
         )))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
+}
+
+/// Build a filter indicator line (🔍 + yellow text) for picker popups.
+fn filter_indicator_line(filter_text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  🔍 ", Style::default().fg(Color::DarkGray)),
+        Span::styled(filter_text.to_string(), Style::default().fg(Color::Yellow)),
+    ])
+}
+
+/// Build a scroll indicator line showing how many items are above/below the visible window.
+fn scroll_indicator_line(above: usize, below: usize) -> Option<Line<'static>> {
+    if above == 0 && below == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if above > 0 {
+        parts.push(format!("↑↑ {} more", above));
+    }
+    if below > 0 {
+        parts.push(format!("↓↓ {} more", below));
+    }
+    Some(Line::from(Span::styled(
+        format!("  {}", parts.join("  ")),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    )))
 }
 
 /// Two-column row (e.g. for slash completions): cmd | description, with highlight on selection.
