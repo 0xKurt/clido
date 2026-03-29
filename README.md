@@ -61,6 +61,40 @@ base_url = "http://localhost:11434"
 
 Switch profiles with `--profile fast` or `CLIDO_PROFILE=fast`.
 
+### Profile structure
+
+Each profile defines a provider, model, and optional credentials:
+
+```toml
+[profiles.myprofile]
+provider = "anthropic"        # required — see Supported Providers below
+model = "claude-sonnet-4-5"   # required — model identifier
+api_key = "sk-..."            # optional — inline key (env var preferred)
+api_key_env = "MY_KEY"        # optional — name of env var holding the key
+base_url = "https://..."      # optional — override API endpoint
+
+# Optional sub-agent slots (used for multi-agent workflows)
+[profiles.myprofile.worker]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+
+[profiles.myprofile.reviewer]
+provider = "openai"
+model = "gpt-4o"
+```
+
+**Managing profiles:**
+
+```sh
+clido profile list               # list all profiles
+clido profile create myprofile   # create via guided wizard
+clido profile switch myprofile   # set as default
+clido profile edit myprofile     # edit via guided wizard
+clido profile delete myprofile   # delete a profile
+```
+
+In the TUI, press **Ctrl+P** to open the profile picker or use `/profile` slash commands.
+
 ### Environment variables
 
 | Variable | Description |
@@ -83,6 +117,32 @@ Switch profiles with `--profile fast` or `CLIDO_PROFILE=fast`.
 | `CLIDO_SYSTEM_PROMPT` | System prompt override |
 | `CLIDO_DATA_DIR` | Override data directory (sessions, index, audit) |
 | `CLIDO_SESSION_DIR` | Override session storage directory |
+
+## Supported Providers
+
+| Provider | ID | Default Model | API Key Env | Notes |
+|---|---|---|---|---|
+| Anthropic | `anthropic` | claude-sonnet-4-5 | `ANTHROPIC_API_KEY` | Native SDK |
+| OpenAI | `openai` | gpt-4o | `OPENAI_API_KEY` | |
+| OpenRouter | `openrouter` | anthropic/claude-sonnet-4-5 | `OPENROUTER_API_KEY` | Multi-provider gateway |
+| Google Gemini | `gemini` | gemini-2.5-flash | `GEMINI_API_KEY` | |
+| DeepSeek | `deepseek` | deepseek-chat | `DEEPSEEK_API_KEY` | |
+| Mistral | `mistral` | mistral-large-latest | `MISTRAL_API_KEY` | |
+| xAI (Grok) | `xai` | grok-3-beta | `XAI_API_KEY` | |
+| Groq | `groq` | llama-3.3-70b-versatile | `GROQ_API_KEY` | |
+| Together AI | `togetherai` | meta-llama/Llama-3.3-70B-Instruct-Turbo | `TOGETHER_API_KEY` | |
+| Fireworks AI | `fireworks` | llama-v3p3-70b-instruct | `FIREWORKS_API_KEY` | |
+| Cerebras | `cerebras` | llama3.1-70b | `CEREBRAS_API_KEY` | |
+| Perplexity | `perplexity` | sonar-pro | `PERPLEXITY_API_KEY` | |
+| MiniMax | `minimax` | MiniMax-M1 | `MINIMAX_API_KEY` | |
+| Alibaba Cloud | `alibabacloud` | qwen-max | `DASHSCOPE_API_KEY` | DashScope / Qwen |
+| Kimi (Moonshot) | `kimi` | moonshot-v1-8k | `MOONSHOT_API_KEY` | |
+| Kimi Code | `kimi-code` | kimi-for-coding | `KIMI_CODE_API_KEY` | |
+| Local / Ollama | `local` | llama3.2 | *(none needed)* | `http://localhost:11434` |
+
+All providers except Anthropic use the OpenAI-compatible API format. Use `clido list-models --provider <id>` to see available models for a provider.
+
+**Model aliases:** `sonnet` → claude-sonnet-4-5, `opus` → claude-opus-4-6, `haiku` → claude-haiku-4-5, `4o` → gpt-4o, `flash` → gemini-2.5-flash, `deepseek` → deepseek-chat, `r1` → deepseek-reasoner, `grok` → grok-3-beta, `sonar` → sonar-pro.
 
 ## CLI flags
 
@@ -184,49 +244,154 @@ Run `clido` (no arguments, at a TTY) to launch the full-screen interactive TUI. 
 
 ### Slash commands
 
-Type `/` in the input bar to see completions. Available commands:
+Type `/` in the input bar to see completions. Commands are grouped by category:
+
+**Session**
 
 | Command | Description |
 |---|---|
 | `/clear` | Clear the conversation |
-| `/help` | Show all key bindings and slash commands (grouped by category) |
+| `/help` | Show key bindings and all slash commands |
+| `/keys` | Show keyboard shortcuts overlay |
+| `/quit` | Exit clido |
 | `/session` | Show current session ID |
 | `/sessions` | Open session picker (list and resume recent sessions) |
-| `/quit` | Exit |
-| `/stop` | Interrupt the current run without sending a message |
+| `/search <query>` | Search conversation history |
+| `/export` | Save this conversation to a markdown file |
+| `/init` | Reconfigure the current profile (opens in-TUI editor) |
+
+**Model & Roles**
+
+| Command | Description |
+|---|---|
 | `/model [name]` | Show or switch the active model |
-| `/models` | Open interactive model picker (filter, favorites, pricing) |
-| `/fast` | Switch to the fast model (respects `[roles] fast` in config) |
-| `/smart` | Switch to the smart model (respects `[roles] reasoning` in config) |
-| `/role <name>` | Switch to the model assigned to a named role |
+| `/models` | Open interactive model picker (search, filter, favorites, pricing) |
+| `/fast` | Switch to fast (cheap) model (respects `[roles] fast` in config) |
+| `/smart` | Switch to smart (powerful) model (respects `[roles] reasoning` in config) |
+| `/role [name]` | Pick a role or switch to a named role |
+| `/role add <name> <model>` | Create a new role mapping |
+| `/role delete <name>` | Remove a role mapping |
+| `/role list` | List all configured roles |
 | `/fav` | Toggle the current model as a favorite |
-| `/profile` | Open profile picker — switch, create, or edit profiles |
-| `/profile new` | Create a new profile via the guided wizard |
-| `/profile edit [name]` | Edit a profile via the guided wizard |
-| `/profiles` | List all profiles with active model per slot |
-| `/agents` | Show current agent configuration (main, worker, reviewer) |
-| `/reviewer [on\|off]` | Toggle reviewer sub-agent |
-| `/cost` | Show session cost so far |
-| `/tokens` | Show input and output token usage |
-| `/compact` | Compact the context window immediately |
-| `/memory <query>` | Search long-term memory |
-| `/plan` | Show current task plan (when `--planner` is active) |
+| `/reviewer [on\|off]` | Show or toggle reviewer sub-agent |
+
+**Settings**
+
+| Command | Description |
+|---|---|
+| `/config` | Show all settings — provider, model, roles, agent, context |
+| `/configure <intent>` | Change settings with natural language |
+| `/settings` | Open settings editor (roles, default model) |
+| `/prompt-mode [auto\|off\|status]` | Show or set prompt enhancement mode |
+| `/prompt-preview` | Preview the enhanced version of your next message |
+| `/prompt-rules [list\|add\|remove\|reset]` | Manage prompt enhancement rules |
+
+**Git**
+
+| Command | Description |
+|---|---|
 | `/ship [msg]` | Stage all changes, commit, and push |
 | `/save [msg]` | Stage all changes and commit locally |
 | `/pr [title]` | Create a pull request |
 | `/branch <name>` | Create and switch to a new branch |
 | `/sync` | Pull --rebase from upstream, resolve conflicts if needed |
-| `/undo` | Undo the last commit safely (asks for confirmation before reset) |
-| `/rollback [id]` | Restore to a checkpoint or commit (with explicit destructive-action confirmation) |
-| `/index` | Show repo index status |
-| `/rules` | Show active CLIDO.md rules files |
-| `/settings` | Open settings editor (roles, default model) |
-| `/workdir [path]` | Show or request a working-directory switch (applies after runtime confirmation) |
-| `/check` | Run diagnostics on current project |
-| `/copy` | Copy last assistant message to clipboard |
-| `/image <path>` | Attach an image to the next message |
+| `/undo` | Undo the last commit safely (asks for confirmation) |
+| `/rollback [id]` | Restore to a checkpoint or commit |
 
-**Key bindings:** `Enter` send · `Ctrl+Enter` interrupt & send · `↑↓` history · `PgUp/PgDn` scroll · `Ctrl+U` clear input · `Ctrl+C` quit.
+**Context & Cost**
+
+| Command | Description |
+|---|---|
+| `/cost` | Show session cost so far |
+| `/tokens` | Show input and output token usage |
+| `/compact` | Compact the context window immediately (summarizes history) |
+| `/memory [query]` | Search long-term memory |
+| `/todo` | Show the agent's current task list |
+
+**Plan**
+
+| Command | Description |
+|---|---|
+| `/plan [task]` | Show current plan, or plan a task first |
+| `/plan edit` | Open plan editor for the current plan |
+| `/plan save` | Save current plan to `.clido/plans/` |
+| `/plan list` | List all saved plans |
+
+**Project**
+
+| Command | Description |
+|---|---|
+| `/agents` | Show current agent configuration (main, worker, reviewer) |
+| `/profiles` | List all profiles with active model per slot |
+| `/profile [name]` | Open profile picker — switch, create, or edit |
+| `/profile new` | Create a new profile via the guided wizard |
+| `/profile edit [name]` | Edit a profile in the TUI |
+| `/check` | Run diagnostics on current project |
+| `/rules` | Show active CLIDO.md rules files |
+| `/image <path>` | Attach an image to the next message |
+| `/workdir [path]` | Show or set working directory |
+| `/stop` | Interrupt current run without sending a message |
+| `/copy [all\|n]` | Copy last assistant message (or all / nth) to clipboard |
+| `/notify [on\|off]` | Toggle desktop notifications |
+| `/index` | Show codebase index stats |
+
+### Keybindings
+
+**Global**
+
+| Key | Action |
+|---|---|
+| `Ctrl+C` / `Ctrl+D` | Quit |
+| `Ctrl+/` | Interrupt current agent run |
+| `Ctrl+Y` | Copy last assistant response to clipboard |
+| `Ctrl+M` | Open model picker |
+| `Ctrl+P` | Open profile picker |
+| `Ctrl+K` | Open keyboard shortcuts overlay |
+| `Ctrl+L` | Refresh screen |
+
+**Chat input**
+
+| Key | Action |
+|---|---|
+| `Enter` | Send message |
+| `Shift+Enter` | Insert newline (multiline input) |
+| `Ctrl+Enter` | Interrupt current run and send immediately |
+| `Esc` | Clear input field |
+| `↑` / `↓` | Browse input history (single-line) or navigate lines (multiline) |
+| `Ctrl+U` | Clear entire input |
+| `Ctrl+W` / `Ctrl+Backspace` | Delete word backward |
+| `Alt+Left` / `Alt+Right` | Jump by word |
+| `Home` / `End` | Start / end of line |
+
+**Scrolling**
+
+| Key | Action |
+|---|---|
+| `Ctrl+Home` | Jump to top of chat |
+| `Ctrl+End` | Jump to bottom of chat (follow mode) |
+| `PageUp` / `PageDown` | Scroll chat by page |
+| `↑` / `↓` | Scroll chat (when input is empty) |
+
+**Pickers & overlays**
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate list |
+| `Enter` | Select / confirm |
+| `Esc` | Close overlay |
+| Type to filter | Narrows results in model/session/profile pickers |
+| `f` | Toggle favorite (model picker) |
+| `Ctrl+S` | Save as default (model picker) |
+| `n` / `e` | New / edit (profile picker) |
+| `d` | Delete (session picker) |
+
+**Permission prompts**
+
+| Key | Action |
+|---|---|
+| `1`–`5` | Quick-select: Once / Session / Workdir / Deny / Deny+feedback |
+| `Enter` | Confirm selected option |
+| `Esc` | Deny and close |
 
 ## MCP (Model Context Protocol)
 
