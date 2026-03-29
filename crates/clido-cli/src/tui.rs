@@ -3859,7 +3859,12 @@ fn render_profile_overview(
         // Value row
         let display_value = if *key == "api_key" {
             if is_editing {
-                st.input.clone()
+                let len = st.input.len();
+                if len == 0 {
+                    String::new()
+                } else {
+                    format!("{} ({} chars)", "•".repeat(len.min(30)), len)
+                }
             } else {
                 st.masked_api_key()
             }
@@ -4028,7 +4033,9 @@ fn render_profile_create(
     lines.push(Line::raw(""));
 
     let display_input = if matches!(step, ProfileCreateStep::ApiKey) && !st.input.is_empty() {
-        crate::setup::anonymize_key(&st.input)
+        // Show masked dots while typing, with a length indicator
+        let len = st.input.len();
+        format!("{} ({} chars)", "•".repeat(len.min(30)), len)
     } else {
         st.input.clone()
     };
@@ -4111,7 +4118,9 @@ fn render_profile_create(
     // Cursor inside the input line (line index 3 = blank + hint + blank + input)
     let cursor_y = content_area.y + 4;
     let shown_len = if matches!(step, ProfileCreateStep::ApiKey) {
-        crate::setup::anonymize_key(&st.input).chars().count()
+        let len = st.input.len();
+        // "•" repeated + " (N chars)"
+        len.min(30) + format!(" ({} chars)", len).len()
     } else {
         st.input_cursor
     };
@@ -4136,7 +4145,8 @@ fn render_profile_provider_picker(
         popup_rect,
     );
 
-    const VISIBLE: usize = 10;
+    // 2 lines for filter + blank, 1 line for scroll indicator
+    let visible: usize = (content_area.height as usize).saturating_sub(3).max(3);
     let picker = &st.provider_picker;
     let indices = picker.filtered();
 
@@ -4148,7 +4158,7 @@ fn render_profile_provider_picker(
         Line::raw(""),
     ];
 
-    let end = (picker.scroll_offset + VISIBLE).min(indices.len());
+    let end = (picker.scroll_offset + visible).min(indices.len());
     for (di, &idx) in indices[picker.scroll_offset..end].iter().enumerate() {
         let abs_pos = picker.scroll_offset + di;
         let selected = abs_pos == picker.selected;
@@ -4167,7 +4177,7 @@ fn render_profile_provider_picker(
     }
 
     let above = picker.scroll_offset;
-    let below = indices.len().saturating_sub(picker.scroll_offset + VISIBLE);
+    let below = indices.len().saturating_sub(picker.scroll_offset + visible);
     if above > 0 || below > 0 {
         let mut parts = Vec::new();
         if above > 0 {
@@ -4216,7 +4226,8 @@ fn render_profile_model_picker(
     let Some(ref picker) = st.profile_model_picker else {
         return;
     };
-    const VISIBLE: usize = 12;
+    // 3 lines for filter + header + blank, 1 for scroll indicator
+    let visible: usize = (content_area.height as usize).saturating_sub(4).max(3);
     let filtered = picker.filtered();
 
     let mut lines: Vec<Line<'static>> = vec![
@@ -4236,7 +4247,7 @@ fn render_profile_model_picker(
         Line::raw(""),
     ];
 
-    let end = (picker.scroll_offset + VISIBLE).min(filtered.len());
+    let end = (picker.scroll_offset + visible).min(filtered.len());
     for (di, m) in filtered[picker.scroll_offset..end].iter().enumerate() {
         let selected = picker.scroll_offset + di == picker.selected;
         let bg = if selected {
@@ -4263,7 +4274,7 @@ fn render_profile_model_picker(
     let above = picker.scroll_offset;
     let below = filtered
         .len()
-        .saturating_sub(picker.scroll_offset + VISIBLE);
+        .saturating_sub(picker.scroll_offset + visible);
     if above > 0 || below > 0 {
         let mut parts = Vec::new();
         if above > 0 {
@@ -6453,8 +6464,13 @@ fn build_lines_w_uncached(app: &App, width: usize) -> Vec<Line<'static>> {
                 out.push(Line::raw(""));
             }
             ChatLine::Assistant(text) => {
+                let label = if app.model.is_empty() {
+                    "clido".to_string()
+                } else {
+                    app.model.clone()
+                };
                 out.push(Line::from(vec![Span::styled(
-                    "assistant",
+                    label,
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -7679,25 +7695,29 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
                 },
                 Down => match step {
                     ProfileCreateStep::Provider => {
-                        const VIS: usize = 10;
+                        let vis = crossterm::terminal::size()
+                            .map(|(_, h)| (h as usize).saturating_sub(12).max(3))
+                            .unwrap_or(20);
                         let n = st.provider_picker.filtered().len();
                         if n > 0 && st.provider_picker.selected + 1 < n {
                             st.provider_picker.selected += 1;
-                            if st.provider_picker.selected >= st.provider_picker.scroll_offset + VIS
+                            if st.provider_picker.selected >= st.provider_picker.scroll_offset + vis
                             {
                                 st.provider_picker.scroll_offset =
-                                    st.provider_picker.selected + 1 - VIS;
+                                    st.provider_picker.selected + 1 - vis;
                             }
                         }
                     }
                     ProfileCreateStep::Model => {
-                        const VIS: usize = 12;
+                        let vis = crossterm::terminal::size()
+                            .map(|(_, h)| (h as usize).saturating_sub(12).max(3))
+                            .unwrap_or(20);
                         if let Some(ref mut picker) = st.profile_model_picker {
                             let n = picker.filtered().len();
                             if n > 0 && picker.selected + 1 < n {
                                 picker.selected += 1;
-                                if picker.selected >= picker.scroll_offset + VIS {
-                                    picker.scroll_offset = picker.selected + 1 - VIS;
+                                if picker.selected >= picker.scroll_offset + vis {
+                                    picker.scroll_offset = picker.selected + 1 - vis;
                                 }
                             }
                         }
@@ -7760,9 +7780,11 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
                 let n = st.provider_picker.filtered().len();
                 if n > 0 && st.provider_picker.selected + 1 < n {
                     st.provider_picker.selected += 1;
-                    const VIS: usize = 10;
-                    if st.provider_picker.selected >= st.provider_picker.scroll_offset + VIS {
-                        st.provider_picker.scroll_offset = st.provider_picker.selected + 1 - VIS;
+                    let vis = crossterm::terminal::size()
+                        .map(|(_, h)| (h as usize).saturating_sub(12).max(3))
+                        .unwrap_or(20);
+                    if st.provider_picker.selected >= st.provider_picker.scroll_offset + vis {
+                        st.provider_picker.scroll_offset = st.provider_picker.selected + 1 - vis;
                     }
                 }
             }
@@ -7812,12 +7834,14 @@ fn handle_profile_overlay_key(app: &mut App, event: crossterm::event::KeyEvent) 
             Down => {
                 let st = app.profile_overlay.as_mut().unwrap();
                 if let Some(ref mut picker) = st.profile_model_picker {
-                    const VIS: usize = 12;
+                    let vis = crossterm::terminal::size()
+                        .map(|(_, h)| (h as usize).saturating_sub(12).max(3))
+                        .unwrap_or(20);
                     let n = picker.filtered().len();
                     if n > 0 && picker.selected + 1 < n {
                         picker.selected += 1;
-                        if picker.selected >= picker.scroll_offset + VIS {
-                            picker.scroll_offset = picker.selected + 1 - VIS;
+                        if picker.selected >= picker.scroll_offset + vis {
+                            picker.scroll_offset = picker.selected + 1 - vis;
                         }
                     }
                 }
@@ -8454,6 +8478,8 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     if picker.sessions.is_empty() {
                         return;
                     }
+                    app.input.clear();
+                    app.cursor = 0;
                     let id = picker.sessions[picker.selected].session_id.clone();
                     if app.current_session_id.as_deref() == Some(&id) {
                         app.push(ChatLine::Info("  Already in this session".into()));
@@ -8464,6 +8490,8 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
             }
             Esc => {
                 app.session_picker = None;
+                app.input.clear();
+                app.cursor = 0;
             }
             _ => {}
         }
@@ -9236,28 +9264,19 @@ async fn agent_task(
                             }
                         }
                         clido_storage::SessionLine::AssistantMessage { content } => {
-                            let mut text_parts: Vec<String> = Vec::new();
-                            for c in content {
-                                match c.get("type").and_then(|v| v.as_str()) {
-                                    Some("text") => {
-                                        if let Some(s) = c.get("text").and_then(|v| v.as_str()) {
-                                            text_parts.push(s.to_string());
-                                        }
-                                    }
-                                    Some("tool_use") => {
-                                        let name = c
-                                            .get("name")
+                            let text: String = content
+                                .iter()
+                                .filter_map(|c| {
+                                    if c.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                        c.get("text")
                                             .and_then(|v| v.as_str())
-                                            .unwrap_or("tool");
-                                        text_parts.push(format!("🔧 {name}"));
+                                            .map(|s| s.to_string())
+                                    } else {
+                                        None
                                     }
-                                    Some("thinking") => {
-                                        text_parts.push("💭 (thinking)".to_string());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            let text = text_parts.join("\n");
+                                })
+                                .collect::<Vec<_>>()
+                                .join("");
                             if !text.trim().is_empty() {
                                 msgs.push(("assistant".to_string(), text));
                             }
@@ -9648,30 +9667,21 @@ async fn agent_task(
                                     }
                                 }
                                 clido_storage::SessionLine::AssistantMessage { content } => {
-                                    let mut text_parts: Vec<String> = Vec::new();
-                                    for c in content {
-                                        match c.get("type").and_then(|v| v.as_str()) {
-                                            Some("text") => {
-                                                if let Some(s) =
-                                                    c.get("text").and_then(|v| v.as_str())
-                                                {
-                                                    text_parts.push(s.to_string());
-                                                }
-                                            }
-                                            Some("tool_use") => {
-                                                let name = c
-                                                    .get("name")
+                                    let text: String = content
+                                        .iter()
+                                        .filter_map(|c| {
+                                            if c.get("type").and_then(|v| v.as_str())
+                                                == Some("text")
+                                            {
+                                                c.get("text")
                                                     .and_then(|v| v.as_str())
-                                                    .unwrap_or("tool");
-                                                text_parts.push(format!("🔧 {name}"));
+                                                    .map(|s| s.to_string())
+                                            } else {
+                                                None
                                             }
-                                            Some("thinking") => {
-                                                text_parts.push("💭 (thinking)".to_string());
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    let text = text_parts.join("\n");
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("");
                                     if !text.trim().is_empty() {
                                         msgs.push(("assistant".to_string(), text));
                                     }
@@ -10244,6 +10254,18 @@ async fn event_loop(
                         text = text.replace("\r\n", "\n").replace('\r', "\n");
                         if text.is_empty() {
                             // nothing to do
+                        } else if let Some(ref mut ed) = app.plan_text_editor {
+                            // Route paste into plan text editor at cursor position.
+                            let line = &mut ed.lines[ed.cursor_row];
+                            let byte_pos = line
+                                .char_indices()
+                                .nth(ed.cursor_col)
+                                .map(|(i, _)| i)
+                                .unwrap_or(line.len());
+                            // Only insert first line (plan editor is line-based)
+                            let paste_line = text.lines().next().unwrap_or(&text);
+                            line.insert_str(byte_pos, paste_line);
+                            ed.cursor_col += paste_line.chars().count();
                         } else if app.overlay_stack.handle_paste(&text) {
                             // Overlay stack consumed the paste
                         } else if let Some(ref mut ov) = app.profile_overlay {
@@ -10256,9 +10278,27 @@ async fn event_loop(
                                 } | ProfileOverlayMode::EditField(_)
                             );
                             if accepts_text {
+                                // Strip newlines from API keys
+                                let clean = if matches!(
+                                    &ov.mode,
+                                    ProfileOverlayMode::Creating {
+                                        step: ProfileCreateStep::ApiKey,
+                                    } | ProfileOverlayMode::EditField(ProfileEditField::ApiKey)
+                                ) {
+                                    text.lines().collect::<Vec<_>>().join("")
+                                } else {
+                                    text.clone()
+                                };
                                 let b = char_byte_pos_tui(&ov.input, ov.input_cursor);
-                                ov.input.insert_str(b, &text);
-                                ov.input_cursor += text.chars().count();
+                                ov.input.insert_str(b, &clean);
+                                ov.input_cursor += clean.chars().count();
+                            }
+                        } else if let Some(ref mut st) = app.settings {
+                            // Route paste into settings input field.
+                            let accepts = !matches!(st.edit_field, SettingsEditField::None);
+                            if accepts {
+                                let clean = text.lines().next().unwrap_or(&text);
+                                st.input.push_str(clean);
                             }
                         } else {
                             let byte_pos = char_byte_pos(&app.input, app.cursor);
