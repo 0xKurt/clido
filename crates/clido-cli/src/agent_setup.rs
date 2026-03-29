@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::cli::Cli;
 use crate::errors::CliError;
 
-use crate::provider::{make_provider, StdinAskUser};
+use crate::provider::{default_api_key_env, load_credentials, make_provider, StdinAskUser};
 use crate::spawn_tools::{SpawnReviewerTool, SpawnWorkerTool};
 
 type TodoStore = std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>;
@@ -255,7 +255,29 @@ fn build_provider_from_slot(
         .or_else(|| {
             slot.api_key_env
                 .as_ref()
-                .and_then(|e| std::env::var(e).ok())
+                .and_then(|e| std::env::var(e).ok().filter(|v| !v.is_empty()))
+        })
+        .or_else(|| {
+            // Fall back to provider's conventional env var
+            let env_var = default_api_key_env(&slot.provider);
+            if env_var.is_empty() {
+                None
+            } else {
+                std::env::var(env_var).ok().filter(|v| !v.is_empty())
+            }
+        })
+        .or_else(|| {
+            // Fall back to credentials file
+            let config_dir = if let Ok(p) = std::env::var("CLIDO_CONFIG") {
+                std::path::Path::new(&p).parent().map(|p| p.to_path_buf())
+            } else {
+                directories::ProjectDirs::from("", "", "clido")
+                    .map(|d| d.config_dir().to_path_buf())
+            };
+            config_dir
+                .map(|dir| load_credentials(&dir))
+                .and_then(|creds| creds.get(slot.provider.as_str()).cloned())
+                .filter(|v| !v.is_empty())
         })
         .unwrap_or_default();
     clido_providers::build_provider_with_ua(
