@@ -84,6 +84,16 @@ impl OpenAICompatProvider {
         )
     }
 
+    /// Kimi (Moonshot AI): OpenAI-compatible API.
+    pub fn new_kimi(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.moonshot.cn/v1".to_string(),
+            vec![],
+        )
+    }
+
     fn request_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{}/chat/completions", base)

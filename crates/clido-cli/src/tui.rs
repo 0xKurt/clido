@@ -497,6 +497,7 @@ const KNOWN_PROVIDERS: &[(&str, &str, bool)] = &[
     ("deepseek", "DeepSeek", true),
     ("groq", "Groq", true),
     ("mistral", "Mistral", true),
+    ("kimi", "Moonshot AI  (Kimi)", true),
     ("cohere", "Cohere", true),
     ("together", "Together AI", true),
     ("perplexity", "Perplexity", true),
