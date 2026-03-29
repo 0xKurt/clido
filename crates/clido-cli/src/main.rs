@@ -4,6 +4,8 @@ mod agent_setup;
 mod audit_cmd;
 mod checkpoint_cmd;
 mod cli;
+#[allow(dead_code)]
+pub(crate) mod command_registry;
 mod commit;
 mod config;
 mod doctor;
@@ -11,9 +13,13 @@ mod errors;
 mod git_context;
 pub(crate) mod image_input;
 mod index_cmd;
+#[allow(dead_code)]
+pub(crate) mod list_picker;
 mod memory_cmd;
 mod models;
 mod notify;
+#[allow(dead_code)]
+pub(crate) mod overlay;
 mod plan_cmd;
 mod pricing_cmd;
 mod profiles;
@@ -25,6 +31,8 @@ mod sessions;
 mod setup;
 mod spawn_tools;
 mod stats;
+#[allow(dead_code)]
+pub(crate) mod text_input;
 mod tui;
 mod ui;
 mod workflow;

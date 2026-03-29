@@ -46,6 +46,8 @@ use clido_index::RepoIndex;
 use clido_memory::MemoryStore;
 use clido_planner::{Complexity, Plan, PlanEditor, TaskStatus};
 
+use crate::overlay::{AppAction, ErrorOverlay, OverlayKeyResult, OverlayKind, OverlayStack};
+
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Truecolor accent for borders and highlights — avoids saturated ANSI blue.
@@ -53,177 +55,21 @@ const TUI_SOFT_ACCENT: Color = Color::Rgb(150, 200, 255);
 /// Selected row background in pickers and completion lists (muted slate).
 const TUI_SELECTION_BG: Color = Color::Rgb(52, 62, 78);
 
-/// Slash commands grouped by section: (section_label, [(cmd, description)])
-const SLASH_COMMAND_SECTIONS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "Session",
-        &[
-            ("/clear", "clear the conversation"),
-            ("/help", "show key bindings and all slash commands"),
-            ("/quit", "exit clido"),
-            ("/sessions", "list & resume recent sessions"),
-            ("/session", "show current session ID"),
-            (
-                "/search",
-                "search conversation history. Usage: /search <query>",
-            ),
-            ("/export", "save this conversation to a markdown file"),
-            (
-                "/init",
-                "reconfigure the current profile — opens in-TUI profile editor",
-            ),
-        ],
-    ),
-    (
-        "Settings",
-        &[
-            (
-                "/config",
-                "show all settings — provider, model, roles, agent, context",
-            ),
-            (
-                "/configure",
-                "change settings with natural language. Usage: /configure <intent>",
-            ),
-            (
-                "/settings",
-                "open settings editor — manage roles and default model",
-            ),
-            (
-                "/prompt-mode",
-                "show or set prompt enhancement mode. Usage: /prompt-mode [auto|off|status]",
-            ),
-            (
-                "/prompt-preview",
-                "preview the enhanced version of your next message before sending",
-            ),
-            (
-                "/prompt-rules",
-                "manage prompt enhancement rules. Usage: /prompt-rules [list|add <text>|remove <id>|reset]",
-            ),
-        ],
-    ),
-    (
-        "Git",
-        &[
-            ("/ship", "stage → commit → push. Usage: /ship [message]"),
-            (
-                "/save",
-                "stage → commit locally, no push. Usage: /save [message]",
-            ),
-            ("/pr", "create a pull request. Usage: /pr [title]"),
-            (
-                "/branch",
-                "create + switch to a new branch. Usage: /branch <name>",
-            ),
-            ("/undo", "undo last commit safely (confirm before reset)"),
-            (
-                "/rollback",
-                "restore to a checkpoint. Usage: /rollback [id]",
-            ),
-            (
-                "/sync",
-                "pull --rebase from upstream, resolve conflicts if needed",
-            ),
-        ],
-    ),
-    (
-        "Model",
-        &[
-            (
-                "/models",
-                "open interactive model picker (search, filter, favorites)",
-            ),
-            ("/model", "show or switch model. Usage: /model [model-name]"),
-            ("/fast", "switch to fast (cheap) model for this session"),
-            (
-                "/smart",
-                "switch to smart (powerful) model for this session",
-            ),
-            (
-                "/role",
-                "pick a role or switch with /role <name>  (opens picker if no name given)",
-            ),
-            ("/fav", "mark or unmark current model as a favorite"),
-            ("/reviewer", "show or toggle reviewer  (/reviewer on | off)"),
-        ],
-    ),
-    (
-        "Context",
-        &[
-            ("/cost", "show total cost for this session"),
-            ("/tokens", "show token usage for this session"),
-            (
-                "/compact",
-                "compress context window now (summarises history)",
-            ),
-            (
-                "/memory",
-                "search saved memories. Usage: /memory <query>  (no query = list recent)",
-            ),
-            ("/todo", "show the agent's current task list"),
-        ],
-    ),
-    (
-        "Plan",
-        &[
-            (
-                "/plan",
-                "show current plan, or: /plan <task> to have agent plan before executing",
-            ),
-            ("/plan edit", "open plan editor for the current plan"),
-            ("/plan save", "save current plan to .clido/plans/"),
-            ("/plan list", "list all saved plans"),
-        ],
-    ),
-    (
-        "Project",
-        &[
-            (
-                "/agents",
-                "show current agent configuration (main, worker, reviewer)",
-            ),
-            ("/profiles", "list all profiles with active model per slot"),
-            (
-                "/profile",
-                "open profile picker — switch, create, or edit profiles",
-            ),
-            ("/profile new", "create a new profile — opens an in-TUI wizard"),
-            (
-                "/profile edit",
-                "edit a profile in the TUI overview. Usage: /profile edit [name]",
-            ),
-            ("/check", "run diagnostics on current project"),
-            ("/rules", "show active project rules files (CLIDO.md)"),
-            (
-                "/image",
-                "attach an image to the next message. Usage: /image <path>",
-            ),
-            (
-                "/workdir",
-                "show or set working directory. Usage: /workdir [path]",
-            ),
-            ("/stop", "interrupt current run without sending a message"),
-            ("/copy", "copy to clipboard. Usage: /copy (last reply) | /copy <n> (last n exchanges) | /copy all"),
-            (
-                "/notify",
-                "toggle desktop notifications on/off. Usage: /notify [on|off]",
-            ),
-            (
-                "/index",
-                "show codebase index stats  (rebuild: clido index build)",
-            ),
-        ],
-    ),
-];
-
-/// Flat list of all slash commands derived from SLASH_COMMAND_SECTIONS.
-/// Used for autocomplete and command matching.
-fn slash_commands() -> Vec<(&'static str, &'static str)> {
-    SLASH_COMMAND_SECTIONS
-        .iter()
-        .flat_map(|(_, cmds)| cmds.iter().copied())
+/// Slash commands grouped by section — now delegates to command_registry.
+fn slash_command_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    crate::command_registry::commands_by_section()
+        .into_iter()
+        .map(|(section, cmds)| {
+            let pairs: Vec<(&'static str, &'static str)> =
+                cmds.into_iter().map(|c| (c.name, c.description)).collect();
+            (section, pairs)
+        })
         .collect()
+}
+
+/// Flat list of all slash commands — delegates to command_registry.
+fn slash_commands() -> Vec<(&'static str, &'static str)> {
+    crate::command_registry::flat_commands()
 }
 
 // ── Permission grant options ───────────────────────────────────────────────────
@@ -1317,6 +1163,8 @@ struct App {
     pending_perm: Option<PendingPerm>,
     /// Error modal: shown as overlay, dismissed with Enter/Esc/Space.
     pending_error: Option<String>,
+    /// Unified overlay stack (new system — ErrorOverlay, ReadOnlyOverlay, etc.)
+    overlay_stack: OverlayStack,
     prompt_tx: mpsc::UnboundedSender<String>,
     /// Channel to request session resume in agent_task.
     resume_tx: mpsc::UnboundedSender<String>,
@@ -1508,6 +1356,7 @@ impl App {
             spinner_tick: 0,
             pending_perm: None,
             pending_error: None,
+            overlay_stack: OverlayStack::new(),
             prompt_tx,
             resume_tx,
             model_switch_tx,
@@ -3089,6 +2938,120 @@ fn render(frame: &mut Frame, app: &mut App) {
                 .wrap(Wrap { trim: false }),
             popup_rect,
         );
+    }
+
+    // ── Overlay stack (new system) ───────────────────────────────────────────
+    for overlay in app.overlay_stack.iter() {
+        match overlay {
+            OverlayKind::Error(e) => {
+                let inner_w = input_area.width.saturating_sub(4) as usize;
+                let wrapped = word_wrap(&e.message, inner_w);
+                let popup_h = ((wrapped.len() as u16) + 4).min(area.height.saturating_sub(4));
+                let popup_rect = popup_above_input(input_area, popup_h, input_area.width);
+                let mut content: Vec<Line<'static>> = wrapped
+                    .into_iter()
+                    .map(|l| {
+                        Line::from(vec![Span::styled(
+                            format!("  {}", l),
+                            Style::default().fg(Color::White),
+                        )])
+                    })
+                    .collect();
+                content.push(Line::raw(""));
+                content.push(Line::from(vec![Span::styled(
+                    "  [ OK ]  (Enter / Esc / Space)",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                frame.render_widget(Clear, popup_rect);
+                frame.render_widget(
+                    Paragraph::new(content)
+                        .block(modal_block(&format!(" {} ", e.title), Color::Red)),
+                    popup_rect,
+                );
+            }
+            OverlayKind::ReadOnly(r) => {
+                let mut content: Vec<Line<'static>> = Vec::new();
+                if r.lines.is_empty() {
+                    content.push(Line::from(vec![Span::styled(
+                        "  (empty)".to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                } else {
+                    for (id, text) in &r.lines {
+                        if id.trim().is_empty() {
+                            content.push(Line::raw(""));
+                        } else {
+                            content.push(Line::from(vec![Span::styled(
+                                format!("  {}", id),
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            )]));
+                            content.push(Line::from(vec![Span::styled(
+                                format!("    {}", truncate_chars(text, 74)),
+                                Style::default().fg(Color::Gray),
+                            )]));
+                            content.push(Line::raw(""));
+                        }
+                    }
+                }
+                content.push(Line::raw(""));
+                content.push(Line::from(vec![Span::styled(
+                    "  [ Close ]  (Enter / Esc)".to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                let popup_h = ((content.len() as u16) + 2).min(area.height.saturating_sub(4));
+                let popup_rect = popup_above_input(input_area, popup_h, input_area.width);
+                frame.render_widget(Clear, popup_rect);
+                frame.render_widget(
+                    Paragraph::new(content)
+                        .block(modal_block(&format!(" {} ", r.title), Color::Cyan))
+                        .wrap(Wrap { trim: false }),
+                    popup_rect,
+                );
+            }
+            OverlayKind::Choice(c) => {
+                let mut content: Vec<Line<'static>> = Vec::new();
+                if !c.message.is_empty() {
+                    content.push(Line::from(vec![Span::styled(
+                        format!("  {}", c.message),
+                        Style::default().fg(Color::White),
+                    )]));
+                    content.push(Line::raw(""));
+                }
+                for (i, choice) in c.choices.iter().enumerate() {
+                    let marker = if i == c.selected { "▸ " } else { "  " };
+                    let style = if i == c.selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    content.push(Line::from(vec![Span::styled(
+                        format!("  {}{}", marker, choice.label),
+                        style,
+                    )]));
+                }
+                content.push(Line::raw(""));
+                content.push(Line::from(vec![Span::styled(
+                    "  ↑↓ Navigate  Enter Select  Esc Cancel",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                let popup_h = ((content.len() as u16) + 2).min(area.height.saturating_sub(4));
+                let popup_rect = popup_above_input(input_area, popup_h, input_area.width);
+                frame.render_widget(Clear, popup_rect);
+                frame.render_widget(
+                    Paragraph::new(content)
+                        .block(modal_block(&format!(" {} ", c.title), Color::Yellow)),
+                    popup_rect,
+                );
+            }
+        }
     }
 }
 
@@ -4699,7 +4662,7 @@ fn slash_completion_rows(input: &str) -> Vec<CompletionRow> {
     }
     let mut rows = Vec::new();
     let mut flat_idx = 0usize;
-    for (section, cmds) in SLASH_COMMAND_SECTIONS {
+    for (section, cmds) in slash_command_sections() {
         let matches: Vec<_> = cmds
             .iter()
             .filter(|(cmd, _)| cmd.starts_with(input))
@@ -4784,9 +4747,9 @@ fn execute_slash(app: &mut App, cmd: &str) {
                 "Queue              type while agent runs, sends on finish".into(),
             ));
             app.push(ChatLine::Info("".into()));
-            for (section, cmds) in SLASH_COMMAND_SECTIONS {
-                app.push(ChatLine::Section((*section).to_string()));
-                for (cmd, desc) in *cmds {
+            for (section, cmds) in slash_command_sections() {
+                app.push(ChatLine::Section(section.to_string()));
+                for (cmd, desc) in cmds {
                     app.push(ChatLine::Info(format!("{:<18} {}", cmd, desc)));
                 }
                 app.push(ChatLine::Info("".into()));
@@ -7999,6 +7962,41 @@ fn char_byte_pos_tui(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+// ── Overlay stack action handler ──────────────────────────────────────────────
+
+/// Process app-level actions returned by overlays.
+fn handle_app_action(app: &mut App, action: AppAction) {
+    match action {
+        AppAction::SwitchModel { model_id, save } => {
+            let _ = app.model_switch_tx.send(model_id.clone());
+            app.model = model_id;
+            if save {
+                // persist to config
+            }
+        }
+        AppAction::SwitchProfile { profile_name } => {
+            app.wants_profile_switch = Some(profile_name);
+            app.quit = true;
+        }
+        AppAction::ResumeSession { session_id } => {
+            let _ = app.resume_tx.send(session_id);
+        }
+        AppAction::GrantPermission(_grant) => {
+            // TODO: wire when permission overlay is migrated
+        }
+        AppAction::ShowError(msg) => {
+            app.overlay_stack
+                .push(OverlayKind::Error(ErrorOverlay::new(msg)));
+        }
+        AppAction::RunCommand(cmd) => {
+            execute_slash(app, &cmd);
+        }
+        AppAction::Quit => {
+            app.quit = true;
+        }
+    }
+}
+
 // ── Input handling ────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
@@ -8239,6 +8237,16 @@ fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
     if app.profile_overlay.is_some() {
         handle_profile_overlay_key(app, event);
         return;
+    }
+
+    // ── Overlay stack (new system) ───────────────────────────────────────────
+    match app.overlay_stack.handle_key(event) {
+        OverlayKeyResult::Consumed => return,
+        OverlayKeyResult::Action(action) => {
+            handle_app_action(app, action);
+            return;
+        }
+        OverlayKeyResult::NotHandled | OverlayKeyResult::NoOverlay => {}
     }
 
     // ── Error modal (dismiss with Enter / Esc / Space) ───────────────────────
@@ -10192,6 +10200,8 @@ async fn event_loop(
                         text = text.replace("\r\n", "\n").replace('\r', "\n");
                         if text.is_empty() {
                             // nothing to do
+                        } else if app.overlay_stack.handle_paste(&text) {
+                            // Overlay stack consumed the paste
                         } else if let Some(ref mut ov) = app.profile_overlay {
                             // Route paste into the active profile overlay text input.
                             // Provider/model picker steps don't accept free-text paste.
@@ -10861,16 +10871,12 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_derived_matches_section_count() {
-        // slash_commands() must enumerate every command across all sections.
-        let section_total: usize = SLASH_COMMAND_SECTIONS
-            .iter()
-            .map(|(_, cmds)| cmds.len())
-            .sum();
+    fn slash_commands_derived_matches_registry_count() {
+        // slash_commands() must match the command_registry size.
         assert_eq!(
             slash_commands().len(),
-            section_total,
-            "slash_commands() and SLASH_COMMAND_SECTIONS are out of sync"
+            crate::command_registry::COMMANDS.len(),
+            "slash_commands() and command_registry::COMMANDS are out of sync"
         );
     }
 
