@@ -208,6 +208,23 @@ pub fn assemble(
         });
     }
 
+    // Never split between an Assistant(ToolUse) and its User(ToolResult).
+    // If the kept tail starts with a User message containing ToolResult blocks,
+    // back up to include the preceding Assistant message.
+    while start > 0 && start < messages.len() {
+        let msg = &messages[start];
+        if msg.role == clido_core::Role::User
+            && msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
     let tail: Vec<Message> = messages[start..].to_vec();
     let compacted_tokens =
         system_prompt_tokens + placeholder_tokens + estimate_tokens_messages(&tail);

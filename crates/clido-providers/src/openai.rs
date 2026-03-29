@@ -576,6 +576,15 @@ fn message_to_content_blocks(message: &serde_json::Value) -> Result<Vec<ContentB
                     });
                 }
             }
+            // Some OpenAI-compatible APIs return reasoning blocks in content
+        }
+    }
+    // Some providers (e.g. Kimi) return reasoning as a separate field
+    if let Some(reasoning) = message["reasoning_content"].as_str() {
+        if !reasoning.is_empty() {
+            blocks.push(ContentBlock::Thinking {
+                thinking: reasoning.to_string(),
+            });
         }
     }
     if let Some(tool_calls) = message["tool_calls"].as_array() {

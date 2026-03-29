@@ -1718,6 +1718,21 @@ async fn compact_with_summary(
         start = i;
     }
 
+    // Never split between an Assistant(ToolUse) and its User(ToolResult).
+    while start > 0 && start < msgs.len() {
+        let msg = &msgs[start];
+        if msg.role == Role::User
+            && msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
     // Nothing to compact (entire history fits in tail) — let assemble() handle it.
     if start == 0 {
         return assemble(

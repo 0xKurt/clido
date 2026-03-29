@@ -9236,19 +9236,28 @@ async fn agent_task(
                             }
                         }
                         clido_storage::SessionLine::AssistantMessage { content } => {
-                            let text: String = content
-                                .iter()
-                                .filter_map(|c| {
-                                    if c.get("type").and_then(|v| v.as_str()) == Some("text") {
-                                        c.get("text")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string())
-                                    } else {
-                                        None
+                            let mut text_parts: Vec<String> = Vec::new();
+                            for c in content {
+                                match c.get("type").and_then(|v| v.as_str()) {
+                                    Some("text") => {
+                                        if let Some(s) = c.get("text").and_then(|v| v.as_str()) {
+                                            text_parts.push(s.to_string());
+                                        }
                                     }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("");
+                                    Some("tool_use") => {
+                                        let name = c
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("tool");
+                                        text_parts.push(format!("🔧 {name}"));
+                                    }
+                                    Some("thinking") => {
+                                        text_parts.push("💭 (thinking)".to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let text = text_parts.join("\n");
                             if !text.trim().is_empty() {
                                 msgs.push(("assistant".to_string(), text));
                             }
@@ -9639,22 +9648,30 @@ async fn agent_task(
                                     }
                                 }
                                 clido_storage::SessionLine::AssistantMessage { content } => {
-                                    // Concatenate all text blocks into one string.
-                                    let text: String = content
-                                        .iter()
-                                        .filter_map(|c| {
-                                            if c.get("type").and_then(|v| v.as_str())
-                                                == Some("text")
-                                            {
-                                                c.get("text")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| s.to_string())
-                                            } else {
-                                                None
+                                    let mut text_parts: Vec<String> = Vec::new();
+                                    for c in content {
+                                        match c.get("type").and_then(|v| v.as_str()) {
+                                            Some("text") => {
+                                                if let Some(s) =
+                                                    c.get("text").and_then(|v| v.as_str())
+                                                {
+                                                    text_parts.push(s.to_string());
+                                                }
                                             }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("");
+                                            Some("tool_use") => {
+                                                let name = c
+                                                    .get("name")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("tool");
+                                                text_parts.push(format!("🔧 {name}"));
+                                            }
+                                            Some("thinking") => {
+                                                text_parts.push("💭 (thinking)".to_string());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    let text = text_parts.join("\n");
                                     if !text.trim().is_empty() {
                                         msgs.push(("assistant".to_string(), text));
                                     }
