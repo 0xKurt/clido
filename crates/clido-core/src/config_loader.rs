@@ -311,6 +311,14 @@ impl LoadedConfig {
             "kimi-code",
             "local",
             "alibabacloud",
+            "deepseek",
+            "groq",
+            "cerebras",
+            "togetherai",
+            "fireworks",
+            "xai",
+            "perplexity",
+            "gemini",
         ];
         if valid.contains(&provider) {
             Ok(())
@@ -820,6 +828,14 @@ mod tests {
             "minimax",
             "local",
             "alibabacloud",
+            "deepseek",
+            "groq",
+            "cerebras",
+            "togetherai",
+            "fireworks",
+            "xai",
+            "perplexity",
+            "gemini",
         ] {
             assert!(
                 LoadedConfig::validate_provider(p).is_ok(),
@@ -1427,6 +1443,14 @@ api_key = "sk-openai-worker"
             "kimi-code",
             "local",
             "alibabacloud",
+            "deepseek",
+            "groq",
+            "cerebras",
+            "togetherai",
+            "fireworks",
+            "xai",
+            "perplexity",
+            "gemini",
         ] {
             assert!(
                 LoadedConfig::validate_provider(p).is_ok(),

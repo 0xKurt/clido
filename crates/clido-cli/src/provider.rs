@@ -64,6 +64,14 @@ pub fn default_api_key_env(provider: &str) -> &'static str {
         "kimi" => "MOONSHOT_API_KEY",
         "kimi-code" => "KIMI_CODE_API_KEY",
         "alibabacloud" => "DASHSCOPE_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "cerebras" => "CEREBRAS_API_KEY",
+        "togetherai" => "TOGETHER_API_KEY",
+        "fireworks" => "FIREWORKS_API_KEY",
+        "xai" => "XAI_API_KEY",
+        "perplexity" => "PERPLEXITY_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
         _ => "",
     }
 }

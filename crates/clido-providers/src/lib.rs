@@ -12,6 +12,24 @@ pub use provider::{ModelEntry, ModelProvider, StreamEvent};
 
 use clido_core::{ClidoError, Result};
 
+/// Resolve common model aliases to canonical model IDs.
+/// Returns the original string unchanged if no alias matches.
+pub fn resolve_model_alias(model: &str) -> &str {
+    match model {
+        "sonnet" => "claude-sonnet-4-5",
+        "opus" => "claude-opus-4-6",
+        "haiku" => "claude-haiku-4-5",
+        "4o" => "gpt-4o",
+        "4o-mini" => "gpt-4o-mini",
+        "flash" => "gemini-2.5-flash",
+        "deepseek" => "deepseek-chat",
+        "r1" => "deepseek-reasoner",
+        "grok" => "grok-3-beta",
+        "sonar" => "sonar-pro",
+        other => other,
+    }
+}
+
 /// Build a provider from profile name, API key, model, and optional base URL.
 /// Used by the CLI after resolving profile and reading API key from env.
 pub fn build_provider(
@@ -20,6 +38,7 @@ pub fn build_provider(
     model: String,
     base_url: Option<&str>,
 ) -> Result<Arc<dyn ModelProvider>> {
+    let model = resolve_model_alias(&model).to_string();
     match provider_name {
         "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model))),
         "openrouter" => Ok(Arc::new(OpenAICompatProvider::new_openrouter(
@@ -30,6 +49,14 @@ pub fn build_provider(
         "minimax" => Ok(Arc::new(OpenAICompatProvider::new_minimax(api_key, model))),
         "kimi" => Ok(Arc::new(OpenAICompatProvider::new_kimi(api_key, model))),
         "kimi-code" => Ok(Arc::new(OpenAICompatProvider::new_kimi_code(api_key, model))),
+        "deepseek" => Ok(Arc::new(OpenAICompatProvider::new_deepseek(api_key, model))),
+        "groq" => Ok(Arc::new(OpenAICompatProvider::new_groq(api_key, model))),
+        "cerebras" => Ok(Arc::new(OpenAICompatProvider::new_cerebras(api_key, model))),
+        "togetherai" => Ok(Arc::new(OpenAICompatProvider::new_togetherai(api_key, model))),
+        "fireworks" => Ok(Arc::new(OpenAICompatProvider::new_fireworks(api_key, model))),
+        "xai" => Ok(Arc::new(OpenAICompatProvider::new_xai(api_key, model))),
+        "perplexity" => Ok(Arc::new(OpenAICompatProvider::new_perplexity(api_key, model))),
+        "gemini" => Ok(Arc::new(OpenAICompatProvider::new_gemini(api_key, model))),
         "local" => {
             let url = base_url.unwrap_or("http://localhost:11434").to_string();
             Ok(Arc::new(OpenAICompatProvider::new(
@@ -51,7 +78,7 @@ pub fn build_provider(
             )))
         }
         p => Err(ClidoError::Config(format!(
-            "Provider '{}' is not supported. Available: anthropic, openrouter, openai, mistral, minimax, kimi, kimi-code, local, alibabacloud.",
+            "Provider '{}' is not supported. Available: anthropic, openrouter, openai, mistral, minimax, kimi, kimi-code, deepseek, groq, cerebras, togetherai, fireworks, xai, perplexity, gemini, local, alibabacloud.",
             p
         ))),
     }
@@ -190,6 +217,139 @@ mod tests {
             "sk-fake".to_string(),
             "qwen-turbo".to_string(),
             Some("https://custom.dashscope.com/v1"),
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_deepseek_returns_ok() {
+        let p = build_provider(
+            "deepseek",
+            "sk-ds-fake".to_string(),
+            "deepseek-chat".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_groq_returns_ok() {
+        let p = build_provider(
+            "groq",
+            "gsk_fake".to_string(),
+            "llama-3.3-70b-versatile".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_cerebras_returns_ok() {
+        let p = build_provider(
+            "cerebras",
+            "csk-fake".to_string(),
+            "llama-3.3-70b".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_togetherai_returns_ok() {
+        let p = build_provider(
+            "togetherai",
+            "tok-fake".to_string(),
+            "meta-llama/Llama-3-70b-chat-hf".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_fireworks_returns_ok() {
+        let p = build_provider(
+            "fireworks",
+            "fw-fake".to_string(),
+            "accounts/fireworks/models/llama-v3p1-70b-instruct".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_xai_returns_ok() {
+        let p = build_provider(
+            "xai",
+            "xai-fake".to_string(),
+            "grok-3-beta".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_perplexity_returns_ok() {
+        let p = build_provider(
+            "perplexity",
+            "pplx-fake".to_string(),
+            "sonar-pro".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn build_provider_gemini_returns_ok() {
+        let p = build_provider(
+            "gemini",
+            "AIzaSy-fake".to_string(),
+            "gemini-2.5-pro-exp-03-25".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(Arc::strong_count(&p) >= 1);
+    }
+
+    #[test]
+    fn resolve_model_alias_known() {
+        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-5");
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-6");
+        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_model_alias("4o"), "gpt-4o");
+        assert_eq!(resolve_model_alias("4o-mini"), "gpt-4o-mini");
+        assert_eq!(resolve_model_alias("flash"), "gemini-2.5-flash");
+        assert_eq!(resolve_model_alias("deepseek"), "deepseek-chat");
+        assert_eq!(resolve_model_alias("r1"), "deepseek-reasoner");
+        assert_eq!(resolve_model_alias("grok"), "grok-3-beta");
+        assert_eq!(resolve_model_alias("sonar"), "sonar-pro");
+    }
+
+    #[test]
+    fn resolve_model_alias_passthrough() {
+        assert_eq!(
+            resolve_model_alias("gpt-4o-2024-11-20"),
+            "gpt-4o-2024-11-20"
+        );
+        assert_eq!(resolve_model_alias("claude-opus-4-6"), "claude-opus-4-6");
+        assert_eq!(resolve_model_alias(""), "");
+    }
+
+    #[test]
+    fn build_provider_alias_is_resolved() {
+        // "sonnet" alias should produce a working provider (not error)
+        let p = build_provider(
+            "anthropic",
+            "sk-ant-fake".to_string(),
+            "sonnet".to_string(),
+            None,
         )
         .unwrap();
         assert!(Arc::strong_count(&p) >= 1);

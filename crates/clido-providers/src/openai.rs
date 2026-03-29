@@ -104,6 +104,81 @@ impl OpenAICompatProvider {
         )
     }
 
+    /// DeepSeek: OpenAI-compatible API.
+    pub fn new_deepseek(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.deepseek.com/v1".to_string(),
+            vec![],
+        )
+    }
+
+    /// Groq: fast inference, OpenAI-compatible API.
+    pub fn new_groq(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.groq.com/openai/v1".to_string(),
+            vec![],
+        )
+    }
+
+    /// Cerebras: OpenAI-compatible API.
+    pub fn new_cerebras(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.cerebras.ai/v1".to_string(),
+            vec![],
+        )
+    }
+
+    /// Together AI: OpenAI-compatible API.
+    pub fn new_togetherai(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.together.xyz/v1".to_string(),
+            vec![],
+        )
+    }
+
+    /// Fireworks AI: OpenAI-compatible API.
+    pub fn new_fireworks(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.fireworks.ai/inference/v1".to_string(),
+            vec![],
+        )
+    }
+
+    /// xAI (Grok): OpenAI-compatible API.
+    pub fn new_xai(api_key: String, model: String) -> Self {
+        Self::new(api_key, model, "https://api.x.ai/v1".to_string(), vec![])
+    }
+
+    /// Perplexity: OpenAI-compatible API.
+    pub fn new_perplexity(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://api.perplexity.ai".to_string(),
+            vec![],
+        )
+    }
+
+    /// Google Gemini: OpenAI-compatible API.
+    pub fn new_gemini(api_key: String, model: String) -> Self {
+        Self::new(
+            api_key,
+            model,
+            "https://generativelanguage.googleapis.com/v1beta/openai/".to_string(),
+            vec![],
+        )
+    }
+
     fn request_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{}/chat/completions", base)

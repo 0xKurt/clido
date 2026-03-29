@@ -36,7 +36,7 @@ const PROFILE_NAME_PREFIX: &str = "  Profile name: ";
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
 /// (display name, internal provider ID, description)
-const PROVIDERS: [(&str, &str, &str); 9] = [
+const PROVIDERS: [(&str, &str, &str); 17] = [
     (
         "OpenRouter",
         "openrouter",
@@ -61,6 +61,22 @@ const PROVIDERS: [(&str, &str, &str); 9] = [
         "alibabacloud",
         "Qwen models — dashscope.aliyuncs.com",
     ),
+    ("DeepSeek", "deepseek", "DeepSeek models — api.deepseek.com"),
+    ("Groq", "groq", "Fast inference — groq.com"),
+    ("Cerebras", "cerebras", "Fast inference — cerebras.ai"),
+    ("Together AI", "togetherai", "Open models — together.xyz"),
+    (
+        "Fireworks AI",
+        "fireworks",
+        "Fast open models — fireworks.ai",
+    ),
+    ("xAI (Grok)", "xai", "Grok models — x.ai"),
+    ("Perplexity", "perplexity", "Sonar models — perplexity.ai"),
+    (
+        "Google Gemini",
+        "gemini",
+        "Gemini models — gemini.google.com",
+    ),
     (
         "Local / Ollama",
         "local",
@@ -68,7 +84,7 @@ const PROVIDERS: [(&str, &str, &str); 9] = [
     ),
 ];
 
-const PROVIDER_KEY_ENV: [&str; 9] = [
+const PROVIDER_KEY_ENV: [&str; 17] = [
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -77,6 +93,14 @@ const PROVIDER_KEY_ENV: [&str; 9] = [
     "MOONSHOT_API_KEY",
     "KIMI_CODE_API_KEY",
     "DASHSCOPE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "CEREBRAS_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "XAI_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "GEMINI_API_KEY",
     "", // local: no key
 ];
 
@@ -3001,9 +3025,46 @@ pub fn anonymize_key(key: &str) -> String {
 
 // ── Public entry points ───────────────────────────────────────────────────────
 
+/// Detect the first API key present in the environment and return `(provider_id, env_var_name)`.
+/// Used during first-run to pre-select the provider and skip the credential entry step.
+pub fn detect_provider_from_env() -> Option<(&'static str, &'static str)> {
+    const CHECKS: &[(&str, &str)] = &[
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
+        ("deepseek", "DEEPSEEK_API_KEY"),
+        ("groq", "GROQ_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+        ("xai", "XAI_API_KEY"),
+        ("mistral", "MISTRAL_API_KEY"),
+        ("togetherai", "TOGETHER_API_KEY"),
+        ("perplexity", "PERPLEXITY_API_KEY"),
+    ];
+    for &(provider_id, env_var) in CHECKS {
+        if std::env::var(env_var)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
+            return Some((provider_id, env_var));
+        }
+    }
+    None
+}
+
 /// First-run: no config and TTY → run TUI setup, write config, continue.
+/// If an API key is already in the environment, pre-select that provider and
+/// skip the credential entry step so the user only needs to pick a model.
 pub async fn run_first_run_setup() -> Result<(), anyhow::Error> {
-    write_setup_config(false, None).await
+    let pre_fill = detect_provider_from_env().map(|(provider_id, env_var)| SetupPreFill {
+        provider: provider_id.to_string(),
+        api_key: std::env::var(env_var).unwrap_or_default(),
+        model: String::new(),
+        roles: Vec::new(),
+        profile_name: String::new(),
+        is_new_profile: false,
+        saved_api_keys: Vec::new(),
+    });
+    write_setup_config(false, pre_fill).await
 }
 
 /// `clido init` subcommand.
@@ -3364,7 +3425,7 @@ mod tests {
     #[test]
     fn build_toml_local_provider() {
         let mut s = SetupState::new();
-        s.provider = 8; // Local / Ollama
+        s.provider = 16; // Local / Ollama
         s.model = "llama3.2".to_string();
         s.credential.clear();
         let toml = build_toml(&s);
@@ -3377,7 +3438,7 @@ mod tests {
     #[test]
     fn build_toml_local_provider_custom_url() {
         let mut s = SetupState::new();
-        s.provider = 8;
+        s.provider = 16; // Local / Ollama
         s.model = "mistral".to_string();
         s.credential = "http://127.0.0.1:8080".to_string();
         let toml = build_toml(&s);
@@ -3458,7 +3519,7 @@ mod tests {
     #[test]
     fn setup_state_is_local() {
         let mut s = SetupState::new();
-        s.provider = 8; // Local / Ollama is index 8
+        s.provider = 16; // Local / Ollama is index 16
         assert!(s.is_local());
         s.provider = 0;
         assert!(!s.is_local());
@@ -3583,7 +3644,7 @@ mod tests {
         s.model = "claude-sonnet-4-5".to_string();
         s.credential = "sk-ant-key".to_string();
         s.configure_worker = true;
-        s.worker_provider = 8; // Local
+        s.worker_provider = 16; // Local
         s.worker_model = "llama3.2".to_string();
         s.worker_credential = "http://127.0.0.1:8080".to_string();
         let toml = build_toml(&s);

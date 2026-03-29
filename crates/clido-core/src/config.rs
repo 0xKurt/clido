@@ -225,6 +225,16 @@ pub enum ProviderType {
     #[serde(rename = "kimi-code")]
     KimiCode,
     Alibaba,
+    DeepSeek,
+    Groq,
+    Cerebras,
+    #[serde(rename = "togetherai")]
+    TogetherAI,
+    Fireworks,
+    #[serde(rename = "xai")]
+    XAI,
+    Perplexity,
+    Gemini,
     Local,
 }
 
