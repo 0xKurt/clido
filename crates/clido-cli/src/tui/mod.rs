@@ -459,6 +459,15 @@ pub(super) struct App {
     pub(super) prompt_preview_text: Option<String>,
     /// Max budget for the session (from config), shown in header.
     pub(super) max_budget_usd: Option<f64>,
+
+    /// Rate-limit auto-resume: when the agent hits a rate limit with a known
+    /// retry_after, we set a timer. When it expires the agent is automatically
+    /// sent a "continue" message so it can pick up where it left off.
+    /// `None` means no auto-resume is pending.
+    pub(super) rate_limit_resume_at: Option<std::time::Instant>,
+    /// Whether the user has cancelled the auto-resume (Escape while waiting).
+    pub(super) rate_limit_cancelled: bool,
+
     /// Resolved API key for the active profile — used for live model fetching.
     pub(super) api_key: String,
     /// Optional custom base URL for the active profile's provider.
@@ -561,6 +570,8 @@ impl App {
             prompt_rules: PromptRules::default(),
             prompt_preview_text: None,
             max_budget_usd: budget,
+            rate_limit_resume_at: None,
+            rate_limit_cancelled: false,
             api_key,
             base_url,
             models_loading: false,
@@ -614,6 +625,10 @@ impl App {
     }
 
     pub(super) fn send_now(&mut self, text: String) {
+        // Cancel any pending rate-limit auto-resume — user is taking manual action.
+        self.rate_limit_resume_at = None;
+        self.rate_limit_cancelled = false;
+
         // If a pending image was attached via /image, publish it to the shared image_state
         // so agent_task can prepend an Image ContentBlock to this user message.
         if let Some(img) = self.pending_image.take() {

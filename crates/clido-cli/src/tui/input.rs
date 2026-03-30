@@ -1503,12 +1503,20 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
     }
 
     match (event.modifiers, event.code) {
-        // Esc: clear the input field.
+        // Esc: cancel rate-limit auto-resume if pending, otherwise clear input.
         (_, Esc) => {
-            app.text_input.text.clear();
-            app.text_input.cursor = 0;
-            app.selected_cmd = None;
-            app.text_input.history_idx = None;
+            if app.rate_limit_resume_at.is_some() && !app.rate_limit_cancelled {
+                app.rate_limit_cancelled = true;
+                app.rate_limit_resume_at = None;
+                app.push(ChatLine::Info(
+                    "  ✗ Auto-resume cancelled. Use /profile <name> to switch provider or just type to continue manually.".into(),
+                ));
+            } else {
+                app.text_input.text.clear();
+                app.text_input.cursor = 0;
+                app.selected_cmd = None;
+                app.text_input.history_idx = None;
+            }
         }
         // Ctrl+Enter: interrupt current run and send immediately.
         (Km::CONTROL, Enter) => app.force_send(),

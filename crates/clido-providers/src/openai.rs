@@ -301,7 +301,7 @@ impl OpenAICompatProvider {
 
                 // Subscription/quota limits have long reset times (>5min) or
                 // specific error messages about quotas/subscriptions.
-                let is_subscription = retry_after_secs.map_or(false, |s| s > 300)
+                let is_subscription = retry_after_secs.is_some_and(|s| s > 300)
                     || body.contains("quota")
                     || body.contains("subscription")
                     || body.contains("limit exceeded")
@@ -359,6 +359,29 @@ impl OpenAICompatProvider {
                 .text()
                 .await
                 .map_err(|e| ClidoError::Provider(e.to_string()))?;
+
+            // 402 Payment Required or insufficient credits/balance in 4xx body
+            if status.as_u16() == 402 || {
+                let lower = text.to_lowercase();
+                status.is_client_error()
+                    && (lower.contains("insufficient")
+                        || lower.contains("balance")
+                        || lower.contains("credits")
+                        || lower.contains("payment")
+                        || lower.contains("billing")
+                        || lower.contains("exceeded your current usage"))
+            } {
+                let preview: String = text.chars().take(300).collect();
+                return Err(ClidoError::RateLimited {
+                    message: format!(
+                        "Insufficient credits or payment required ({}): {}",
+                        status.as_u16(),
+                        preview
+                    ),
+                    retry_after_secs: None,
+                    is_subscription_limit: true,
+                });
+            }
 
             if status.is_server_error() {
                 server_error_attempts += 1;
@@ -757,7 +780,7 @@ impl ModelProvider for OpenAICompatProvider {
             let preview: String = text.chars().take(300).collect();
             if status.as_u16() == 429 {
                 let lower = preview.to_lowercase();
-                let is_sub = retry_after.map_or(false, |s| s > 300)
+                let is_sub = retry_after.is_some_and(|s| s > 300)
                     || lower.contains("quota")
                     || lower.contains("subscription")
                     || lower.contains("limit exceeded")

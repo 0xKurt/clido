@@ -152,7 +152,7 @@ impl AnthropicProvider {
                 let body = res.text().await.unwrap_or_default();
 
                 // Subscription/quota limits have long reset times or specific error text.
-                let is_subscription = retry_after_secs.map_or(false, |s| s > 300)
+                let is_subscription = retry_after_secs.is_some_and(|s| s > 300)
                     || body.contains("quota")
                     || body.contains("subscription")
                     || body.contains("limit exceeded")
@@ -209,6 +209,29 @@ impl AnthropicProvider {
                 .text()
                 .await
                 .map_err(|e| ClidoError::Provider(e.to_string()))?;
+
+            // 402 Payment Required or insufficient credits/balance in 4xx body
+            if status.as_u16() == 402 || {
+                let lower = text.to_lowercase();
+                status.is_client_error()
+                    && (lower.contains("insufficient")
+                        || lower.contains("balance")
+                        || lower.contains("credits")
+                        || lower.contains("payment")
+                        || lower.contains("billing")
+                        || lower.contains("exceeded your current usage"))
+            } {
+                let preview: String = text.chars().take(300).collect();
+                return Err(ClidoError::RateLimited {
+                    message: format!(
+                        "Insufficient credits or payment required ({}): {}",
+                        status.as_u16(),
+                        preview
+                    ),
+                    retry_after_secs: None,
+                    is_subscription_limit: true,
+                });
+            }
 
             if status.is_server_error() {
                 server_error_attempts += 1;
@@ -463,6 +486,26 @@ fn parse_anthropic_sse(
                 if line.is_empty() {
                     // Blank line = end of SSE event; process event + data.
                     if !data_buf.is_empty() {
+                        // Handle Anthropic streaming error events (rate limit, overload, etc.)
+                        if event_type == "error" {
+                            let msg = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data_buf) {
+                                let err_type = json["error"]["type"].as_str().unwrap_or("unknown");
+                                let err_msg = json["error"]["message"].as_str().unwrap_or(&data_buf);
+                                if err_type == "rate_limit_error" || err_type == "overloaded_error" {
+                                    let _ = tx.send(Err(ClidoError::RateLimited {
+                                        message: format!("streaming {}: {}", err_type, err_msg),
+                                        retry_after_secs: None,
+                                        is_subscription_limit: false,
+                                    })).await;
+                                    return;
+                                }
+                                format!("streaming error ({}): {}", err_type, err_msg)
+                            } else {
+                                format!("streaming error: {}", data_buf)
+                            };
+                            let _ = tx.send(Err(ClidoError::Provider(msg))).await;
+                            return;
+                        }
                         if let Some(events) =
                             decode_anthropic_event(&event_type, &data_buf, &mut index_to_id)
                         {
@@ -954,7 +997,7 @@ impl ModelProvider for AnthropicProvider {
             let text = response.text().await.unwrap_or_default();
             if status.as_u16() == 429 {
                 let lower = text.to_lowercase();
-                let is_sub = retry_after.map_or(false, |s| s > 300)
+                let is_sub = retry_after.is_some_and(|s| s > 300)
                     || lower.contains("quota")
                     || lower.contains("subscription")
                     || lower.contains("limit exceeded")

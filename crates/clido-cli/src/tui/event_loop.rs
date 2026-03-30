@@ -1548,6 +1548,22 @@ pub(super) async fn event_loop(
                         ));
                     }
                 }
+                // Auto-resume after rate limit: when the timer expires and user
+                // hasn't cancelled, send a "continue" message to the agent.
+                if let Some(resume_at) = app.rate_limit_resume_at {
+                    if !app.rate_limit_cancelled {
+                        dirty = true; // keep redrawing to update countdown
+                        if std::time::Instant::now() >= resume_at && !app.busy {
+                            app.rate_limit_resume_at = None;
+                            app.push(ChatLine::Info(
+                                "  ▶ Rate limit reset — resuming automatically…".into(),
+                            ));
+                            app.send_silent(
+                                "continue where you left off — you were interrupted by a rate limit, pick up from where you stopped".to_string(),
+                            );
+                        }
+                    }
+                }
             }
             maybe = crossterm_events.next() => {
                 dirty = true;
@@ -1809,13 +1825,26 @@ pub(super) async fn event_loop(
                             app.push(ChatLine::Info(format!(
                                 "    {message}"
                             )));
-                            app.push(ChatLine::Info(
-                                "    Tip: use /profile <name> to switch to another provider".into()
-                            ));
                         } else {
                             app.push(ChatLine::Info(format!(
                                 "  ⚠ Rate limited — {reset_info}. {message}"
                             )));
+                        }
+
+                        // Auto-resume: if we know the reset time, schedule automatic
+                        // continuation. The user can press Escape to cancel.
+                        if let Some(secs) = retry_after_secs {
+                            let resume_at = std::time::Instant::now()
+                                + std::time::Duration::from_secs(secs + 5); // +5s buffer
+                            app.rate_limit_resume_at = Some(resume_at);
+                            app.rate_limit_cancelled = false;
+                            app.push(ChatLine::Info(
+                                "    ⏳ Will auto-resume when limit resets. Press Esc to cancel.".into()
+                            ));
+                        } else {
+                            app.push(ChatLine::Info(
+                                "    Tip: use /profile <name> to switch to another provider".into()
+                            ));
                         }
                         app.on_agent_done();
                     }

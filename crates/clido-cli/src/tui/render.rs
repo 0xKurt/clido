@@ -438,6 +438,35 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
                 input_area.y + 1 + cursor_row.min(max_visible_content_rows as u16 - 1),
             ));
         }
+    } else if app.rate_limit_resume_at.is_some() && !app.rate_limit_cancelled {
+        // Show countdown to auto-resume after rate limit
+        let resume_at = app.rate_limit_resume_at.unwrap();
+        let remaining = resume_at.saturating_duration_since(std::time::Instant::now());
+        let secs = remaining.as_secs();
+        let countdown = if secs >= 3600 {
+            format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        } else if secs >= 60 {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{}s", secs)
+        };
+        let title_line = Line::from(vec![
+            Span::styled("⏳ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("Auto-resume in {countdown}  (Esc=cancel  /profile=switch provider)"),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]);
+        let block = Block::default()
+            .title(title_line)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let para = Paragraph::new(input_para_lines).block(block);
+        frame.render_widget(para, input_area);
+        frame.set_cursor_position((
+            input_area.x + 2 + cursor_col,
+            input_area.y + 1 + cursor_row.min(max_visible_content_rows as u16 - 1),
+        ));
     } else {
         let idle_title = Line::from(vec![Span::styled(
             if is_multiline {
