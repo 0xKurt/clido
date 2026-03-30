@@ -357,7 +357,9 @@ mod tests {
         let file_a = tmp.path().join("restore_test.txt");
         write_file(&file_a, "original content");
 
-        let ck = store.create(None, true, std::slice::from_ref(&file_a)).unwrap();
+        let ck = store
+            .create(None, true, std::slice::from_ref(&file_a))
+            .unwrap();
 
         // Modify the file.
         write_file(&file_a, "modified content");
@@ -378,8 +380,12 @@ mod tests {
         let file_a = tmp.path().join("dedup.txt");
         write_file(&file_a, "same content");
 
-        let ck1 = store.create(None, true, std::slice::from_ref(&file_a)).unwrap();
-        let ck2 = store.create(None, true, std::slice::from_ref(&file_a)).unwrap();
+        let ck1 = store
+            .create(None, true, std::slice::from_ref(&file_a))
+            .unwrap();
+        let ck2 = store
+            .create(None, true, std::slice::from_ref(&file_a))
+            .unwrap();
 
         // Both checkpoints reference the same hash.
         assert_eq!(ck1.files[0].content_hash, ck2.files[0].content_hash);
@@ -408,7 +414,9 @@ mod tests {
         let file_a = tmp.path().join("diff_test.txt");
         write_file(&file_a, "before");
 
-        let ck = store.create(None, false, std::slice::from_ref(&file_a)).unwrap();
+        let ck = store
+            .create(None, false, std::slice::from_ref(&file_a))
+            .unwrap();
 
         write_file(&file_a, "after");
 
@@ -516,7 +524,9 @@ mod tests {
         let store = CheckpointStore::new(session_dir);
         let file_a = tmp.path().join("to_be_deleted.txt");
         write_file(&file_a, "original");
-        let ck = store.create(None, false, std::slice::from_ref(&file_a)).unwrap();
+        let ck = store
+            .create(None, false, std::slice::from_ref(&file_a))
+            .unwrap();
         // Delete the file
         fs::remove_file(&file_a).unwrap();
         let diffs = store.diff_since(&ck.id).unwrap();

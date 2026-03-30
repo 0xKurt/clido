@@ -576,7 +576,9 @@ fn build_registry(
         })
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
     // Block the config file from all tool access so its contents never leave the local system.
-    let blocked = clido_core::global_config_path().into_iter().collect::<Vec<_>>();
+    let blocked = clido_core::global_config_path()
+        .into_iter()
+        .collect::<Vec<_>>();
     let sandbox = cli.sandbox;
     let (mut registry, mut todo_store) =
         default_registry_with_todo_store(workspace_root.to_path_buf(), blocked, sandbox);

@@ -227,18 +227,27 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         if let (Some(anchor), Some(end)) = (app.selection_anchor, app.selection_end) {
             let sel_start_y = anchor.1.min(end.1);
             let sel_end_y = anchor.1.max(end.1);
-            let (sel_start_x, sel_end_x) = if anchor.1 < end.1 || (anchor.1 == end.1 && anchor.0 <= end.0) {
-                (anchor.0, end.0)
-            } else {
-                (end.0, anchor.0)
-            };
+            let (sel_start_x, sel_end_x) =
+                if anchor.1 < end.1 || (anchor.1 == end.1 && anchor.0 <= end.0) {
+                    (anchor.0, end.0)
+                } else {
+                    (end.0, anchor.0)
+                };
             let buf = frame.buffer_mut();
             for y in sel_start_y..=sel_end_y {
                 if y < chat_area.y || y >= chat_area.y + chat_area.height {
                     continue;
                 }
-                let x_start = if y == sel_start_y { sel_start_x.max(chat_area.x) } else { chat_area.x };
-                let x_end = if y == sel_end_y { sel_end_x.min(chat_area.x + chat_area.width) } else { chat_area.x + chat_area.width };
+                let x_start = if y == sel_start_y {
+                    sel_start_x.max(chat_area.x)
+                } else {
+                    chat_area.x
+                };
+                let x_end = if y == sel_end_y {
+                    sel_end_x.min(chat_area.x + chat_area.width)
+                } else {
+                    chat_area.x + chat_area.width
+                };
                 for x in x_start..x_end {
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         cell.set_bg(Color::Rgb(60, 80, 120));
@@ -473,7 +482,12 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         let remaining = resume_at.saturating_duration_since(std::time::Instant::now());
         let secs = remaining.as_secs();
         let countdown = if secs >= 3600 {
-            format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+            format!(
+                "{}h {:02}m {:02}s",
+                secs / 3600,
+                (secs % 3600) / 60,
+                secs % 60
+            )
         } else if secs >= 60 {
             format!("{}m {:02}s", secs / 60, secs % 60)
         } else {

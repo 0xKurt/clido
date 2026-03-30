@@ -345,13 +345,11 @@ steps:
         f.flush().unwrap();
         let result = load(f.path());
         assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("Invalid workflow YAML")
-        );
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Invalid workflow YAML"));
     }
 
     #[test]

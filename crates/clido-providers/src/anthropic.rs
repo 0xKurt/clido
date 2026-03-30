@@ -168,7 +168,11 @@ impl AnthropicProvider {
                         message: format!(
                             "Subscription rate limit reached ({}). {}",
                             reset_msg,
-                            if body.len() > 200 { &body[..200] } else { &body }
+                            if body.len() > 200 {
+                                &body[..200]
+                            } else {
+                                &body
+                            }
                         ),
                         retry_after_secs,
                         is_subscription_limit: true,
@@ -452,9 +456,11 @@ fn parse_anthropic_sse(
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break, // stream ended naturally
                 Err(_elapsed) => {
-                    let _ = tx.send(Err(ClidoError::Provider(
-                        "streaming stalled — no data received for 90 seconds".to_string(),
-                    ))).await;
+                    let _ = tx
+                        .send(Err(ClidoError::Provider(
+                            "streaming stalled — no data received for 90 seconds".to_string(),
+                        )))
+                        .await;
                     return;
                 }
             };
@@ -482,15 +488,21 @@ fn parse_anthropic_sse(
                     if !data_buf.is_empty() {
                         // Handle Anthropic streaming error events (rate limit, overload, etc.)
                         if event_type == "error" {
-                            let msg = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data_buf) {
+                            let msg = if let Ok(json) =
+                                serde_json::from_str::<serde_json::Value>(&data_buf)
+                            {
                                 let err_type = json["error"]["type"].as_str().unwrap_or("unknown");
-                                let err_msg = json["error"]["message"].as_str().unwrap_or(&data_buf);
-                                if err_type == "rate_limit_error" || err_type == "overloaded_error" {
-                                    let _ = tx.send(Err(ClidoError::RateLimited {
-                                        message: format!("streaming {}: {}", err_type, err_msg),
-                                        retry_after_secs: None,
-                                        is_subscription_limit: false,
-                                    })).await;
+                                let err_msg =
+                                    json["error"]["message"].as_str().unwrap_or(&data_buf);
+                                if err_type == "rate_limit_error" || err_type == "overloaded_error"
+                                {
+                                    let _ = tx
+                                        .send(Err(ClidoError::RateLimited {
+                                            message: format!("streaming {}: {}", err_type, err_msg),
+                                            retry_after_secs: None,
+                                            is_subscription_limit: false,
+                                        }))
+                                        .await;
                                     return;
                                 }
                                 format!("streaming error ({}): {}", err_type, err_msg)
@@ -692,7 +704,11 @@ impl ModelProvider for AnthropicProvider {
                     || lower.contains("limit exceeded")
                     || lower.contains("allowance");
                 return Err(ClidoError::RateLimited {
-                    message: format!("429 (model: {}): {}", self.model, text.chars().take(300).collect::<String>()),
+                    message: format!(
+                        "429 (model: {}): {}",
+                        self.model,
+                        text.chars().take(300).collect::<String>()
+                    ),
                     retry_after_secs: retry_after,
                     is_subscription_limit: is_sub,
                 });

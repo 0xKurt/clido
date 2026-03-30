@@ -3157,8 +3157,9 @@ async fn write_setup_config(
         match run_tui_setup(pre_fill).await? {
             SetupOutcome::Cancelled => return Ok(()),
             SetupOutcome::Finished(state) => {
-                let path = clido_core::global_config_path()
-                    .ok_or_else(|| CliError::Usage("Could not determine config directory.".into()))?;
+                let path = clido_core::global_config_path().ok_or_else(|| {
+                    CliError::Usage("Could not determine config directory.".into())
+                })?;
                 let credentials = collect_credentials_from_state(&state);
                 let toml = build_full_config_toml(&state);
                 (path, toml, credentials)

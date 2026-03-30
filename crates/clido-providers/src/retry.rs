@@ -36,7 +36,13 @@ impl RetryProvider {
     /// Returns `true` if the error looks transient (rate-limit, server error, timeout).
     fn is_transient(err: &clido_core::ClidoError) -> bool {
         // Subscription rate limits are NOT transient — they won't clear on retry.
-        if matches!(err, clido_core::ClidoError::RateLimited { is_subscription_limit: true, .. }) {
+        if matches!(
+            err,
+            clido_core::ClidoError::RateLimited {
+                is_subscription_limit: true,
+                ..
+            }
+        ) {
             return false;
         }
         // Burst rate limits are already retried by the inner provider; don't double-retry.
@@ -57,7 +63,13 @@ impl RetryProvider {
 
     /// Returns `true` if the error is a non-retryable client/auth error.
     fn is_permanent(err: &clido_core::ClidoError) -> bool {
-        if matches!(err, clido_core::ClidoError::RateLimited { is_subscription_limit: true, .. }) {
+        if matches!(
+            err,
+            clido_core::ClidoError::RateLimited {
+                is_subscription_limit: true,
+                ..
+            }
+        ) {
             return true;
         }
         let msg = err.to_string().to_lowercase();

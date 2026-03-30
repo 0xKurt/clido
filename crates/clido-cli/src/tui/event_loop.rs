@@ -151,7 +151,11 @@ pub(super) fn extract_selected_text(
     use super::render::build_lines_w_uncached;
 
     let (chat_y_start, _chat_y_end) = app.chat_area_y;
-    let chat_width = if app.chat_area_width > 0 { app.chat_area_width } else { 120 };
+    let chat_width = if app.chat_area_width > 0 {
+        app.chat_area_width
+    } else {
+        120
+    };
 
     let lines = build_lines_w_uncached(app, chat_width as usize);
 
@@ -902,13 +906,22 @@ pub(super) async fn agent_task(
                                 .to_string(),
                         )).is_err() { return; }
                     }
-                    Err(ClidoError::RateLimited { message, retry_after_secs, is_subscription_limit }) => {
+                    Err(ClidoError::RateLimited {
+                        message,
+                        retry_after_secs,
+                        is_subscription_limit,
+                    }) => {
                         session_exit = "rate_limited";
-                        if event_tx.send(AgentEvent::RateLimited {
-                            message,
-                            retry_after_secs,
-                            is_subscription_limit,
-                        }).is_err() { return; }
+                        if event_tx
+                            .send(AgentEvent::RateLimited {
+                                message,
+                                retry_after_secs,
+                                is_subscription_limit,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     Err(e) => {
                         session_exit = "error";
@@ -1297,11 +1310,7 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            std::io::stderr(),
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
+        let _ = execute!(std::io::stderr(), DisableMouseCapture, LeaveAlternateScreen);
         #[cfg(unix)]
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();

@@ -319,7 +319,11 @@ impl OpenAICompatProvider {
                         message: format!(
                             "Subscription rate limit reached ({}). {}",
                             reset_msg,
-                            if body.len() > 200 { &body[..200] } else { &body }
+                            if body.len() > 200 {
+                                &body[..200]
+                            } else {
+                                &body
+                            }
                         ),
                         retry_after_secs,
                         is_subscription_limit: true,
@@ -879,9 +883,11 @@ fn parse_openai_sse(
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break, // stream ended naturally
                 Err(_elapsed) => {
-                    let _ = tx.send(Err(ClidoError::Provider(
-                        "streaming stalled — no data received for 90 seconds".to_string(),
-                    ))).await;
+                    let _ = tx
+                        .send(Err(ClidoError::Provider(
+                            "streaming stalled — no data received for 90 seconds".to_string(),
+                        )))
+                        .await;
                     return;
                 }
             };
