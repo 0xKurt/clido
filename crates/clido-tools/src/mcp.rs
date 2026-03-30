@@ -50,6 +50,47 @@ struct JsonRpcResponse {
     error: Option<serde_json::Value>,
 }
 
+/// Env vars that must not leak into MCP server subprocesses.
+/// Includes API credentials and system vars that could be used for injection.
+const BLOCKED_MCP_ENV_VARS: &[&str] = &[
+    // API credentials
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "MINIMAX_API_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_API_KEY",
+    "HUGGINGFACE_API_KEY",
+    "HF_TOKEN",
+    "COHERE_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "TOGETHER_API_KEY",
+    "CLIDO_API_KEY",
+    // System vars that enable library/code injection
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    // Vars that could alter behavior of spawned processes
+    "NODE_OPTIONS",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "RUBYOPT",
+    "PERL5OPT",
+    "BASH_ENV",
+    "ENV",
+    "ZDOTDIR",
+];
+
 /// Active MCP client connected to a spawned server process.
 ///
 /// All I/O uses async tokio primitives so a slow server never blocks the executor.
@@ -69,6 +110,10 @@ impl McpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // Strip dangerous env vars before spawning MCP server
+        for var in BLOCKED_MCP_ENV_VARS {
+            cmd.env_remove(var);
+        }
         for (k, v) in &config.env {
             cmd.env(k, v);
         }

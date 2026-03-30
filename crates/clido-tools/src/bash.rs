@@ -71,6 +71,46 @@ const SECRET_ENV_VARS: &[&str] = &[
     "CLIDO_API_KEY",
 ];
 
+/// Patterns that indicate potentially destructive commands.
+/// When matched, the tool returns a special error that forces user approval
+/// regardless of permission mode.
+const DANGEROUS_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -rf ~",
+    "rm -rf $HOME",
+    "mkfs",
+    "dd if=",
+    ":(){ :|:&", // fork bomb
+    "> /dev/sd",
+    "chmod -R 777 /",
+    "chmod -R 777 /*",
+    "chown -R",
+    "wget|sh",
+    "curl|sh",
+    "wget|bash",
+    "curl|bash",
+    "shutdown",
+    "reboot",
+    "init 0",
+    "init 6",
+    "halt",
+    "poweroff",
+    "format c:",
+];
+
+/// Check if a command matches a dangerous pattern.
+fn is_dangerous_command(command: &str) -> Option<&'static str> {
+    let lower = command.to_lowercase();
+    let normalized = lower.replace("  ", " ");
+    for pattern in DANGEROUS_PATTERNS {
+        if normalized.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    None
+}
+
 /// Strip known secret-bearing env vars from a command before spawning.
 fn strip_secret_env_vars(cmd: &mut tokio::process::Command) {
     for var in SECRET_ENV_VARS {
@@ -225,6 +265,23 @@ impl Tool for BashTool {
                 );
             }
         }
+        // Detect dangerous commands — always require explicit user approval.
+        if let Some(pattern) = is_dangerous_command(&command) {
+            return ToolOutput {
+                content: format!(
+                    "[DANGEROUS COMMAND DETECTED] The command matches dangerous pattern '{}'. \
+                     This command requires explicit user approval. Please confirm with the user \
+                     before attempting again, or use a safer alternative.",
+                    pattern
+                ),
+                is_error: true,
+                diff: None,
+                path: None,
+                content_hash: None,
+                mtime_nanos: None,
+            };
+        }
+
         let timeout_ms = input
             .get("timeout")
             .and_then(|v| v.as_u64())

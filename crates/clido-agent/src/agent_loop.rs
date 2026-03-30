@@ -36,6 +36,63 @@ fn format_tool_error_for_reflection(tool_name: &str, error_output: &str) -> Stri
     )
 }
 
+/// Create a git checkpoint of dirty working tree before AI edits.
+/// Only runs once per agent session to avoid excessive commits.
+async fn maybe_create_checkpoint(workspace: Option<&std::path::Path>) -> Option<String> {
+    let ws = workspace?;
+    // Check if we're in a git repo and have dirty state
+    let status = tokio::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(ws)
+        .output()
+        .await
+        .ok()?;
+    let output = String::from_utf8_lossy(&status.stdout);
+    if output.trim().is_empty() {
+        return None; // Clean working tree, no checkpoint needed
+    }
+    // Stage all and create checkpoint commit
+    let add = tokio::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(ws)
+        .output()
+        .await
+        .ok()?;
+    if !add.status.success() {
+        return None;
+    }
+    let commit = tokio::process::Command::new("git")
+        .args([
+            "commit",
+            "-m",
+            "chore: pre-clido checkpoint (auto)",
+            "--no-verify",
+        ])
+        .current_dir(ws)
+        .output()
+        .await
+        .ok()?;
+    if !commit.status.success() {
+        // Reset staged changes if commit failed
+        let _ = tokio::process::Command::new("git")
+            .args(["reset", "HEAD"])
+            .current_dir(ws)
+            .output()
+            .await;
+        return None;
+    }
+    // Get the commit hash
+    let hash = tokio::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(ws)
+        .output()
+        .await
+        .ok()?;
+    let hash_str = String::from_utf8_lossy(&hash.stdout).trim().to_string();
+    tracing::info!("Created pre-edit checkpoint: {}", hash_str);
+    Some(hash_str)
+}
+
 /// The result of a permission request — what the user decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermGrant {
@@ -277,6 +334,8 @@ pub struct AgentLoop {
     fast_model: Option<String>,
     /// Count of consecutive turns with tool errors (resets on success).
     consecutive_tool_errors: usize,
+    /// Whether we've already created a pre-edit checkpoint this session.
+    checkpoint_created: bool,
 }
 
 impl AgentLoop {
@@ -311,6 +370,7 @@ impl AgentLoop {
             git_context_fn: None,
             fast_model: None,
             consecutive_tool_errors: 0,
+            checkpoint_created: false,
         }
     }
 
@@ -359,6 +419,7 @@ impl AgentLoop {
             git_context_fn: None,
             fast_model: None,
             consecutive_tool_errors: 0,
+            checkpoint_created: false,
         }
     }
 
@@ -1528,6 +1589,20 @@ impl AgentLoop {
         if name == "ExitPlanMode" {
             self.permission_mode_override = Some(PermissionMode::Default);
             return self.execute_tool(name, input).await;
+        }
+
+        // Auto-checkpoint: create a git commit of dirty state before first write operation.
+        if !self.checkpoint_created {
+            if let Some(tool) = self.tools.get(name) {
+                if !tool.is_read_only() {
+                    self.checkpoint_created = true;
+                    if let Some(hash) =
+                        maybe_create_checkpoint(std::env::current_dir().ok().as_deref()).await
+                    {
+                        debug!("Pre-edit git checkpoint created: {hash}");
+                    }
+                }
+            }
         }
 
         // ── Per-file permission rules ────────────────────────────────────────
