@@ -872,3 +872,71 @@ pub(crate) struct Toast {
     pub(crate) style: Color,
     pub(crate) expires: std::time::Instant,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── SessionStats ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn session_stats_default_all_zeros() {
+        let stats = SessionStats::default();
+        assert_eq!(stats.session_input_tokens, 0);
+        assert_eq!(stats.session_output_tokens, 0);
+        assert_eq!(stats.session_cost_usd, 0.0);
+        assert_eq!(stats.session_total_input_tokens, 0);
+        assert_eq!(stats.session_total_output_tokens, 0);
+        assert_eq!(stats.session_total_cost_usd, 0.0);
+        assert_eq!(stats.session_turn_count, 0);
+    }
+
+    // ── PlanState ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn plan_state_default_all_none_false_zero() {
+        let plan = PlanState::default();
+        assert!(plan.last_plan_snapshot.is_none());
+        assert!(plan.last_plan.is_none());
+        assert!(plan.last_plan_raw.is_none());
+        assert!(!plan.awaiting_plan_response);
+        assert!(plan.editor.is_none());
+        assert_eq!(plan.selected_task, 0);
+        assert!(plan.task_editing.is_none());
+        assert!(plan.text_editor.is_none());
+    }
+
+    // ── PlanTextEditor ───────────────────────────────────────────────────────
+
+    #[test]
+    fn plan_text_editor_from_raw_splits_lines() {
+        let editor = PlanTextEditor::from_raw("line one\nline two\nline three");
+        assert_eq!(editor.lines.len(), 3);
+        assert_eq!(editor.lines[0], "line one");
+        assert_eq!(editor.lines[2], "line three");
+        assert_eq!(editor.cursor_row, 0);
+        assert_eq!(editor.cursor_col, 0);
+        assert_eq!(editor.scroll, 0);
+    }
+
+    #[test]
+    fn plan_text_editor_clamp_col_limits_cursor() {
+        let mut editor = PlanTextEditor::from_raw("short\nlonger line");
+        editor.cursor_row = 0;
+        editor.cursor_col = 100;
+        editor.clamp_col();
+        assert_eq!(editor.cursor_col, 5); // "short" is 5 chars
+    }
+
+    // ── TaskEditState ────────────────────────────────────────────────────────
+
+    #[test]
+    fn task_edit_state_defaults_to_description_field() {
+        let state = TaskEditState::new("t1", "Fix bug", "some notes", Complexity::Medium);
+        assert_eq!(state.task_id, "t1");
+        assert_eq!(state.description, "Fix bug");
+        assert_eq!(state.notes, "some notes");
+        assert_eq!(state.complexity, Complexity::Medium);
+        assert_eq!(state.focused_field, TaskEditField::Description);
+    }
+}

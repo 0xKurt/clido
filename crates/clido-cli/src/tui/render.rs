@@ -3363,3 +3363,210 @@ pub(super) fn render_table_to_lines(
     out.push(Line::from(vec![Span::styled(format!("└{}┘", bot), gray)]));
     out.push(Line::raw(""));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── word_wrap ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn word_wrap_short_line_fits() {
+        let lines = word_wrap("hello world", 20);
+        assert_eq!(lines, vec!["hello world"]);
+    }
+
+    #[test]
+    fn word_wrap_breaks_at_width() {
+        let lines = word_wrap("hello world foo bar", 11);
+        assert_eq!(lines, vec!["hello world", "foo bar"]);
+    }
+
+    #[test]
+    fn word_wrap_single_long_word() {
+        let lines = word_wrap("superlongword", 5);
+        // A word longer than width is placed on its own line
+        assert_eq!(lines, vec!["superlongword"]);
+    }
+
+    #[test]
+    fn word_wrap_preserves_paragraph_breaks() {
+        let lines = word_wrap("first paragraph\nsecond paragraph", 50);
+        assert_eq!(lines, vec!["first paragraph", "second paragraph"]);
+    }
+
+    #[test]
+    fn word_wrap_empty_input() {
+        let lines = word_wrap("", 20);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn word_wrap_multiple_words_wrap_correctly() {
+        let lines = word_wrap("a b c d e f", 5);
+        // "a b c" fits in 5, "d e f" fits in 5
+        assert_eq!(lines, vec!["a b c", "d e f"]);
+    }
+
+    // ── truncate_chars ──────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_chars_short_string_unchanged() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_exact_length_unchanged() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_long_string_truncated() {
+        let result = truncate_chars("hello world", 8);
+        assert_eq!(result, "hello w…");
+        assert!(result.chars().count() <= 8);
+    }
+
+    #[test]
+    fn truncate_chars_respects_unicode_boundaries() {
+        // "你好世界" is 4 chars; truncate to 3 should give "你好…"
+        let result = truncate_chars("你好世界", 3);
+        assert_eq!(result, "你好…");
+    }
+
+    #[test]
+    fn truncate_chars_max_1_gives_ellipsis() {
+        let result = truncate_chars("hello", 1);
+        assert_eq!(result, "…");
+    }
+
+    // ── tool_color ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_color_error_is_red() {
+        assert_eq!(tool_color("Read", false, true), Color::Red);
+        assert_eq!(tool_color("Bash", false, true), Color::Red);
+    }
+
+    #[test]
+    fn tool_color_done_is_dark_gray() {
+        assert_eq!(tool_color("Read", true, false), Color::DarkGray);
+        assert_eq!(tool_color("Write", true, false), Color::DarkGray);
+    }
+
+    #[test]
+    fn tool_color_active_returns_semantic_colors() {
+        assert_eq!(tool_color("Read", false, false), TUI_SOFT_ACCENT);
+        assert_eq!(tool_color("Glob", false, false), TUI_SOFT_ACCENT);
+        assert_eq!(tool_color("Grep", false, false), TUI_SOFT_ACCENT);
+        assert_eq!(tool_color("Write", false, false), Color::Green);
+        assert_eq!(tool_color("Edit", false, false), Color::Green);
+        assert_eq!(tool_color("Bash", false, false), Color::Yellow);
+        assert_eq!(tool_color("SemanticSearch", false, false), Color::Cyan);
+        assert_eq!(tool_color("WebFetch", false, false), Color::Magenta);
+        assert_eq!(tool_color("WebSearch", false, false), Color::Magenta);
+        assert_eq!(tool_color("SpawnWorker", false, false), Color::LightCyan);
+        assert_eq!(tool_color("SpawnReviewer", false, false), Color::LightCyan);
+    }
+
+    #[test]
+    fn tool_color_unknown_tool_is_white() {
+        assert_eq!(tool_color("UnknownTool", false, false), Color::White);
+    }
+
+    #[test]
+    fn tool_color_consistent_across_calls() {
+        let c1 = tool_color("Bash", false, false);
+        let c2 = tool_color("Bash", false, false);
+        assert_eq!(c1, c2);
+    }
+
+    // ── tool_display_name ───────────────────────────────────────────────────
+
+    #[test]
+    fn tool_display_name_maps_known_tools() {
+        assert_eq!(tool_display_name("SemanticSearch"), "Search");
+        assert_eq!(tool_display_name("SpawnWorker"), "Worker");
+        assert_eq!(tool_display_name("SpawnReviewer"), "Reviewer");
+        assert_eq!(tool_display_name("TodoWrite"), "Todo");
+        assert_eq!(tool_display_name("WebFetch"), "Fetch");
+        assert_eq!(tool_display_name("WebSearch"), "Web");
+    }
+
+    #[test]
+    fn tool_display_name_passes_through_unknown() {
+        assert_eq!(tool_display_name("Read"), "Read");
+        assert_eq!(tool_display_name("Bash"), "Bash");
+        assert_eq!(tool_display_name("CustomTool"), "CustomTool");
+    }
+
+    // ── fit_spans ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn fit_spans_all_fit() {
+        let spans = vec![Span::raw("hello"), Span::raw(" "), Span::raw("world")];
+        let result = fit_spans(spans, 20);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn fit_spans_drops_overflow() {
+        let spans = vec![Span::raw("hello"), Span::raw(" "), Span::raw("world")];
+        let result = fit_spans(spans, 6);
+        // "hello" (5) + " " (1) = 6, "world" would overflow
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn fit_spans_empty_input() {
+        let result = fit_spans(vec![], 10);
+        assert!(result.is_empty());
+    }
+
+    // ── relative_time ───────────────────────────────────────────────────────
+
+    #[test]
+    fn relative_time_just_now() {
+        let now = chrono::Utc::now().to_rfc3339();
+        assert_eq!(relative_time(&now), "just now");
+    }
+
+    #[test]
+    fn relative_time_minutes_ago() {
+        let five_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let result = relative_time(&five_min_ago);
+        assert!(result.contains("m ago"), "expected minutes, got: {result}");
+    }
+
+    #[test]
+    fn relative_time_hours_ago() {
+        let three_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        let result = relative_time(&three_hours_ago);
+        assert!(result.contains("h ago"), "expected hours, got: {result}");
+    }
+
+    #[test]
+    fn relative_time_days_ago() {
+        let two_days_ago = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        let result = relative_time(&two_days_ago);
+        assert!(result.contains("d ago"), "expected days, got: {result}");
+    }
+
+    #[test]
+    fn relative_time_future_timestamp_shows_just_now() {
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert_eq!(relative_time(&future), "just now");
+    }
+
+    #[test]
+    fn relative_time_invalid_string_fallback() {
+        assert_eq!(relative_time("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn relative_time_truncated_fallback_for_long_invalid() {
+        let result = relative_time("2024-01-15T10:30:00 not-rfc3339");
+        // Should fall through to truncation fallback (len >= 16)
+        assert!(!result.is_empty());
+    }
+}

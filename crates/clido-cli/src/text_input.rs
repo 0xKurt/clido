@@ -1171,4 +1171,116 @@ mod tests {
         assert_eq!(ti.text, " world");
         assert_eq!(ti.cursor, 0);
     }
+
+    // ── handle_text_key Home/End ─────────────────────────────────────────────
+
+    #[test]
+    fn handle_text_key_home_moves_cursor_to_start() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ti = TextInput::new();
+        ti.set_text("hello world");
+        // cursor defaults to end
+        let consumed = handle_text_key(&mut ti, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert!(consumed);
+        assert_eq!(ti.cursor, 0);
+    }
+
+    #[test]
+    fn handle_text_key_end_moves_cursor_to_end() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ti = TextInput::new();
+        ti.set_text("hello world");
+        ti.cursor = 0;
+        let consumed = handle_text_key(&mut ti, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(consumed);
+        assert_eq!(ti.cursor, ti.char_count());
+    }
+
+    // ── handle_text_key Alt+Left/Right word navigation ───────────────────────
+
+    #[test]
+    fn handle_text_key_alt_left_word_nav() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ti = TextInput::new();
+        ti.set_text("hello world");
+        // cursor at end (11)
+        let consumed = handle_text_key(&mut ti, KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert!(consumed);
+        assert_eq!(ti.cursor, 6); // before "world"
+    }
+
+    #[test]
+    fn handle_text_key_alt_right_word_nav() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ti = TextInput::new();
+        ti.set_text("hello world");
+        ti.cursor = 0;
+        let consumed = handle_text_key(&mut ti, KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert!(consumed);
+        assert_eq!(ti.cursor, 6); // past "hello "
+    }
+
+    // ── handle_text_key rejects unknown modifiers ────────────────────────────
+
+    #[test]
+    fn handle_text_key_returns_false_for_unhandled() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ti = TextInput::new();
+        ti.set_text("x");
+        let consumed = handle_text_key(&mut ti, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(!consumed);
+        assert_eq!(ti.text, "x");
+    }
+
+    // ── text() returns full string after multiple inserts ────────────────────
+
+    #[test]
+    fn text_accumulates_inserts() {
+        let mut ti = TextInput::new();
+        for c in "hello".chars() {
+            ti.insert_char(c);
+        }
+        assert_eq!(ti.text, "hello");
+        assert_eq!(ti.cursor, 5);
+    }
+
+    // ── CJK insert, delete, and cursor bounds ────────────────────────────────
+
+    #[test]
+    fn cjk_insert_advances_cursor_correctly() {
+        let mut ti = TextInput::new();
+        ti.insert_char('你');
+        ti.insert_char('好');
+        ti.insert_char('世');
+        assert_eq!(ti.char_count(), 3);
+        assert_eq!(ti.cursor, 3);
+        assert_eq!(ti.text, "你好世");
+    }
+
+    #[test]
+    fn cursor_stays_in_bounds_after_bulk_deletes() {
+        let mut ti = TextInput::new();
+        ti.set_text("abc");
+        ti.cursor = 3;
+        ti.delete_back();
+        ti.delete_back();
+        ti.delete_back();
+        ti.delete_back(); // extra delete at 0 — should be no-op
+        assert_eq!(ti.cursor, 0);
+        assert!(ti.text.is_empty());
+    }
+
+    // ── Emoji word navigation ────────────────────────────────────────────────
+
+    #[test]
+    fn emoji_word_navigation() {
+        let mut ti = TextInput::new();
+        ti.set_text("hello 😀🎉 world");
+        ti.end();
+        ti.word_left(); // before "world"
+        assert!(ti.cursor <= 10);
+        ti.word_left(); // before "😀🎉"
+        ti.word_left(); // before "hello"
+        assert_eq!(ti.cursor, 0);
+    }
 }

@@ -801,4 +801,163 @@ mod tests {
             OverlayAction::Dismiss
         ));
     }
+
+    // ── ErrorOverlay::from_message pattern detection ─────────────────────────
+
+    #[test]
+    fn from_message_detects_401_auth_error() {
+        let ov = ErrorOverlay::from_message("HTTP 401 Unauthorized");
+        assert_eq!(ov.title, "Authentication Error");
+        assert!(ov.recovery.as_ref().unwrap().contains("API key"));
+    }
+
+    #[test]
+    fn from_message_detects_invalid_api_key() {
+        let ov = ErrorOverlay::from_message("Invalid API key provided");
+        assert_eq!(ov.title, "Authentication Error");
+    }
+
+    #[test]
+    fn from_message_detects_unauthorized() {
+        let ov = ErrorOverlay::from_message("Unauthorized access to resource");
+        assert_eq!(ov.title, "Authentication Error");
+    }
+
+    #[test]
+    fn from_message_detects_rate_limit_429() {
+        let ov = ErrorOverlay::from_message("429 Too Many Requests");
+        assert_eq!(ov.title, "Rate Limited");
+        assert!(ov.recovery.as_ref().unwrap().contains("Wait"));
+    }
+
+    #[test]
+    fn from_message_detects_rate_limit_text() {
+        let ov = ErrorOverlay::from_message("rate_limit exceeded for model");
+        assert_eq!(ov.title, "Rate Limited");
+    }
+
+    #[test]
+    fn from_message_detects_rate_limit_capitalized() {
+        let ov = ErrorOverlay::from_message("Rate limit hit, please retry");
+        assert_eq!(ov.title, "Rate Limited");
+    }
+
+    #[test]
+    fn from_message_detects_500_server_error() {
+        let ov = ErrorOverlay::from_message("500 Internal Server Error");
+        assert_eq!(ov.title, "Server Error");
+        assert!(ov.recovery.as_ref().unwrap().contains("Try again"));
+    }
+
+    #[test]
+    fn from_message_detects_502_server_error() {
+        let ov = ErrorOverlay::from_message("502 Bad Gateway");
+        assert_eq!(ov.title, "Server Error");
+    }
+
+    #[test]
+    fn from_message_detects_503_server_error() {
+        let ov = ErrorOverlay::from_message("503 Service Unavailable");
+        assert_eq!(ov.title, "Server Error");
+    }
+
+    #[test]
+    fn from_message_detects_save_error() {
+        let ov = ErrorOverlay::from_message("Could not save profile to disk");
+        assert_eq!(ov.title, "Save Error");
+        assert!(ov.recovery.as_ref().unwrap().contains("permissions"));
+    }
+
+    #[test]
+    fn from_message_generic_fallback() {
+        let ov = ErrorOverlay::from_message("something went wrong");
+        assert_eq!(ov.title, "Error");
+        assert!(ov.recovery.is_none());
+        assert_eq!(ov.message, "something went wrong");
+    }
+
+    #[test]
+    fn from_message_context_length_falls_through_to_generic() {
+        let ov = ErrorOverlay::from_message("context_length_exceeded: max 128000 tokens");
+        assert_eq!(ov.title, "Error");
+        assert!(ov.recovery.is_none());
+    }
+
+    #[test]
+    fn from_message_preserves_original_message() {
+        let msg = "HTTP 429: rate_limit exceeded for gpt-4o";
+        let ov = ErrorOverlay::from_message(msg);
+        assert_eq!(ov.message, msg);
+    }
+
+    // ── OverlayStack LIFO ordering ───────────────────────────────────────────
+
+    #[test]
+    fn stack_push_pop_is_lifo() {
+        let mut stack = OverlayStack::new();
+        stack.push(OverlayKind::Error(ErrorOverlay::new("first")));
+        stack.push(OverlayKind::Error(ErrorOverlay::new("second")));
+        stack.push(OverlayKind::Error(ErrorOverlay::new("third")));
+
+        assert_eq!(stack.pop().unwrap().title(), "Error");
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack.pop().unwrap().title(), "Error");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.pop().unwrap().title(), "Error");
+        assert!(stack.is_empty());
+        assert!(stack.pop().is_none());
+    }
+
+    #[test]
+    fn stack_top_returns_topmost() {
+        let mut stack = OverlayStack::new();
+        assert!(stack.top().is_none());
+
+        stack.push(OverlayKind::Error(ErrorOverlay::new("bottom")));
+        stack.push(OverlayKind::ReadOnly(ReadOnlyOverlay::new("top", vec![])));
+
+        assert_eq!(stack.top().unwrap().title(), "top");
+    }
+
+    #[test]
+    fn stack_top_mut_allows_modification() {
+        let mut stack = OverlayStack::new();
+        let mut ro = ReadOnlyOverlay::new("Scrollable", vec![("".into(), "line".into()); 20]);
+        ro.visible_rows = 5;
+        stack.push(OverlayKind::ReadOnly(ro));
+
+        if let Some(OverlayKind::ReadOnly(ro)) = stack.top_mut() {
+            ro.scroll_offset = 10;
+        }
+
+        if let Some(OverlayKind::ReadOnly(ro)) = stack.top() {
+            assert_eq!(ro.scroll_offset, 10);
+        } else {
+            panic!("expected ReadOnly overlay");
+        }
+    }
+
+    #[test]
+    fn stack_is_empty_reflects_state() {
+        let mut stack = OverlayStack::new();
+        assert!(stack.is_empty());
+
+        stack.push(OverlayKind::Error(ErrorOverlay::new("x")));
+        assert!(!stack.is_empty());
+
+        stack.pop();
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn stack_multiple_types_interleaved() {
+        let mut stack = OverlayStack::new();
+        stack.push(OverlayKind::Error(ErrorOverlay::new("err")));
+        stack.push(OverlayKind::ReadOnly(ReadOnlyOverlay::new("ro", vec![])));
+        stack.push(OverlayKind::Error(ErrorOverlay::new("err2")));
+
+        assert_eq!(stack.len(), 3);
+        assert_eq!(stack.pop().unwrap().title(), "Error");
+        assert_eq!(stack.top().unwrap().title(), "ro");
+    }
 }

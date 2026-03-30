@@ -1084,6 +1084,38 @@ mod tests {
     }
 
     #[test]
+    fn completions_for_m_includes_model_and_models() {
+        let c = slash_completions("/m");
+        let cmds: Vec<&str> = c.iter().map(|(cmd, _)| *cmd).collect();
+        assert!(
+            cmds.contains(&"/model"),
+            "/model must be in completions for /m"
+        );
+        assert!(
+            cmds.contains(&"/models"),
+            "/models must be in completions for /m"
+        );
+        assert!(
+            cmds.contains(&"/memory"),
+            "/memory must be in completions for /m"
+        );
+    }
+
+    #[test]
+    fn completions_for_model_exact_includes_models() {
+        let c = slash_completions("/model");
+        let cmds: Vec<&str> = c.iter().map(|(cmd, _)| *cmd).collect();
+        assert!(cmds.contains(&"/model"));
+        assert!(cmds.contains(&"/models"));
+    }
+
+    #[test]
+    fn is_known_slash_cmd_returns_false_for_partial_command() {
+        // "/mod" is not a complete command, so it should return false
+        assert!(!is_known_slash_cmd("/mod"));
+    }
+
+    #[test]
     fn parse_plan_from_text_strips_markdown_wrapped_steps() {
         let text = "### **Step 1:** Fix auth\n**Step 2:** Add tests\n";
         let tasks = parse_plan_from_text(text);
