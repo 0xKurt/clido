@@ -210,6 +210,11 @@ impl ReadOnlyOverlay {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
         use crossterm::event::KeyCode;
+        // Use renderer-supplied max_scroll when available; fall back to
+        // lines.len() - visible_rows so tests can set visible_rows directly.
+        let max = self
+            .max_scroll
+            .max(self.lines.len().saturating_sub(self.visible_rows));
         match key.code {
             KeyCode::Enter | KeyCode::Esc => OverlayAction::Dismiss,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -217,7 +222,7 @@ impl ReadOnlyOverlay {
                 OverlayAction::Consumed
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.scroll_offset < self.max_scroll {
+                if self.scroll_offset < max {
                     self.scroll_offset += 1;
                 }
                 OverlayAction::Consumed
@@ -229,7 +234,7 @@ impl ReadOnlyOverlay {
             }
             KeyCode::PageDown => {
                 self.scroll_offset =
-                    (self.scroll_offset + self.visible_rows.max(1)).min(self.max_scroll);
+                    (self.scroll_offset + self.visible_rows.max(1)).min(max);
                 OverlayAction::Consumed
             }
             _ => OverlayAction::Consumed,

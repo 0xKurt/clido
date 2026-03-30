@@ -607,7 +607,9 @@ pub(super) async fn agent_task(
                                                     title: title.clone(),
                                                 });
                                         }
-                                        let _ = title_tx.send(AgentEvent::TitleGenerated(title));
+                                        if title_tx.send(AgentEvent::TitleGenerated(title)).is_err() {
+                                            tracing::debug!("title channel closed");
+                                        }
                                     }
                                 }
                             });
