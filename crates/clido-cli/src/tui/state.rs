@@ -1,11 +1,68 @@
-use clido_planner::Complexity;
+use clido_planner::{Complexity, Plan, PlanEditor};
 use ratatui::style::Color;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::list_picker::{ListPicker, PickerItem};
 
 use super::render::parse_plan_from_text;
-use super::PermGrant;
+use super::{AgentEvent, PermGrant};
+
+// ── Session statistics ────────────────────────────────────────────────────────
+
+/// Accumulated token/cost counters for the current TUI session.
+#[derive(Default)]
+pub(crate) struct SessionStats {
+    /// Last completed agent invocation's token totals (for context % in header).
+    pub(crate) session_input_tokens: u64,
+    pub(crate) session_output_tokens: u64,
+    pub(crate) session_cost_usd: f64,
+    /// Running totals across all completed turns in this TUI session (including planning calls).
+    pub(crate) session_total_input_tokens: u64,
+    pub(crate) session_total_output_tokens: u64,
+    pub(crate) session_total_cost_usd: f64,
+    /// Number of completed agent turns in this TUI session.
+    pub(crate) session_turn_count: u32,
+}
+
+// ── Plan state ────────────────────────────────────────────────────────────────
+
+/// All plan-related fields grouped together.
+#[derive(Default)]
+pub(crate) struct PlanState {
+    /// Last plan produced by the planner (--planner mode) or parsed from a /plan <task> response.
+    pub(crate) last_plan_snapshot: Option<Plan>,
+    /// Convenience list of top-level task descriptions derived from `last_plan_snapshot`.
+    pub(crate) last_plan: Option<Vec<String>>,
+    /// Raw text of the last plan response — used by the text editor to show unmodified formatting.
+    pub(crate) last_plan_raw: Option<String>,
+    /// Set to true when /plan <task> is sent; cleared after the agent responds and the plan is parsed.
+    pub(crate) awaiting_plan_response: bool,
+    /// When `Some`, the plan editor full-screen overlay is active (--plan flag mode).
+    pub(crate) editor: Option<PlanEditor>,
+    /// Currently selected task index in the plan editor list.
+    pub(crate) selected_task: usize,
+    /// When `Some`, the inline task edit form is active.
+    pub(crate) task_editing: Option<TaskEditState>,
+    /// Simple nano-style text editor for /plan edit.
+    pub(crate) text_editor: Option<PlanTextEditor>,
+}
+
+// ── Agent channels ────────────────────────────────────────────────────────────
+
+/// mpsc senders used to communicate with the background agent task.
+pub(crate) struct AgentChannels {
+    pub(crate) prompt_tx: mpsc::UnboundedSender<String>,
+    /// Channel to request session resume in agent_task.
+    pub(crate) resume_tx: mpsc::UnboundedSender<String>,
+    /// Channel to switch the session model in agent_task.
+    pub(crate) model_switch_tx: mpsc::UnboundedSender<String>,
+    /// Channel to update tool workspace in agent_task.
+    pub(crate) workdir_tx: mpsc::UnboundedSender<std::path::PathBuf>,
+    /// Channel to trigger immediate context compaction in agent_task.
+    pub(crate) compact_now_tx: mpsc::UnboundedSender<()>,
+    /// Channel to send AgentEvents from background tasks (e.g. model fetch) to the TUI loop.
+    pub(crate) fetch_tx: mpsc::UnboundedSender<AgentEvent>,
+}
 
 // ── Plan editor state ─────────────────────────────────────────────────────────
 

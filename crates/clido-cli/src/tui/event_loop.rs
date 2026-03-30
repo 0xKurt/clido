@@ -1070,11 +1070,14 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
     };
 
     let mut app = App::new(
-        runtime.prompt_tx.clone(),
-        runtime.resume_tx.clone(),
-        runtime.model_switch_tx.clone(),
-        runtime.workdir_tx.clone(),
-        runtime.compact_now_tx.clone(),
+        AgentChannels {
+            prompt_tx: runtime.prompt_tx.clone(),
+            resume_tx: runtime.resume_tx.clone(),
+            model_switch_tx: runtime.model_switch_tx.clone(),
+            workdir_tx: runtime.workdir_tx.clone(),
+            compact_now_tx: runtime.compact_now_tx.clone(),
+            fetch_tx: runtime.fetch_tx.clone(),
+        },
         cancel,
         provider.clone(),
         model,
@@ -1091,7 +1094,6 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
         runtime.todo_store.clone(),
         api_key.clone(),
         base_url.clone(),
-        runtime.fetch_tx.clone(),
     );
     // Kick off a live model-list fetch from the provider API immediately at startup.
     // Results arrive as AgentEvent::ModelsLoaded and update app.known_models.
@@ -1184,11 +1186,11 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                 app.api_key = new_api_key.clone();
                 app.base_url = new_base_url.clone();
                 app.current_profile = profile_name.clone();
-                app.prompt_tx = runtime.prompt_tx.clone();
-                app.resume_tx = runtime.resume_tx.clone();
-                app.model_switch_tx = runtime.model_switch_tx.clone();
-                app.workdir_tx = runtime.workdir_tx.clone();
-                app.compact_now_tx = runtime.compact_now_tx.clone();
+                app.channels.prompt_tx = runtime.prompt_tx.clone();
+                app.channels.resume_tx = runtime.resume_tx.clone();
+                app.channels.model_switch_tx = runtime.model_switch_tx.clone();
+                app.channels.workdir_tx = runtime.workdir_tx.clone();
+                app.channels.compact_now_tx = runtime.compact_now_tx.clone();
                 app.quit = false;
                 app.busy = false;
                 app.status_log.clear();
@@ -1240,11 +1242,11 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                     app.image_state.clone(),
                     app.reviewer_enabled.clone(),
                 );
-                app.prompt_tx = runtime.prompt_tx.clone();
-                app.resume_tx = runtime.resume_tx.clone();
-                app.model_switch_tx = runtime.model_switch_tx.clone();
-                app.workdir_tx = runtime.workdir_tx.clone();
-                app.compact_now_tx = runtime.compact_now_tx.clone();
+                app.channels.prompt_tx = runtime.prompt_tx.clone();
+                app.channels.resume_tx = runtime.resume_tx.clone();
+                app.channels.model_switch_tx = runtime.model_switch_tx.clone();
+                app.channels.workdir_tx = runtime.workdir_tx.clone();
+                app.channels.compact_now_tx = runtime.compact_now_tx.clone();
                 app.push(ChatLine::Thinking("↻ recovering runtime…".to_string()));
                 app.busy = false;
                 app.status_log.clear();
@@ -1414,7 +1416,7 @@ pub(super) async fn event_loop(
                         text = text.replace("\r\n", "\n").replace('\r', "\n");
                         if text.is_empty() {
                             // nothing to do
-                        } else if let Some(ref mut ed) = app.plan_text_editor {
+                        } else if let Some(ref mut ed) = app.plan.text_editor {
                             // Route paste into plan text editor at cursor position.
                             let line = &mut ed.lines[ed.cursor_row];
                             let byte_pos = line
@@ -1568,13 +1570,13 @@ pub(super) async fn event_loop(
                             crate::notify::notify_done(
                                 session_id,
                                 elapsed,
-                                app.session_total_cost_usd,
+                                app.stats.session_total_cost_usd,
                             );
                         }
                         // Revert per-turn model override if active.
                         if let Some(prev) = app.per_turn_prev_model.take() {
                             app.model = prev.clone();
-                            let _ = app.model_switch_tx.send(prev.clone());
+                            let _ = app.channels.model_switch_tx.send(prev.clone());
                             app.push(ChatLine::Info(format!(
                                 "  ↻ Model restored to {}",
                                 prev
@@ -1613,7 +1615,7 @@ pub(super) async fn event_loop(
                         // Revert per-turn model override on interruption too.
                         if let Some(prev) = app.per_turn_prev_model.take() {
                             app.model = prev.clone();
-                            let _ = app.model_switch_tx.send(prev);
+                            let _ = app.channels.model_switch_tx.send(prev);
                         }
                         app.on_agent_done();
                     }
@@ -1622,7 +1624,7 @@ pub(super) async fn event_loop(
                         // Revert per-turn model override on error too.
                         if let Some(prev) = app.per_turn_prev_model.take() {
                             app.model = prev.clone();
-                            let _ = app.model_switch_tx.send(prev);
+                            let _ = app.channels.model_switch_tx.send(prev);
                         }
                         app.overlay_stack.push(OverlayKind::Error(
                             ErrorOverlay::from_message(msg),
@@ -1660,27 +1662,27 @@ pub(super) async fn event_loop(
                         last_agent_activity = std::time::Instant::now();
                         // Cumulative fields on the agent reset at the start of each Run.
                         // Use delta tracking: if new value < previous, this is a new run.
-                        let delta_in = if input_tokens >= app.session_input_tokens {
-                            input_tokens - app.session_input_tokens
+                        let delta_in = if input_tokens >= app.stats.session_input_tokens {
+                            input_tokens - app.stats.session_input_tokens
                         } else {
                             input_tokens // new run — full value is the delta
                         };
-                        let delta_out = if output_tokens >= app.session_output_tokens {
-                            output_tokens - app.session_output_tokens
+                        let delta_out = if output_tokens >= app.stats.session_output_tokens {
+                            output_tokens - app.stats.session_output_tokens
                         } else {
                             output_tokens
                         };
-                        let delta_cost = if cost_usd >= app.session_cost_usd {
-                            cost_usd - app.session_cost_usd
+                        let delta_cost = if cost_usd >= app.stats.session_cost_usd {
+                            cost_usd - app.stats.session_cost_usd
                         } else {
                             cost_usd
                         };
-                        app.session_input_tokens = input_tokens;
-                        app.session_output_tokens = output_tokens;
-                        app.session_cost_usd = cost_usd;
-                        app.session_total_input_tokens += delta_in;
-                        app.session_total_output_tokens += delta_out;
-                        app.session_total_cost_usd += delta_cost;
+                        app.stats.session_input_tokens = input_tokens;
+                        app.stats.session_output_tokens = output_tokens;
+                        app.stats.session_cost_usd = cost_usd;
+                        app.stats.session_total_input_tokens += delta_in;
+                        app.stats.session_total_output_tokens += delta_out;
+                        app.stats.session_total_cost_usd += delta_cost;
                         app.context_max_tokens = context_max_tokens;
                     }
                     Some(AgentEvent::Compacted { before, after }) => {
@@ -1700,22 +1702,22 @@ pub(super) async fn event_loop(
                             app.push(ChatLine::Info(format!("{} {}", prefix, task)));
                         }
                         // Store last plan so /plan command can show it later.
-                        app.last_plan = Some(tasks.clone());
-                        app.last_plan_snapshot = build_plan_from_tasks(&tasks);
+                        app.plan.last_plan = Some(tasks.clone());
+                        app.plan.last_plan_snapshot = build_plan_from_tasks(&tasks);
                     }
                     Some(AgentEvent::PlanReady { plan }) => {
                         last_agent_activity = std::time::Instant::now();
-                        app.last_plan_snapshot = Some(plan.clone());
-                        app.last_plan = Some(
+                        app.plan.last_plan_snapshot = Some(plan.clone());
+                        app.plan.last_plan = Some(
                             plan.tasks
                                 .iter()
                                 .map(|t| t.description.clone())
                                 .collect::<Vec<_>>(),
                         );
                         // Open the plan editor overlay (blocks execution until user presses x or Esc).
-                        app.plan_selected_task = 0;
-                        app.plan_task_editing = None;
-                        app.plan_editor = Some(PlanEditor::new(plan));
+                        app.plan.selected_task = 0;
+                        app.plan.task_editing = None;
+                        app.plan.editor = Some(PlanEditor::new(plan));
                         // Mark as busy so the spinner shows — agent is paused waiting for plan approval.
                     }
                     Some(AgentEvent::PlanTaskStarted { task_id }) => {

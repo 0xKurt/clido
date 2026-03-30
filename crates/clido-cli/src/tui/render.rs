@@ -21,13 +21,13 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // ── Plan text editor (nano-style) full-screen overlay ───────────────────
-    if app.plan_text_editor.is_some() {
+    if app.plan.text_editor.is_some() {
         render_plan_text_editor(frame, app, area);
         return;
     }
 
     // ── Plan editor full-screen overlay ─────────────────────────────────────
-    if app.plan_editor.is_some() {
+    if app.plan.editor.is_some() {
         render_plan_editor(frame, app, area);
         return;
     }
@@ -106,9 +106,10 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         },
         dim,
     )];
-    if app.session_total_cost_usd > 0.0 {
+    if app.stats.session_total_cost_usd > 0.0 {
         // Format token count (combined in+out for this session)
-        let sum_tokens = app.session_total_input_tokens + app.session_total_output_tokens;
+        let sum_tokens =
+            app.stats.session_total_input_tokens + app.stats.session_total_output_tokens;
         let tok_str = if sum_tokens >= 1_000_000 {
             format!("{:.2}M tok", sum_tokens as f64 / 1_000_000.0)
         } else if sum_tokens >= 1000 {
@@ -118,8 +119,9 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         };
 
         // Context window usage — use last-turn input as proxy
-        let ctx_str = if app.context_max_tokens > 0 && app.session_input_tokens > 0 {
-            let pct = (app.session_input_tokens as f64 / app.context_max_tokens as f64 * 100.0)
+        let ctx_str = if app.context_max_tokens > 0 && app.stats.session_input_tokens > 0 {
+            let pct = (app.stats.session_input_tokens as f64 / app.context_max_tokens as f64
+                * 100.0)
                 .min(100.0);
             format!("  {:.0}% window", pct)
         } else {
@@ -129,7 +131,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         hline2.push(Span::styled(
             format!(
                 "   session: ${:.4}  {}{}",
-                app.session_total_cost_usd, tok_str, ctx_str
+                app.stats.session_total_cost_usd, tok_str, ctx_str
             ),
             dim,
         ));
@@ -1297,7 +1299,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
 }
 
 pub(super) fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
-    let editor = match &app.plan_editor {
+    let editor = match &app.plan.editor {
         Some(e) => e,
         None => return,
     };
@@ -1349,7 +1351,7 @@ pub(super) fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
     // ── Task list ──
     let mut task_lines: Vec<Line<'static>> = Vec::new();
 
-    if let Some(ref form) = app.plan_task_editing {
+    if let Some(ref form) = app.plan.task_editing {
         // Inline edit form for the selected task
         task_lines.push(Line::from(vec![Span::styled(
             "  Edit task",
@@ -1426,8 +1428,8 @@ pub(super) fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
         )]));
     } else {
         // Task list with selection highlight
-        let scroll_start = if app.plan_selected_task >= task_area.height as usize {
-            app.plan_selected_task - task_area.height as usize + 1
+        let scroll_start = if app.plan.selected_task >= task_area.height as usize {
+            app.plan.selected_task - task_area.height as usize + 1
         } else {
             0
         };
@@ -1436,7 +1438,7 @@ pub(super) fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
             if i < scroll_start {
                 continue;
             }
-            let selected = i == app.plan_selected_task;
+            let selected = i == app.plan.selected_task;
             let bg = if selected {
                 TUI_SELECTION_BG
             } else {
@@ -1508,7 +1510,7 @@ pub(super) fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         ""
     };
-    let hint = if app.plan_task_editing.is_some() {
+    let hint = if app.plan.task_editing.is_some() {
         String::new()
     } else {
         format!(
@@ -1530,7 +1532,7 @@ pub(super) fn render_plan_editor(frame: &mut Frame, app: &App, area: Rect) {
 // ── Plan text editor (nano-style) ────────────────────────────────────────────
 
 pub(super) fn render_plan_text_editor(frame: &mut Frame, app: &App, area: Rect) {
-    let ed = match &app.plan_text_editor {
+    let ed = match &app.plan.text_editor {
         Some(e) => e,
         None => return,
     };

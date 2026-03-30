@@ -35,11 +35,11 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
     use KeyModifiers as Km;
 
     let save_and_close = |app: &mut App| {
-        if let Some(ed) = app.plan_text_editor.take() {
+        if let Some(ed) = app.plan.text_editor.take() {
             let tasks = ed.to_tasks();
             if !tasks.is_empty() {
-                app.last_plan = Some(tasks.clone());
-                app.last_plan_snapshot = build_plan_from_tasks(&tasks);
+                app.plan.last_plan = Some(tasks.clone());
+                app.plan.last_plan_snapshot = build_plan_from_tasks(&tasks);
             }
         }
     };
@@ -47,14 +47,14 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
     match (event.modifiers, event.code) {
         (_, Esc) => {
             // Discard changes — close without saving.
-            app.plan_text_editor = None;
+            app.plan.text_editor = None;
         }
         (Km::CONTROL, Char('s')) => save_and_close(app),
         (Km::CONTROL, Char('c')) => {
-            app.plan_text_editor = None;
+            app.plan.text_editor = None;
         }
         (_, Up) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 if ed.cursor_row > 0 {
                     ed.cursor_row -= 1;
                     if ed.cursor_row < ed.scroll {
@@ -65,7 +65,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (_, Down) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 if ed.cursor_row + 1 < ed.lines.len() {
                     ed.cursor_row += 1;
                     ed.clamp_col();
@@ -73,7 +73,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (_, Left) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 if ed.cursor_col > 0 {
                     ed.cursor_col -= 1;
                 } else if ed.cursor_row > 0 {
@@ -83,7 +83,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (_, Right) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 let line_len = ed.lines[ed.cursor_row].chars().count();
                 if ed.cursor_col < line_len {
                     ed.cursor_col += 1;
@@ -94,17 +94,17 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (_, Home) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 ed.cursor_col = 0;
             }
         }
         (_, End) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 ed.cursor_col = ed.lines[ed.cursor_row].chars().count();
             }
         }
         (_, Enter) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 let line = ed.lines[ed.cursor_row].clone();
                 let chars: Vec<char> = line.chars().collect();
                 let col = ed.cursor_col.min(chars.len());
@@ -117,7 +117,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (_, Backspace) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 if ed.cursor_col > 0 {
                     let line = &mut ed.lines[ed.cursor_row];
                     let mut chars: Vec<char> = line.chars().collect();
@@ -133,7 +133,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (_, Delete) => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 let line_len = ed.lines[ed.cursor_row].chars().count();
                 if ed.cursor_col < line_len {
                     let line = &mut ed.lines[ed.cursor_row];
@@ -147,7 +147,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
             }
         }
         (km, Char(c)) if km == Km::NONE || km == Km::SHIFT => {
-            if let Some(ed) = &mut app.plan_text_editor {
+            if let Some(ed) = &mut app.plan.text_editor {
                 let line = &mut ed.lines[ed.cursor_row];
                 let mut chars: Vec<char> = line.chars().collect();
                 let col = ed.cursor_col.min(chars.len());
@@ -160,7 +160,7 @@ pub(super) fn handle_plan_text_editor_key(app: &mut App, event: crossterm::event
     }
 
     // Scroll to keep cursor visible (rough: assume terminal ~30 rows for editor area)
-    if let Some(ed) = &mut app.plan_text_editor {
+    if let Some(ed) = &mut app.plan.text_editor {
         if ed.cursor_row < ed.scroll {
             ed.scroll = ed.cursor_row;
         } else if ed.cursor_row >= ed.scroll + 20 {
@@ -181,10 +181,10 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
     }
 
     // If the inline edit form is active, handle form keys.
-    if app.plan_task_editing.is_some() {
+    if app.plan.task_editing.is_some() {
         match event.code {
             Tab => {
-                if let Some(ref mut form) = app.plan_task_editing {
+                if let Some(ref mut form) = app.plan.task_editing {
                     form.focused_field = match form.focused_field {
                         TaskEditField::Description => TaskEditField::Notes,
                         TaskEditField::Notes => TaskEditField::Complexity,
@@ -193,7 +193,7 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
                 }
             }
             Left | Right => {
-                if let Some(ref mut form) = app.plan_task_editing {
+                if let Some(ref mut form) = app.plan.task_editing {
                     if form.focused_field == TaskEditField::Complexity {
                         form.complexity = match (&form.complexity, event.code) {
                             (Complexity::Low, Right) => Complexity::Medium,
@@ -208,7 +208,7 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
                 }
             }
             Backspace => {
-                if let Some(ref mut form) = app.plan_task_editing {
+                if let Some(ref mut form) = app.plan.task_editing {
                     match form.focused_field {
                         TaskEditField::Description => {
                             form.description.pop();
@@ -221,7 +221,7 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
                 }
             }
             Char(c) => {
-                if let Some(ref mut form) = app.plan_task_editing {
+                if let Some(ref mut form) = app.plan.task_editing {
                     match form.focused_field {
                         TaskEditField::Description => form.description.push(c),
                         TaskEditField::Notes => form.notes.push(c),
@@ -232,7 +232,7 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
             Enter => {
                 // Save the form edits back to the plan.
                 if let (Some(form), Some(ref mut editor)) =
-                    (app.plan_task_editing.take(), app.plan_editor.as_mut())
+                    (app.plan.task_editing.take(), app.plan.editor.as_mut())
                 {
                     let _ = editor.rename_task(&form.task_id, &form.description);
                     let _ = editor.set_notes(&form.task_id, &form.notes);
@@ -240,7 +240,7 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
                 }
             }
             Esc => {
-                app.plan_task_editing = None;
+                app.plan.task_editing = None;
             }
             _ => {}
         }
@@ -249,27 +249,28 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
 
     // Task list navigation.
     let task_count = app
-        .plan_editor
+        .plan
+        .editor
         .as_ref()
         .map(|e| e.plan.tasks.len())
         .unwrap_or(0);
 
     match event.code {
         Up => {
-            if app.plan_selected_task > 0 {
-                app.plan_selected_task -= 1;
+            if app.plan.selected_task > 0 {
+                app.plan.selected_task -= 1;
             }
         }
         Down => {
-            if app.plan_selected_task + 1 < task_count {
-                app.plan_selected_task += 1;
+            if app.plan.selected_task + 1 < task_count {
+                app.plan.selected_task += 1;
             }
         }
         Enter => {
             // Open edit form for selected task.
-            if let Some(ref editor) = app.plan_editor {
-                if let Some(task) = editor.plan.tasks.get(app.plan_selected_task) {
-                    app.plan_task_editing = Some(TaskEditState::new(
+            if let Some(ref editor) = app.plan.editor {
+                if let Some(task) = editor.plan.tasks.get(app.plan.selected_task) {
+                    app.plan.task_editing = Some(TaskEditState::new(
                         &task.id,
                         &task.description,
                         &task.notes,
@@ -280,32 +281,32 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
         }
         Char('d') => {
             // Delete selected task.
-            if let Some(ref mut editor) = app.plan_editor {
-                if let Some(task) = editor.plan.tasks.get(app.plan_selected_task) {
+            if let Some(ref mut editor) = app.plan.editor {
+                if let Some(task) = editor.plan.tasks.get(app.plan.selected_task) {
                     let id = task.id.clone();
                     if editor.delete_task(&id).is_ok()
-                        && app.plan_selected_task >= editor.plan.tasks.len()
-                        && app.plan_selected_task > 0
+                        && app.plan.selected_task >= editor.plan.tasks.len()
+                        && app.plan.selected_task > 0
                     {
-                        app.plan_selected_task -= 1;
+                        app.plan.selected_task -= 1;
                     }
                 }
             }
         }
         Char('n') => {
             // Add a new empty task and open edit form.
-            if let Some(ref mut editor) = app.plan_editor {
+            if let Some(ref mut editor) = app.plan.editor {
                 let new_id = format!("t{}", editor.plan.tasks.len() + 1);
                 let _ = editor.add_task(new_id.clone(), "New task".to_string(), vec![]);
-                app.plan_selected_task = editor.plan.tasks.len() - 1;
-                app.plan_task_editing =
+                app.plan.selected_task = editor.plan.tasks.len() - 1;
+                app.plan.task_editing =
                     Some(TaskEditState::new(&new_id, "New task", "", Complexity::Low));
             }
         }
         Char(' ') => {
             // Toggle skip.
-            if let Some(ref mut editor) = app.plan_editor {
-                if let Some(task) = editor.plan.tasks.get(app.plan_selected_task) {
+            if let Some(ref mut editor) = app.plan.editor {
+                if let Some(task) = editor.plan.tasks.get(app.plan.selected_task) {
                     let id = task.id.clone();
                     let _ = editor.toggle_skip(&id);
                 }
@@ -313,15 +314,15 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
         }
         Char('r') => {
             // Move selected task up (reorder).
-            if let Some(ref mut editor) = app.plan_editor {
-                if editor.move_up(app.plan_selected_task).is_ok() {
-                    app.plan_selected_task -= 1;
+            if let Some(ref mut editor) = app.plan.editor {
+                if editor.move_up(app.plan.selected_task).is_ok() {
+                    app.plan.selected_task -= 1;
                 }
             }
         }
         Char('s') => {
             // Save plan to .clido/plans/.
-            if let Some(ref editor) = app.plan_editor {
+            if let Some(ref editor) = app.plan.editor {
                 match clido_planner::save_plan(&app.workspace_root, &editor.plan) {
                     Ok(path) => {
                         app.push(ChatLine::Info(format!(
@@ -341,8 +342,8 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
         }
         Char('x') => {
             // Execute the plan (or just close if dry-run).
-            if let Some(editor) = app.plan_editor.take() {
-                app.plan_task_editing = None;
+            if let Some(editor) = app.plan.editor.take() {
+                app.plan.task_editing = None;
                 if app.plan_dry_run {
                     app.push(ChatLine::Info(
                         "  [dry-run] plan would execute now (--plan-dry-run active)".into(),
@@ -373,8 +374,8 @@ pub(super) fn handle_plan_editor_key(app: &mut App, event: crossterm::event::Key
         }
         Esc => {
             // Abort plan — close editor without executing.
-            app.plan_editor = None;
-            app.plan_task_editing = None;
+            app.plan.editor = None;
+            app.plan.task_editing = None;
             app.push(ChatLine::Info("  ✗ Plan aborted".into()));
             app.busy = false;
         }
@@ -493,7 +494,7 @@ pub(super) fn handle_profile_overlay_key(app: &mut App, event: crossterm::event:
                                     provider_for_fetch,
                                     value,
                                     base_url_for_fetch,
-                                    app.fetch_tx.clone(),
+                                    app.channels.fetch_tx.clone(),
                                 );
                                 app.models_loading = true;
                             }
@@ -835,7 +836,7 @@ pub(super) fn handle_profile_overlay_key(app: &mut App, event: crossterm::event:
                             app.quit = true;
                         } else {
                             // Only model changed — live-switch
-                            let _ = app.model_switch_tx.send(new_model);
+                            let _ = app.channels.model_switch_tx.send(new_model);
                         }
                     }
                 }
@@ -871,7 +872,7 @@ pub(super) fn handle_profile_overlay_key(app: &mut App, event: crossterm::event:
                             app.wants_profile_switch = Some(name);
                             app.quit = true;
                         } else {
-                            let _ = app.model_switch_tx.send(new_model);
+                            let _ = app.channels.model_switch_tx.send(new_model);
                         }
                     }
                 }
@@ -948,7 +949,7 @@ pub(super) fn char_byte_pos_tui(s: &str, char_idx: usize) -> usize {
 pub(super) fn handle_app_action(app: &mut App, action: AppAction) {
     match action {
         AppAction::SwitchModel { model_id, save } => {
-            let _ = app.model_switch_tx.send(model_id.clone());
+            let _ = app.channels.model_switch_tx.send(model_id.clone());
             app.model = model_id;
             if save {
                 // persist to config
@@ -959,7 +960,7 @@ pub(super) fn handle_app_action(app: &mut App, action: AppAction) {
             app.quit = true;
         }
         AppAction::ResumeSession { session_id } => {
-            let _ = app.resume_tx.send(session_id);
+            let _ = app.channels.resume_tx.send(session_id);
         }
         AppAction::GrantPermission(_grant) => {
             // TODO: wire when permission overlay is migrated
@@ -1024,13 +1025,13 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
     }
 
     // ── Plan text editor (nano-style, intercepts all keys) ───────────────────
-    if app.plan_text_editor.is_some() {
+    if app.plan.text_editor.is_some() {
         handle_plan_text_editor_key(app, event);
         return;
     }
 
     // ── Plan editor (full-screen modal — intercepts all keys) ────────────────
-    if app.plan_editor.is_some() {
+    if app.plan.editor.is_some() {
         handle_plan_editor_key(app, event);
         return;
     }
@@ -1115,7 +1116,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                         let entry = filtered[picker.selected].clone();
                         // Switch model.
                         app.model = entry.id.clone();
-                        let _ = app.model_switch_tx.send(entry.id.clone());
+                        let _ = app.channels.model_switch_tx.send(entry.id.clone());
                         // Update recency.
                         app.model_prefs.push_recent(&entry.id);
                         app.model_prefs.save();
@@ -1190,7 +1191,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                         if app.current_session_id.as_deref() == Some(&id) {
                             app.push(ChatLine::Info("  Already in this session".into()));
                         } else {
-                            let _ = app.resume_tx.send(id);
+                            let _ = app.channels.resume_tx.send(id);
                         }
                     }
                 }
@@ -1290,7 +1291,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                         let model_id = model_id.clone();
                         let role_name = role_name.clone();
                         app.model = model_id.clone();
-                        let _ = app.model_switch_tx.send(model_id.clone());
+                        let _ = app.channels.model_switch_tx.send(model_id.clone());
                         app.model_prefs.push_recent(&model_id);
                         app.model_prefs.save();
                         app.push(ChatLine::Info(format!(
@@ -1410,7 +1411,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     app.provider.clone(),
                     app.api_key.clone(),
                     app.base_url.clone(),
-                    app.fetch_tx.clone(),
+                    app.channels.fetch_tx.clone(),
                 );
                 app.models_loading = true;
             }

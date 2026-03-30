@@ -60,7 +60,7 @@ use crate::prompt_enhance::{
     PromptRules,
 };
 use crate::repl::expand_at_file_refs;
-use clido_planner::{Plan, PlanEditor};
+use clido_planner::Plan;
 
 use crate::overlay::{ErrorOverlay, OverlayKind, OverlayStack};
 use crate::text_input::TextInput;
@@ -355,13 +355,7 @@ pub(super) struct App {
     pub(super) pending_perm: Option<PendingPerm>,
     /// Unified overlay stack (errors, read-only, choices, etc.)
     pub(super) overlay_stack: OverlayStack,
-    pub(super) prompt_tx: mpsc::UnboundedSender<String>,
-    /// Channel to request session resume in agent_task.
-    pub(super) resume_tx: mpsc::UnboundedSender<String>,
-    /// Channel to switch the session model in agent_task.
-    pub(super) model_switch_tx: mpsc::UnboundedSender<String>,
-    /// Channel to update tool workspace in agent_task.
-    pub(super) workdir_tx: mpsc::UnboundedSender<std::path::PathBuf>,
+    pub(super) channels: AgentChannels,
     /// Inputs queued while agent was busy — drained FIFO when agent finishes.
     pub(super) queued: VecDeque<String>,
     /// Session picker popup state (Some = popup visible).
@@ -413,28 +407,11 @@ pub(super) struct App {
     pub(super) workspace_root: std::path::PathBuf,
 
     /// Last completed agent invocation's token totals (for context % in header).
-    pub(super) session_input_tokens: u64,
-    pub(super) session_output_tokens: u64,
-    pub(super) session_cost_usd: f64,
-    /// Running totals across all completed turns in this TUI session (including planning calls).
-    pub(super) session_total_input_tokens: u64,
-    pub(super) session_total_output_tokens: u64,
-    pub(super) session_total_cost_usd: f64,
-    /// Number of completed agent turns in this TUI session.
-    pub(super) session_turn_count: u32,
+    pub(super) stats: SessionStats,
     /// Max context window in tokens for the current model (0 = unknown).
     pub(super) context_max_tokens: u64,
     /// Channel to trigger immediate context compaction in agent_task.
-    pub(super) compact_now_tx: mpsc::UnboundedSender<()>,
-    /// Last plan produced by the planner (--planner mode) or parsed from a /plan <task> response.
-    /// This is the canonical in-memory representation used for save + display.
-    pub(super) last_plan_snapshot: Option<Plan>,
-    /// Convenience list of top-level task descriptions derived from `last_plan_snapshot`.
-    pub(super) last_plan: Option<Vec<String>>,
-    /// Raw text of the last plan response — used by the text editor to show unmodified formatting.
-    pub(super) last_plan_raw: Option<String>,
-    /// Set to true when /plan <task> is sent; cleared after the agent responds and the plan is parsed.
-    pub(super) awaiting_plan_response: bool,
+    pub(super) plan: PlanState,
     /// When true, fire desktop notification + terminal bell after each agent turn
     /// (subject to the MIN_ELAPSED_SECS gate in `notify.rs`).
     pub(super) notify_enabled: bool,
@@ -455,16 +432,10 @@ pub(super) struct App {
     /// Shared state: image to attach to the next prompt.  Written by the TUI on send,
     /// drained by agent_task before calling run/run_next_turn.
     pub(super) image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
-    /// When `Some`, the plan editor full-screen overlay is active (--plan flag mode).
-    pub(super) plan_editor: Option<PlanEditor>,
-    /// Currently selected task index in the plan editor list.
-    pub(super) plan_selected_task: usize,
-    /// When `Some`, the inline task edit form is active.
-    pub(super) plan_task_editing: Option<TaskEditState>,
+
     /// Whether we're in plan dry-run mode (show editor but never execute).
     pub(super) plan_dry_run: bool,
-    /// Simple nano-style text editor for /plan edit.
-    pub(super) plan_text_editor: Option<PlanTextEditor>,
+
     /// Current plan step being executed, extracted from agent text (e.g. "Step 3: Write contract").
     pub(super) current_step: Option<String>,
     /// The step number most recently seen while the agent was executing a plan.
@@ -484,8 +455,7 @@ pub(super) struct App {
     pub(super) api_key: String,
     /// Optional custom base URL for the active profile's provider.
     pub(super) base_url: Option<String>,
-    /// Channel to send AgentEvents from background tasks (e.g. model fetch) to the TUI loop.
-    pub(super) fetch_tx: mpsc::UnboundedSender<AgentEvent>,
+
     /// True while a model-list fetch is in progress (shows spinner in model picker).
     pub(super) models_loading: bool,
     /// Render cache: maps (content_hash, render_width) to pre-built Line<'static> slices.
@@ -502,11 +472,7 @@ pub(super) struct App {
 impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        prompt_tx: mpsc::UnboundedSender<String>,
-        resume_tx: mpsc::UnboundedSender<String>,
-        model_switch_tx: mpsc::UnboundedSender<String>,
-        workdir_tx: mpsc::UnboundedSender<std::path::PathBuf>,
-        compact_now_tx: mpsc::UnboundedSender<()>,
+        channels: AgentChannels,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
         provider: String,
         model: String,
@@ -523,7 +489,6 @@ impl App {
         todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
         api_key: String,
         base_url: Option<String>,
-        fetch_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Self {
         let mut app = Self {
             messages: Vec::new(),
@@ -537,10 +502,7 @@ impl App {
             spinner_tick: 0,
             pending_perm: None,
             overlay_stack: OverlayStack::new(),
-            prompt_tx,
-            resume_tx,
-            model_switch_tx,
-            workdir_tx,
+            channels,
             queued: VecDeque::new(),
             session_picker: None,
             model_picker: None,
@@ -568,19 +530,9 @@ impl App {
             session_title: None,
             workspace_root,
 
-            session_input_tokens: 0,
-            session_output_tokens: 0,
-            session_cost_usd: 0.0,
-            session_total_input_tokens: 0,
-            session_total_output_tokens: 0,
-            session_total_cost_usd: 0.0,
-            session_turn_count: 0,
+            stats: SessionStats::default(),
             context_max_tokens: 0,
-            compact_now_tx,
-            last_plan_snapshot: None,
-            last_plan: None,
-            last_plan_raw: None,
-            awaiting_plan_response: false,
+            plan: PlanState::default(),
             notify_enabled,
             reviewer_enabled,
             recovering: false,
@@ -589,10 +541,6 @@ impl App {
             per_turn_prev_model: None,
             pending_image: None,
             image_state,
-            plan_editor: None,
-            plan_selected_task: 0,
-            plan_task_editing: None,
-            plan_text_editor: None,
             current_step: None,
             last_executed_step_num: None,
             plan_dry_run,
@@ -603,7 +551,6 @@ impl App {
             prompt_preview_text: None,
             api_key,
             base_url,
-            fetch_tx,
             models_loading: false,
             render_cache: std::collections::HashMap::new(),
             render_cache_msg_count: 0,
@@ -644,7 +591,7 @@ impl App {
     /// If input starts with `@model-name prompt`, applies a per-turn model override.
     /// Send `prompt` to the agent without showing anything in the chat.
     pub(super) fn send_silent(&mut self, prompt: String) {
-        let _ = self.prompt_tx.send(prompt);
+        let _ = self.channels.prompt_tx.send(prompt);
         self.text_input.text.clear();
         self.text_input.cursor = 0;
         self.busy = true;
@@ -669,7 +616,7 @@ impl App {
         {
             self.per_turn_prev_model = Some(self.model.clone());
             self.model = per_turn_model.clone();
-            let _ = self.model_switch_tx.send(per_turn_model.clone());
+            let _ = self.channels.model_switch_tx.send(per_turn_model.clone());
             self.push(ChatLine::Info(format!(
                 "  ↻ Using {} for this turn only",
                 per_turn_model
@@ -681,7 +628,7 @@ impl App {
                     self.text_input.history.remove(0);
                 }
             }
-            self.prompt_tx.send(actual_prompt)
+            self.channels.prompt_tx.send(actual_prompt)
         } else {
             self.push(ChatLine::User(text.clone()));
             if self.text_input.history.last().map(|s| s.as_str()) != Some(text.as_str()) {
@@ -690,7 +637,7 @@ impl App {
                     self.text_input.history.remove(0);
                 }
             }
-            self.prompt_tx.send(text)
+            self.channels.prompt_tx.send(text)
         };
 
         if send_result.is_err() {
@@ -890,7 +837,7 @@ impl App {
         self.current_step = None;
         self.cancel
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.session_turn_count += 1;
+        self.stats.session_turn_count += 1;
 
         // Show elapsed time for the completed turn.
         if let Some(start) = self.turn_start {
@@ -911,7 +858,7 @@ impl App {
 
         // If a plan was running and not all steps were completed, show remaining steps.
         if let Some(last_num) = self.last_executed_step_num {
-            if let Some(plans) = self.last_plan.clone() {
+            if let Some(plans) = self.plan.last_plan.clone() {
                 let total = plans.len();
                 if last_num < total {
                     self.push(ChatLine::Info(format!(
@@ -941,21 +888,21 @@ impl App {
                 }
             }
         }
-        if self.awaiting_plan_response {
-            self.awaiting_plan_response = false;
+        if self.plan.awaiting_plan_response {
+            self.plan.awaiting_plan_response = false;
             if let Some(text) = self.last_assistant_text().map(|s| s.to_string()) {
-                self.last_plan_raw = Some(text.clone());
+                self.plan.last_plan_raw = Some(text.clone());
                 if let Some(plan) = build_plan_from_assistant_text(&text) {
                     if let Err(e) = clido_planner::save_plan(&self.workspace_root, &plan) {
                         self.push(ChatLine::Info(format!("  ⚠ Could not save plan: {}", e)));
                     }
-                    self.last_plan = Some(
+                    self.plan.last_plan = Some(
                         plan.tasks
                             .iter()
                             .map(|t| t.description.clone())
                             .collect::<Vec<_>>(),
                     );
-                    self.last_plan_snapshot = Some(plan);
+                    self.plan.last_plan_snapshot = Some(plan);
                 }
             }
         }
@@ -998,11 +945,14 @@ mod tests {
         let (compact_now_tx, _compact_now_rx) = mpsc::unbounded_channel();
         let (fetch_tx, _fetch_rx) = mpsc::unbounded_channel();
         App::new(
-            prompt_tx,
-            resume_tx,
-            model_switch_tx,
-            workdir_tx,
-            compact_now_tx,
+            AgentChannels {
+                prompt_tx,
+                resume_tx,
+                model_switch_tx,
+                workdir_tx,
+                compact_now_tx,
+                fetch_tx,
+            },
             Arc::new(AtomicBool::new(false)),
             "openrouter".to_string(),
             "default-model".to_string(),
@@ -1019,7 +969,6 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             String::new(),
             None,
-            fetch_tx,
         )
     }
 

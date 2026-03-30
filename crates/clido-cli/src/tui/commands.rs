@@ -213,7 +213,7 @@ pub(super) fn cmd_fast(app: &mut App) {
         .cloned()
         .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
     app.model = new_model.clone();
-    let _ = app.model_switch_tx.send(new_model.clone());
+    let _ = app.channels.model_switch_tx.send(new_model.clone());
     app.model_prefs.push_recent(&new_model);
     app.model_prefs.save();
     app.push(ChatLine::Info(format!("  ✓ Model: {} (fast)", new_model)));
@@ -226,7 +226,7 @@ pub(super) fn cmd_smart(app: &mut App) {
         .cloned()
         .unwrap_or_else(|| "claude-opus-4-6".to_string());
     app.model = new_model.clone();
-    let _ = app.model_switch_tx.send(new_model.clone());
+    let _ = app.channels.model_switch_tx.send(new_model.clone());
     app.model_prefs.push_recent(&new_model);
     app.model_prefs.save();
     app.push(ChatLine::Info(format!("  ✓ Model: {} (smart)", new_model)));
@@ -243,7 +243,7 @@ pub(super) fn cmd_model(app: &mut App, cmd: &str) {
                 app.provider.clone(),
                 app.api_key.clone(),
                 app.base_url.clone(),
-                app.fetch_tx.clone(),
+                app.channels.fetch_tx.clone(),
             );
             app.models_loading = true;
         }
@@ -256,7 +256,7 @@ pub(super) fn cmd_model(app: &mut App, cmd: &str) {
     } else {
         let new_model = arg.to_string();
         app.model = new_model.clone();
-        let _ = app.model_switch_tx.send(new_model.clone());
+        let _ = app.channels.model_switch_tx.send(new_model.clone());
         app.model_prefs.push_recent(&new_model);
         app.model_prefs.save();
         app.push(ChatLine::Info(format!("  ✓ Model: {}", new_model)));
@@ -271,7 +271,7 @@ pub(super) fn cmd_models(app: &mut App) {
             app.provider.clone(),
             app.api_key.clone(),
             app.base_url.clone(),
-            app.fetch_tx.clone(),
+            app.channels.fetch_tx.clone(),
         );
         app.models_loading = true;
     }
@@ -377,7 +377,7 @@ pub(super) fn cmd_role(app: &mut App, cmd: &str) {
         match model_id {
             Some(id) => {
                 app.model = id.clone();
-                let _ = app.model_switch_tx.send(id.clone());
+                let _ = app.channels.model_switch_tx.send(id.clone());
                 app.model_prefs.push_recent(&id);
                 app.model_prefs.save();
                 app.push(ChatLine::Info(format!(
@@ -469,7 +469,7 @@ pub(super) fn cmd_workdir_arg(app: &mut App, cmd: &str) {
     let arg = cmd.trim_start_matches("/workdir").trim();
     match resolve_workdir_arg(arg) {
         Ok(path) => {
-            let _ = app.workdir_tx.send(path.clone());
+            let _ = app.channels.workdir_tx.send(path.clone());
             app.push(ChatLine::Info(format!(
                 "  ↻ Switching to {}…",
                 path.display()
@@ -726,31 +726,31 @@ pub(super) fn cmd_memory(app: &mut App, cmd: &str) {
 }
 
 pub(super) fn cmd_cost(app: &mut App) {
-    if app.session_total_cost_usd == 0.0 {
+    if app.stats.session_total_cost_usd == 0.0 {
         app.push(ChatLine::Info(
             "  Session cost: $0.0000 (no API calls yet)".into(),
         ));
     } else {
         app.push(ChatLine::Info(format!(
             "  Session cost: ${:.4}",
-            app.session_total_cost_usd
+            app.stats.session_total_cost_usd
         )));
     }
 }
 
 pub(super) fn cmd_tokens(app: &mut App) {
-    let total = app.session_total_input_tokens + app.session_total_output_tokens;
+    let total = app.stats.session_total_input_tokens + app.stats.session_total_output_tokens;
     let total_str = if total >= 1000 {
         format!("{:.1}k", total as f64 / 1000.0)
     } else {
         total.to_string()
     };
-    let ctx_pct = if app.context_max_tokens > 0 && app.session_input_tokens > 0 {
-        let pct =
-            (app.session_input_tokens as f64 / app.context_max_tokens as f64 * 100.0).min(100.0);
+    let ctx_pct = if app.context_max_tokens > 0 && app.stats.session_input_tokens > 0 {
+        let pct = (app.stats.session_input_tokens as f64 / app.context_max_tokens as f64 * 100.0)
+            .min(100.0);
         format!(
             "  Context window: {:.0}% used ({} / {} tokens)",
-            pct, app.session_input_tokens, app.context_max_tokens
+            pct, app.stats.session_input_tokens, app.context_max_tokens
         )
     } else {
         String::new()
@@ -760,24 +760,24 @@ pub(super) fn cmd_tokens(app: &mut App) {
     ));
     app.push(ChatLine::Info(format!(
         "  Input tokens:   {}",
-        app.session_total_input_tokens
+        app.stats.session_total_input_tokens
     )));
     app.push(ChatLine::Info(format!(
         "  Output tokens:  {}",
-        app.session_total_output_tokens
+        app.stats.session_total_output_tokens
     )));
     app.push(ChatLine::Info(format!("  Total tokens:   {}", total_str)));
     app.push(ChatLine::Info(format!(
         "  Estimated cost: ${:.6}",
-        app.session_total_cost_usd
+        app.stats.session_total_cost_usd
     )));
     if !ctx_pct.is_empty() {
         app.push(ChatLine::Info(ctx_pct));
     }
-    if app.session_turn_count > 0 {
+    if app.stats.session_turn_count > 0 {
         app.push(ChatLine::Info(format!(
             "  Turns completed: {}",
-            app.session_turn_count
+            app.stats.session_turn_count
         )));
     }
 }
@@ -868,9 +868,9 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
     let sub = cmd.trim_start_matches("/plan").trim().to_string();
     match sub.as_str() {
         "edit" => {
-            if let Some(raw) = app.last_plan_raw.clone() {
-                app.plan_text_editor = Some(PlanTextEditor::from_raw(&raw));
-            } else if let Some(plan) = app.last_plan_snapshot.clone() {
+            if let Some(raw) = app.plan.last_plan_raw.clone() {
+                app.plan.text_editor = Some(PlanTextEditor::from_raw(&raw));
+            } else if let Some(plan) = app.plan.last_plan_snapshot.clone() {
                 let raw = plan
                     .tasks
                     .iter()
@@ -878,8 +878,8 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
                     .map(|(i, t)| format!("Step {}: {}", i + 1, t.description))
                     .collect::<Vec<_>>()
                     .join("\n");
-                app.plan_text_editor = Some(PlanTextEditor::from_raw(&raw));
-            } else if let Some(tasks) = app.last_plan.clone() {
+                app.plan.text_editor = Some(PlanTextEditor::from_raw(&raw));
+            } else if let Some(tasks) = app.plan.last_plan.clone() {
                 // fallback for plans from --plan mode (no raw text available)
                 let raw = tasks
                     .iter()
@@ -887,7 +887,7 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
                     .map(|(i, t)| format!("Step {}: {}", i + 1, t))
                     .collect::<Vec<_>>()
                     .join("\n");
-                app.plan_text_editor = Some(PlanTextEditor::from_raw(&raw));
+                app.plan.text_editor = Some(PlanTextEditor::from_raw(&raw));
             } else {
                 app.push(ChatLine::Info(
                     "  ✗ No plan yet — use /plan <task> to create one".into(),
@@ -895,9 +895,9 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
             }
         }
         "save" => {
-            if let Some(ref editor) = app.plan_editor {
-                app.last_plan_snapshot = Some(editor.plan.clone());
-                app.last_plan = Some(
+            if let Some(ref editor) = app.plan.editor {
+                app.plan.last_plan_snapshot = Some(editor.plan.clone());
+                app.plan.last_plan = Some(
                     editor
                         .plan
                         .tasks
@@ -918,7 +918,7 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
                             ))))
                     }
                 }
-            } else if let Some(ref plan) = app.last_plan_snapshot {
+            } else if let Some(ref plan) = app.plan.last_plan_snapshot {
                 match clido_planner::save_plan(&app.workspace_root, plan) {
                     Ok(path) => app.push(ChatLine::Info(format!(
                         "  ✓ Plan saved: {}",
@@ -981,7 +981,7 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
         },
         "" => {
             // /plan with no task — show existing plan if any
-            if let Some(plan) = app.last_plan_snapshot.clone() {
+            if let Some(plan) = app.plan.last_plan_snapshot.clone() {
                 if plan.tasks.is_empty() {
                     app.push(ChatLine::Info(
                         "  Usage: /plan <task>  — have the agent plan before executing".into(),
@@ -999,7 +999,7 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
                     app.push(ChatLine::Info(format!("{} {}", prefix, t.description)));
                 }
             } else {
-                match app.last_plan.clone() {
+                match app.plan.last_plan.clone() {
                     Some(tasks) if !tasks.is_empty() => {
                         app.push(ChatLine::Info("  ┌─ Current plan:".into()));
                         let count = tasks.len();
@@ -1023,7 +1023,7 @@ pub(super) fn cmd_plan(app: &mut App, cmd: &str) {
         task => {
             // /plan <task> — ask the agent to plan first, then wait for confirmation
             let task = task.to_string();
-            app.awaiting_plan_response = true;
+            app.plan.awaiting_plan_response = true;
             let prompt = format!(
                 "Create a detailed step-by-step plan for the following task. \
                  Number each top-level step as \"Step N: description\". \
@@ -1554,8 +1554,8 @@ pub(super) fn cmd_config(app: &mut App) {
                 app.push(ChatLine::Info(format!("  max-context-tokens  {}", max_ctx)));
             }
             // Show live session token usage if available.
-            if app.session_input_tokens > 0 {
-                let used = app.session_input_tokens;
+            if app.stats.session_input_tokens > 0 {
+                let used = app.stats.session_input_tokens;
                 let limit = if app.context_max_tokens > 0 {
                     app.context_max_tokens
                 } else {
@@ -1932,7 +1932,7 @@ pub(super) fn execute_slash(app: &mut App, cmd: &str) {
                 ));
             } else {
                 app.push(ChatLine::Info("  ↻ Compressing context window…".into()));
-                let _ = app.compact_now_tx.send(());
+                let _ = app.channels.compact_now_tx.send(());
             }
         }
         "/todo" => cmd_todo(app),
