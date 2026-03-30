@@ -190,17 +190,38 @@ pub(super) async fn agent_task(
         perms: perms.clone(),
     }));
 
-    let session_id = if let Some(id) = &cli.resume {
-        id.clone()
+    // Deduplication: check for existing sessions created within the last 5 seconds
+    // with the same content to prevent duplicate sessions during rapid recovery.
+    // Check for recent session to prevent duplicates during rapid recovery
+    let (session_id, writer_result): (String, anyhow::Result<SessionWriter>) = if let Some(id) =
+        &cli.resume
+    {
+        (id.clone(), SessionWriter::append(&workspace_root, id))
     } else {
-        uuid::Uuid::new_v4().to_string()
+        // Check if a session was created very recently (within 5 seconds) to prevent
+        // duplicate sessions when recovery races or multiple runtimes start simultaneously.
+        match clido_storage::find_recent_session(&workspace_root, std::time::Duration::from_secs(5))
+        {
+            Some(existing_id) => {
+                tracing::info!(
+                    "Reusing recent session {} instead of creating new",
+                    existing_id
+                );
+                (
+                    existing_id.clone(),
+                    SessionWriter::append(&workspace_root, &existing_id),
+                )
+            }
+            None => {
+                let new_id = uuid::Uuid::new_v4().to_string();
+                (
+                    new_id.clone(),
+                    SessionWriter::create(&workspace_root, &new_id),
+                )
+            }
+        }
     };
-    let writer = if cli.resume.is_some() {
-        SessionWriter::append(&workspace_root, &session_id)
-    } else {
-        SessionWriter::create(&workspace_root, &session_id)
-    };
-    let mut writer = match writer {
+    let mut writer = match writer_result {
         Ok(w) => w,
         Err(e) => {
             if event_tx.send(AgentEvent::Err(e.to_string())).is_err() {

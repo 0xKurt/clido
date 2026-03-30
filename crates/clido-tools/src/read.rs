@@ -124,31 +124,48 @@ impl Tool for ReadTool {
         };
 
         // Check the in-memory read cache before hitting disk.
+        let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         if let Some(ref cache) = self.read_cache {
             if let Some(cached) = cache.get(&path, &cache_hash) {
-                let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                if offset == 0 && limit == 0 {
-                    // Full-file read: return cached directly.
-                    if let Some(ref tracker) = self.tracker {
-                        let mtime = meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0);
-                        tracker.record(&path, mtime);
-                    }
-                    // Re-format with line numbers.
-                    let lines: Vec<&str> = cached.lines().collect();
-                    let out: String = lines
-                        .iter()
-                        .enumerate()
-                        .map(|(i, line)| format!("{:>6}\u{2192}{}", i + 1, line))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    return ToolOutput::ok(out);
+                // Cache hit - use cached content for full or partial reads.
+                if let Some(ref tracker) = self.tracker {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    tracker.record(&path, mtime);
                 }
+                // Re-format with line numbers, applying offset/limit if specified.
+                let lines: Vec<&str> = cached.lines().collect();
+                let total = lines.len();
+                let (start, end) = if offset >= 1 {
+                    let start = (offset - 1).min(total);
+                    let end = if limit > 0 {
+                        (start + limit).min(total)
+                    } else {
+                        total
+                    };
+                    (start, end)
+                } else {
+                    (0, total)
+                };
+                // Handle out-of-range offset.
+                if start >= total && offset > 0 && !cached.is_empty() {
+                    return ToolOutput::err(format!(
+                        "File has {} lines; offset {} is out of range.",
+                        total, offset
+                    ));
+                }
+                let selected: Vec<String> = lines[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| format!("{:>6}\u{2192}{}", start + i + 1, line))
+                    .collect();
+                let out = selected.join("\n");
+                return ToolOutput::ok(out);
             }
         }
 
@@ -161,9 +178,6 @@ impl Tool for ReadTool {
         if let Some(ref cache) = self.read_cache {
             cache.insert(path.clone(), cache_hash, content.clone());
         }
-
-        let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();

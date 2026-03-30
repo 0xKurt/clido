@@ -121,6 +121,34 @@ pub struct PromptRules {
 }
 
 impl PromptRules {
+    /// Built-in default rules applied when no user rules exist.
+    /// Users can remove these with `/prompt-rules remove <id>`.
+    pub fn defaults() -> Vec<RuleEntry> {
+        vec![
+            RuleEntry {
+                id: "follow-style".into(),
+                text: "Follow the existing code style and conventions in the project".into(),
+                confidence: 0.8,
+                source: "builtin".into(),
+                observation_count: 0,
+            },
+            RuleEntry {
+                id: "error-handling".into(),
+                text: "Add proper error handling — avoid unwrap/expect in production code".into(),
+                confidence: 0.8,
+                source: "builtin".into(),
+                observation_count: 0,
+            },
+            RuleEntry {
+                id: "minimal-changes".into(),
+                text: "Make minimal, focused changes — don't refactor unrelated code".into(),
+                confidence: 0.8,
+                source: "builtin".into(),
+                observation_count: 0,
+            },
+        ]
+    }
+
     /// Rules that are active (confidence ≥ 0.5), deduplicated by id.
     pub fn active_rules(&self) -> Vec<&RuleEntry> {
         let mut seen = std::collections::HashSet::new();
@@ -235,7 +263,7 @@ pub fn enhance_prompt(raw: &str, ctx: &EnhancementCtx<'_>) -> (String, bool) {
 /// Returns true when the prompt looks like a coding or modification task rather
 /// than an informational / read / question request.  Used to gate rule injection
 /// so that prompts like "show me config.toml" are never altered.
-fn looks_like_coding_task(prompt: &str) -> bool {
+pub fn looks_like_coding_task(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
 
     // Questions are informational.
@@ -433,6 +461,14 @@ pub fn load_rules(workspace: &Path) -> PromptRules {
     }
 
     merged.version = 1;
+
+    // Inject built-in defaults when no rules exist yet.
+    if merged.rules.is_empty() {
+        for rule in PromptRules::defaults() {
+            merged.rules.push(rule);
+        }
+    }
+
     merged
 }
 

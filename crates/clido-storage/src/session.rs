@@ -338,6 +338,52 @@ pub fn delete_session(project_path: &Path, session_id: &str) -> anyhow::Result<(
     Ok(())
 }
 
+/// Find a session created within the last `max_age` duration.
+/// Returns the session_id of the most recent matching session, or None if none found.
+/// Used to prevent duplicate sessions during rapid recovery or simultaneous runtime starts.
+pub fn find_recent_session(project_path: &Path, max_age: std::time::Duration) -> Option<String> {
+    let dir = paths::session_dir_for_project(project_path).ok()?;
+    if !dir.exists() {
+        return None;
+    }
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+    let mut most_recent: Option<(std::time::SystemTime, String)> = None;
+
+    for entry in std::fs::read_dir(&dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(modified) = meta.modified() {
+                    if modified >= cutoff {
+                        // Check if this session has content (not just empty)
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            if let Ok(lines) = SessionReader::load(project_path, stem) {
+                                // Only consider sessions that have user messages (not just meta)
+                                let has_content = lines
+                                    .iter()
+                                    .any(|l| matches!(l, SessionLine::UserMessage { .. }));
+                                if has_content
+                                    && most_recent
+                                        .as_ref()
+                                        .map(|(t, _)| modified > *t)
+                                        .unwrap_or(true)
+                                {
+                                    most_recent = Some((modified, stem.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    most_recent.map(|(_, id)| id)
+}
+
 /// List sessions for a project (newest first). Reads session dir and parses first line for meta.
 pub fn list_sessions(project_path: &Path) -> anyhow::Result<Vec<SessionSummary>> {
     let dir = paths::session_dir_for_project(project_path)?;

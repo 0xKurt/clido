@@ -76,7 +76,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         hline1.push(Span::styled(
             format!("  — {}", title),
             Style::default()
-                .fg(Color::Rgb(180, 200, 230))
+                .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         ));
     }
@@ -128,13 +128,19 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
             String::new()
         };
 
+        // Cost display — show "spent / budget" when budget is set
+        let cost_str = if let Some(budget) = app.max_budget_usd {
+            format!("${:.4} / ${:.2}", app.stats.session_total_cost_usd, budget)
+        } else {
+            format!("${:.4}", app.stats.session_total_cost_usd)
+        };
+
         hline2.push(Span::styled(
-            format!(
-                "   session: ${:.4}  {}{}",
-                app.stats.session_total_cost_usd, tok_str, ctx_str
-            ),
+            format!("   session: {}  {}{}", cost_str, tok_str, ctx_str),
             dim,
         ));
+    } else if let Some(budget) = app.max_budget_usd {
+        hline2.push(Span::styled(format!("   budget: ${:.2}", budget), dim));
     }
 
     // Decide header height: 1 line if everything fits side-by-side, else 2.
@@ -1657,6 +1663,8 @@ pub(super) fn render_welcome(frame: &mut Frame, app: &App, area: Rect) {
     let accent = Style::default()
         .fg(TUI_SOFT_ACCENT)
         .add_modifier(Modifier::BOLD);
+    let dim_green = Style::default().fg(Color::Rgb(100, 180, 120));
+    let dim_yellow = Style::default().fg(Color::Rgb(200, 180, 90));
 
     // Shorten workdir to ~/...
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1665,6 +1673,31 @@ pub(super) fn render_welcome(frame: &mut Frame, app: &App, area: Rect) {
         format!("~{}", &raw[home.len()..])
     } else {
         raw
+    };
+
+    // Key status
+    let key_status = if app.api_key.is_empty() {
+        Span::styled("key ✗", Style::default().fg(Color::Red))
+    } else {
+        Span::styled("key ✓", dim_green)
+    };
+
+    // Budget display
+    let budget_span = match clido_core::load_config(&app.workspace_root) {
+        Ok(cfg) => {
+            if let Some(b) = cfg.agent.max_budget_usd {
+                Span::styled(format!("budget ${:.2}", b), dim_yellow)
+            } else {
+                Span::styled("budget unlimited", muted)
+            }
+        }
+        Err(_) => Span::styled("budget unlimited", muted),
+    };
+
+    // Prompt enhancement mode
+    let prompt_span = match app.prompt_mode {
+        PromptMode::Auto => Span::styled("prompt ✦ auto", dim_green),
+        PromptMode::Off => Span::styled("prompt off", muted),
     };
 
     let content: Vec<Line<'static>> = vec![
@@ -1677,16 +1710,28 @@ pub(super) fn render_welcome(frame: &mut Frame, app: &App, area: Rect) {
                 app.current_profile.clone(),
                 soft.add_modifier(Modifier::BOLD),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("    provider ".to_string(), muted),
+            Span::styled(app.provider.clone(), soft),
             Span::styled("  ·  ".to_string(), muted),
             Span::styled(app.model.clone(), soft),
         ]),
+        Line::from(vec![
+            Span::styled("    ".to_string(), muted),
+            key_status,
+            Span::styled("  ·  ".to_string(), muted),
+            budget_span,
+            Span::styled("  ·  ".to_string(), muted),
+            prompt_span,
+        ]),
         Line::raw(""),
         Line::from(Span::styled(
-            "    /help   /model   /role   /workdir".to_string(),
+            "    /help   /model   /settings   /config".to_string(),
             accent,
         )),
         Line::from(Span::styled(
-            "    Enter=send  ·  Ctrl+/=stop  ·  Ctrl+Enter=interrupt+send".to_string(),
+            "    ↑↓=history  PgUp/Dn=scroll  Ctrl+/=stop".to_string(),
             muted,
         )),
         Line::raw(""),
@@ -2739,17 +2784,22 @@ pub(super) fn build_lines_w_uncached(app: &App, width: usize) -> Vec<Line<'stati
                 out.push(Line::raw(""));
             }
             ChatLine::Assistant(text) => {
-                let label = if app.model.is_empty() {
-                    "clido".to_string()
-                } else {
-                    app.model.clone()
-                };
-                out.push(Line::from(vec![Span::styled(
-                    label,
+                // Always show "clido" as the main label; model name follows in dim gray.
+                let mut spans = vec![Span::styled(
+                    "clido",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
-                )]));
+                )];
+                if !app.model.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {}", app.model),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    ));
+                }
+                out.push(Line::from(spans));
                 out.extend(render_markdown(text, width));
                 out.push(Line::raw(""));
             }
@@ -2892,59 +2942,10 @@ pub(super) fn build_lines_w_uncached(app: &App, width: usize) -> Vec<Line<'stati
                 )]));
             }
             ChatLine::WelcomeBrand => {
-                out.push(Line::from(vec![
-                    Span::styled("  ── ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        "cli",
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        ";",
-                        Style::default()
-                            .fg(TUI_SOFT_ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "do",
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        " ─────────────────────",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
+                // Header removed — no longer displayed when first message is written.
             }
             ChatLine::WelcomeSplash => {
-                // Shown only when scrolling back past the start of a resumed conversation.
-                out.push(Line::from(vec![
-                    Span::styled("  ── ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        "cli",
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        ";",
-                        Style::default()
-                            .fg(TUI_SOFT_ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "do",
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        " ─────────────────────",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
+                // Header removed — no longer displayed at start of resumed conversation.
             }
         }
     }

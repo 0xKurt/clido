@@ -100,13 +100,7 @@ pub(super) fn cmd_help(app: &mut App) {
     ));
     app.push(ChatLine::Info("Ctrl+Enter         interrupt & send".into()));
     app.push(ChatLine::Info(
-        "↑↓ (empty input)   scroll conversation".into(),
-    ));
-    app.push(ChatLine::Info(
-        "↑↓ (multiline)     move cursor between lines".into(),
-    ));
-    app.push(ChatLine::Info(
-        "↑↓ (with text)     history navigation".into(),
+        "↑↓                 input history / multiline cursor".into(),
     ));
     app.push(ChatLine::Info(
         "PgUp/PgDn          scroll conversation".into(),
@@ -730,6 +724,12 @@ pub(super) fn cmd_cost(app: &mut App) {
         app.push(ChatLine::Info(
             "  Session cost: $0.0000 (no API calls yet)".into(),
         ));
+    } else if let Some(budget) = app.max_budget_usd {
+        let pct = (app.stats.session_total_cost_usd / budget * 100.0).min(100.0);
+        app.push(ChatLine::Info(format!(
+            "  Session cost: ${:.4} / ${:.2} ({:.0}% of budget)",
+            app.stats.session_total_cost_usd, budget, pct
+        )));
     } else {
         app.push(ChatLine::Info(format!(
             "  Session cost: ${:.4}",
@@ -771,6 +771,14 @@ pub(super) fn cmd_tokens(app: &mut App) {
         "  Estimated cost: ${:.6}",
         app.stats.session_total_cost_usd
     )));
+    if let Some(budget) = app.max_budget_usd {
+        let remaining = (budget - app.stats.session_total_cost_usd).max(0.0);
+        let pct = (app.stats.session_total_cost_usd / budget * 100.0).min(100.0);
+        app.push(ChatLine::Info(format!(
+            "  Budget:         ${:.2} ({:.0}% used, ${:.4} remaining)",
+            budget, pct, remaining
+        )));
+    }
     if !ctx_pct.is_empty() {
         app.push(ChatLine::Info(ctx_pct));
     }
@@ -1600,6 +1608,19 @@ pub(super) fn cmd_config(app: &mut App) {
 
             // Config file path.
             app.push(ChatLine::Info("".into()));
+            app.push(ChatLine::Section("Prompt Enhancement".into()));
+            let mode_str = match app.prompt_mode {
+                PromptMode::Auto => "auto (✦ active)",
+                PromptMode::Off => "off",
+            };
+            app.push(ChatLine::Info(format!("  mode              {}", mode_str)));
+            let active_count = app.prompt_rules.active_rules().len();
+            app.push(ChatLine::Info(format!(
+                "  active rules      {} (use /prompt-rules list to view)",
+                active_count
+            )));
+
+            app.push(ChatLine::Info("".into()));
             app.push(ChatLine::Info(format!(
                 "  Config file: {}",
                 config_file_label
@@ -1965,10 +1986,7 @@ pub(super) fn execute_slash(app: &mut App, cmd: &str) {
             cmd_profile_edit(app, cmd)
         }
         _ if cmd.starts_with("/profile ") => cmd_profile_switch(app, cmd),
-        "/settings" => {
-            // /settings now redirects to /role list
-            execute_slash(app, "/role list");
-        }
+        "/settings" => cmd_config(app),
         "/config" => cmd_config(app),
         _ if cmd == "/configure" || cmd.starts_with("/configure ") => cmd_configure(app, cmd),
         "/init" => cmd_init(app),

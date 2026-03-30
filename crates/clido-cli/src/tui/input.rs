@@ -21,6 +21,7 @@ pub(super) fn scroll_up(app: &mut App, lines: u32) {
 pub(super) fn scroll_down(app: &mut App, lines: u32) {
     let new_scroll = app.scroll.saturating_add(lines);
     if new_scroll >= app.max_scroll {
+        app.scroll = app.max_scroll;
         app.following = true;
     } else {
         app.scroll = new_scroll;
@@ -1170,7 +1171,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     let n = picker.filtered().len();
                     if n > 0 {
                         picker.selected = n - 1;
-                        picker.scroll_offset = picker.selected.saturating_sub(11);
+                        picker.scroll_offset = picker.selected.saturating_sub(VISIBLE - 1);
                     }
                 }
             }
@@ -1588,7 +1589,8 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         }
         (_, Home) => app.text_input.cursor = 0,
         (_, End) => app.text_input.cursor = app.text_input.text.chars().count(),
-        // ── Up: move cursor up in multiline input, otherwise scroll chat ──────
+        // ── Up: multiline cursor movement OR input history ─────────────────
+        // Chat scrolling is separate (PageUp/PageDown/mouse wheel only).
         (_, Up)
             if app.pending_perm.is_none() && slash_completions(&app.text_input.text).is_empty() =>
         {
@@ -1600,8 +1602,8 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     return;
                 }
             }
-            // Empty input with no active history browse: also navigate history.
-            if app.text_input.text.is_empty() && !app.text_input.history.is_empty() {
+            // Navigate input history (works with empty input or when already browsing).
+            if !app.text_input.history.is_empty() {
                 let new_idx = match app.text_input.history_idx {
                     None => {
                         app.text_input.history_draft = app.text_input.text.clone();
@@ -1614,11 +1616,9 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                 app.text_input.text = app.text_input.history[new_idx].clone();
                 app.text_input.cursor = app.text_input.text.chars().count();
                 app.selected_cmd = None;
-                return;
             }
-            scroll_up(app, 2);
         }
-        // ── Down: move cursor down in multiline input, otherwise scroll chat ──
+        // ── Down: multiline cursor movement OR input history ──────────────
         (_, Down)
             if app.pending_perm.is_none() && slash_completions(&app.text_input.text).is_empty() =>
         {
@@ -1630,25 +1630,21 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     return;
                 }
             }
-            // Empty input while browsing history: navigate forward.
-            if app.text_input.text.is_empty() || app.text_input.history_idx.is_some() {
-                if let Some(i) = app.text_input.history_idx {
-                    if i + 1 >= app.text_input.history.len() {
-                        app.text_input.history_idx = None;
-                        app.text_input.text = app.text_input.history_draft.clone();
-                        app.text_input.cursor = app.text_input.text.chars().count();
-                        app.selected_cmd = None;
-                    } else {
-                        let new_idx = i + 1;
-                        app.text_input.history_idx = Some(new_idx);
-                        app.text_input.text = app.text_input.history[new_idx].clone();
-                        app.text_input.cursor = app.text_input.text.chars().count();
-                        app.selected_cmd = None;
-                    }
-                    return;
+            // Navigate input history forward.
+            if let Some(i) = app.text_input.history_idx {
+                if i + 1 >= app.text_input.history.len() {
+                    app.text_input.history_idx = None;
+                    app.text_input.text = app.text_input.history_draft.clone();
+                    app.text_input.cursor = app.text_input.text.chars().count();
+                    app.selected_cmd = None;
+                } else {
+                    let new_idx = i + 1;
+                    app.text_input.history_idx = Some(new_idx);
+                    app.text_input.text = app.text_input.history[new_idx].clone();
+                    app.text_input.cursor = app.text_input.text.chars().count();
+                    app.selected_cmd = None;
                 }
             }
-            scroll_down(app, 2);
         }
         // ── Chat scroll (PageUp/PageDown — larger jumps) ─────────────────────
         (_, PageUp) => {
