@@ -1741,15 +1741,19 @@ pub(super) fn render_welcome(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Budget display
-    let budget_span = match clido_core::load_config(&app.workspace_root) {
-        Ok(cfg) => {
-            if let Some(b) = cfg.agent.max_budget_usd {
-                Span::styled(format!("budget ${:.2}", b), dim_yellow)
-            } else {
-                Span::styled("budget unlimited", muted)
+    let budget_span = if clido_providers::is_subscription_provider(&app.provider) {
+        Span::styled("subscription", dim_green)
+    } else {
+        match clido_core::load_config(&app.workspace_root) {
+            Ok(cfg) => {
+                if let Some(b) = cfg.agent.max_budget_usd {
+                    Span::styled(format!("budget ${:.2}", b), dim_yellow)
+                } else {
+                    Span::styled("budget unlimited", muted)
+                }
             }
+            Err(_) => Span::styled("budget unlimited", muted),
         }
-        Err(_) => Span::styled("budget unlimited", muted),
     };
 
     // Prompt enhancement mode

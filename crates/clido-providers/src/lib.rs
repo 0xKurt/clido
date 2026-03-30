@@ -13,7 +13,7 @@ pub use anthropic::AnthropicProvider;
 pub use fallback::FallbackProvider;
 pub use openai::OpenAICompatProvider;
 pub use provider::{ModelEntry, ModelProvider, StreamEvent};
-pub use registry::{ProviderDef, PROVIDER_REGISTRY};
+pub use registry::{is_subscription_provider, ProviderDef, PROVIDER_REGISTRY};
 pub use retry::RetryProvider;
 
 use clido_core::{ClidoError, Result};

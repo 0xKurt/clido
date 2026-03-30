@@ -65,7 +65,7 @@ pub fn default_api_key_env(provider: &str) -> &'static str {
 
 /// Derive the clido config directory from `CLIDO_CONFIG` env var or the
 /// platform default. Returns `None` if the directory cannot be determined.
-fn default_config_dir() -> Option<std::path::PathBuf> {
+pub fn default_config_dir() -> Option<std::path::PathBuf> {
     if let Ok(p_str) = env::var("CLIDO_CONFIG") {
         std::path::Path::new(&p_str)
             .parent()

@@ -27,6 +27,18 @@ pub struct ProviderDef {
     /// True for the Anthropic provider, which uses its own SDK rather than the
     /// OpenAI-compatible `OpenAICompatProvider`.
     pub is_anthropic: bool,
+    /// True for providers billed via a flat subscription rather than per-token.
+    /// Budget tracking is not applicable for these providers.
+    pub is_subscription: bool,
+}
+
+/// Check whether a provider (by id) uses subscription billing.
+pub fn is_subscription_provider(provider_id: &str) -> bool {
+    PROVIDER_REGISTRY
+        .iter()
+        .find(|d| d.id == provider_id)
+        .map(|d| d.is_subscription)
+        .unwrap_or(false)
 }
 
 /// All supported providers in the canonical display order.
@@ -48,6 +60,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         ],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "anthropic",
@@ -59,6 +72,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: true,
+        is_subscription: false,
     },
     ProviderDef {
         id: "openai",
@@ -70,6 +84,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "mistral",
@@ -81,6 +96,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "minimax",
@@ -92,6 +108,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "kimi",
@@ -103,6 +120,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "kimi-code",
@@ -114,6 +132,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: true,
     },
     ProviderDef {
         id: "alibabacloud",
@@ -125,6 +144,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "deepseek",
@@ -136,6 +156,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "groq",
@@ -147,6 +168,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "cerebras",
@@ -158,6 +180,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "togetherai",
@@ -169,6 +192,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "fireworks",
@@ -180,6 +204,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "xai",
@@ -191,6 +216,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "perplexity",
@@ -202,6 +228,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "gemini",
@@ -213,6 +240,7 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: false,
         is_anthropic: false,
+        is_subscription: false,
     },
     ProviderDef {
         id: "local",
@@ -224,5 +252,6 @@ pub static PROVIDER_REGISTRY: &[ProviderDef] = &[
         extra_headers: &[],
         is_local: true,
         is_anthropic: false,
+        is_subscription: false,
     },
 ];

@@ -1093,6 +1093,48 @@ pub(super) struct AgentRuntimeHandles {
     agent_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Resolve the API key for display purposes (welcome screen, etc.).
+///
+/// Mirrors the resolution order in `provider::make_provider`:
+///   1. `profile.api_key` (literal value in config.toml)
+///   2. `profile.api_key_env` or the provider's conventional env var
+///   3. Credentials file (`~/.config/clido/credentials`)
+fn resolve_display_api_key(profile: &clido_core::ProfileEntry) -> String {
+    // 1. Direct value in config
+    if let Some(ref k) = profile.api_key {
+        if !k.is_empty() {
+            return k.clone();
+        }
+    }
+
+    let provider_name = profile.provider.as_str();
+
+    // 2. Environment variable (explicit or conventional)
+    let env_var = profile
+        .api_key_env
+        .as_deref()
+        .unwrap_or_else(|| crate::provider::default_api_key_env(provider_name));
+    if !env_var.is_empty() {
+        if let Ok(val) = std::env::var(env_var) {
+            if !val.is_empty() {
+                return val;
+            }
+        }
+    }
+
+    // 3. Credentials file
+    if let Some(dir) = crate::provider::default_config_dir() {
+        let creds = crate::provider::load_credentials(&dir);
+        if let Some(val) = creds.get(provider_name) {
+            if !val.is_empty() {
+                return val.clone();
+            }
+        }
+    }
+
+    String::new()
+}
+
 pub(super) fn start_agent_runtime(
     cli: Cli,
     workspace_root: std::path::PathBuf,
@@ -1211,17 +1253,7 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                     .provider
                     .clone()
                     .unwrap_or_else(|| profile.provider.clone());
-                // Resolve the API key: direct value takes priority over env var.
-                let key = profile
-                    .api_key
-                    .clone()
-                    .or_else(|| {
-                        profile
-                            .api_key_env
-                            .as_deref()
-                            .and_then(|e| std::env::var(e).ok())
-                    })
-                    .unwrap_or_default();
+                let key = resolve_display_api_key(profile);
                 (provider, model, key, profile.base_url.clone())
             }
             None => ("?".to_string(), "?".to_string(), String::new(), None),
@@ -1386,16 +1418,7 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                         .and_then(|c| c.get_profile(pname).ok())
                     {
                         Some(profile) => {
-                            let key = profile
-                                .api_key
-                                .clone()
-                                .or_else(|| {
-                                    profile
-                                        .api_key_env
-                                        .as_deref()
-                                        .and_then(|e| std::env::var(e).ok())
-                                })
-                                .unwrap_or_default();
+                            let key = resolve_display_api_key(profile);
                             (
                                 profile.provider.clone(),
                                 profile.model.clone(),
@@ -1559,11 +1582,7 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                 .and_then(|c| c.profiles.get(&profile).cloned());
             let api_key = prof_entry
                 .as_ref()
-                .and_then(|p| {
-                    p.api_key
-                        .clone()
-                        .or_else(|| p.api_key_env.as_ref().and_then(|e| std::env::var(e).ok()))
-                })
+                .map(|p| resolve_display_api_key(p))
                 .unwrap_or_default();
             let roles: Vec<(String, String)> = loaded
                 .as_ref()
