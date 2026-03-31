@@ -1,8 +1,13 @@
 //! Minimal agent loop: history, provider call, tool execution, repeat.
 
+mod context;
+pub mod history;
+mod planning;
+mod security;
+
 use async_trait::async_trait;
 use clido_context::{
-    assemble, dedup_file_reads, estimate_tokens_message, estimate_tokens_messages,
+    estimate_tokens_messages,
     estimate_tokens_str, DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_CONTEXT_TOKENS,
 };
 use clido_core::{
@@ -23,110 +28,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
+pub use history::session_lines_to_messages;
+use context::{compact_with_summary, PROACTIVE_SUMMARIZE_THRESHOLD};
+use security::{detect_injection, enhanced_edit_error};
 /// How many consecutive identical tool failures trigger doom-loop detection.
 const DOOM_LOOP_THRESHOLD: usize = 3;
 /// Budget warning thresholds (percentage of limit consumed).
 const BUDGET_WARNING_PCTS: &[u8] = &[50, 80, 90];
-/// Proactive summarization triggers at this fraction of max context (below full compaction).
-const PROACTIVE_SUMMARIZE_THRESHOLD: f64 = 0.50;
-/// Maximum number of tool pairs to summarize per turn (to limit latency).
-const MAX_PROACTIVE_SUMMARIES_PER_TURN: usize = 5;
-
-/// Detect potential prompt injection patterns in tool arguments.
-/// Returns the matched pattern category if suspicious content is found.
-fn detect_injection(input: &serde_json::Value) -> Option<&'static str> {
-    let text = match input {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Object(_) => serde_json::to_string(input).unwrap_or_default(),
-        _ => return None,
-    };
-    let lower = text.to_lowercase();
-
-    static PATTERNS: &[(&str, &str)] = &[
-        ("ignore previous instructions", "instruction override"),
-        ("ignore all previous", "instruction override"),
-        ("disregard previous", "instruction override"),
-        ("forget your instructions", "instruction override"),
-        ("you are now", "role hijacking"),
-        ("new system prompt", "system prompt injection"),
-        ("override system prompt", "system prompt injection"),
-        ("<system>", "XML tag injection"),
-        ("</system>", "XML tag injection"),
-        ("<|im_start|>", "chat template injection"),
-        ("<|im_end|>", "chat template injection"),
-        ("human:", "role boundary injection"),
-        ("assistant:", "role boundary injection"),
-        ("[inst]", "instruction tag injection"),
-        ("[/inst]", "instruction tag injection"),
-    ];
-
-    for (pattern, category) in PATTERNS {
-        if lower.contains(pattern) {
-            return Some(category);
-        }
-    }
-    None
-}
-
-/// Wrap a tool error in structured feedback to help the model self-correct.
-fn format_tool_error_for_reflection(tool_name: &str, error_output: &str) -> String {
-    format!(
-        "[Tool Error] The {} tool returned an error:\n{}\n\nPlease analyze what went wrong and try a corrected approach.",
-        tool_name, error_output
-    )
-}
-
-/// Build an enhanced error message for edit tool failures that includes
-/// the target file's content around the failed region to help the model self-correct.
-fn enhanced_edit_error(tool_name: &str, error_output: &str, input: &serde_json::Value) -> String {
-    if !matches!(tool_name, "Edit" | "MultiEdit") {
-        return format_tool_error_for_reflection(tool_name, error_output);
-    }
-
-    let file_path = input
-        .get("file_path")
-        .or_else(|| input.get("path"))
-        .and_then(|v| v.as_str());
-
-    let file_context = if let Some(path) = file_path {
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                let lines: Vec<&str> = content.lines().collect();
-                let total = lines.len();
-                if total <= 100 {
-                    format!(
-                        "\n\n[File Content ({} lines)]:\n```\n{}\n```",
-                        total, content
-                    )
-                } else {
-                    let head: String = lines[..30].join("\n");
-                    let tail: String = lines[total - 30..].join("\n");
-                    format!(
-                        "\n\n[File Excerpt ({} lines total)]:\n```\n{}\n... ({} lines omitted) ...\n{}\n```",
-                        total, head, total - 60, tail
-                    )
-                }
-            }
-            Err(_) => String::new(),
-        }
-    } else {
-        String::new()
-    };
-
-    let old_str_hint = input
-        .get("old_string")
-        .or_else(|| input.get("old_str"))
-        .and_then(|v| v.as_str())
-        .map(|s| format!("\n\n[You searched for]:\n```\n{}\n```", s))
-        .unwrap_or_default();
-
-    format!(
-        "[Tool Error] The {} tool returned an error:\n{}{}{}\n\n\
-         Hint: Re-read the file with the Read tool to see the current content, \
-         then retry with the exact text from the file. Do NOT guess the content.",
-        tool_name, error_output, old_str_hint, file_context
-    )
-}
 
 /// Create a git checkpoint of dirty working tree before AI edits.
 /// Only runs once per agent session to avoid excessive commits.
@@ -239,144 +147,6 @@ pub trait EventEmitter: Send + Sync {
     /// `pct` is the percentage (50, 80, or 90), `spent_usd` and `limit_usd` are raw values.
     /// Default impl is a no-op.
     async fn on_budget_warning(&self, _pct: u8, _spent_usd: f64, _limit_usd: f64) {}
-}
-
-/// Reconstruct conversation history from session JSONL lines (for resume).
-pub fn session_lines_to_messages(lines: &[SessionLine]) -> Vec<Message> {
-    let mut messages = Vec::new();
-    let mut tool_result_buf: Vec<ContentBlock> = Vec::new();
-
-    let flush_tool_results = |msgs: &mut Vec<Message>, buf: &mut Vec<ContentBlock>| {
-        if !buf.is_empty() {
-            msgs.push(Message {
-                role: Role::User,
-                content: std::mem::take(buf),
-            });
-        }
-    };
-
-    for line in lines {
-        match line {
-            SessionLine::UserMessage { content, .. } => {
-                flush_tool_results(&mut messages, &mut tool_result_buf);
-                let content: Vec<ContentBlock> = content
-                    .iter()
-                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                    .collect();
-                messages.push(Message {
-                    role: Role::User,
-                    content,
-                });
-            }
-            SessionLine::AssistantMessage { content } => {
-                flush_tool_results(&mut messages, &mut tool_result_buf);
-                let content: Vec<ContentBlock> = content
-                    .iter()
-                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                    .collect();
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content,
-                });
-            }
-            SessionLine::ToolCall { .. } => {}
-            SessionLine::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                ..
-            } => {
-                tool_result_buf.push(ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                });
-            }
-            _ => {}
-        }
-    }
-    flush_tool_results(&mut messages, &mut tool_result_buf);
-
-    // Repair incomplete tool call/result pairs.
-    // If an Assistant message has ToolUse blocks without matching ToolResult
-    // in the following User message (e.g. crash during tool execution),
-    // inject synthetic error results so the API doesn't reject the history.
-    repair_orphaned_tool_calls(&mut messages);
-
-    messages
-}
-
-/// Ensure every Assistant ToolUse has a matching User ToolResult.
-fn repair_orphaned_tool_calls(messages: &mut Vec<Message>) {
-    let mut i = 0;
-    while i < messages.len() {
-        if messages[i].role != Role::Assistant {
-            i += 1;
-            continue;
-        }
-        let tool_use_ids: Vec<String> = messages[i]
-            .content
-            .iter()
-            .filter_map(|b| {
-                if let ContentBlock::ToolUse { id, .. } = b {
-                    Some(id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if tool_use_ids.is_empty() {
-            i += 1;
-            continue;
-        }
-
-        // Collect tool_use_ids that already have results in the next message.
-        let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        if i + 1 < messages.len() && messages[i + 1].role == Role::User {
-            for b in &messages[i + 1].content {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = b {
-                    answered.insert(tool_use_id.as_str());
-                }
-            }
-        }
-
-        let missing: Vec<&String> = tool_use_ids
-            .iter()
-            .filter(|id| !answered.contains(id.as_str()))
-            .collect();
-
-        if !missing.is_empty() {
-            let synthetic: Vec<ContentBlock> = missing
-                .iter()
-                .map(|id| ContentBlock::ToolResult {
-                    tool_use_id: (*id).clone(),
-                    content: "[interrupted — tool execution did not complete]".to_string(),
-                    is_error: true,
-                })
-                .collect();
-
-            // Insert into existing User(ToolResult) message or create a new one.
-            if i + 1 < messages.len()
-                && messages[i + 1].role == Role::User
-                && messages[i + 1]
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-            {
-                messages[i + 1].content.extend(synthetic);
-            } else {
-                messages.insert(
-                    i + 1,
-                    Message {
-                        role: Role::User,
-                        content: synthetic,
-                    },
-                );
-            }
-        }
-        i += 1;
-    }
 }
 
 /// PoC agent loop: messages + provider + tools.
@@ -762,76 +532,13 @@ impl AgentLoop {
     /// Use the reasoning model (architect) to generate a plan for complex prompts.
     /// Returns None if no reasoning model is configured or if the prompt is too simple.
     async fn architect_plan(&self, user_input: &str) -> Option<String> {
-        let reasoning = self.reasoning_model.as_ref()?;
-
-        // Only invoke architect for non-trivial prompts (>50 chars, not simple questions)
-        if user_input.len() < 50 {
-            return None;
-        }
-        let lower = user_input.to_lowercase();
-        // Skip for simple queries that don't need planning
-        if lower.starts_with("what ")
-            || lower.starts_with("how ")
-            || lower.starts_with("why ")
-            || lower.starts_with("explain ")
-            || lower.starts_with("show ")
-        {
-            return None;
-        }
-
-        let architect_prompt = format!(
-            "You are the ARCHITECT. Analyze the following task and produce a concise implementation plan.\n\
-             Focus on: which files to change, what approach to use, edge cases to handle.\n\
-             Be specific but brief (max 200 words). Do NOT write code — just the plan.\n\n\
-             Task: {}",
-            user_input
-        );
-
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: architect_prompt,
-            }],
-        }];
-
-        let config = AgentConfig {
-            model: reasoning.clone(),
-            ..self.config.clone()
-        };
-
-        match self.provider.complete(&messages, &[], &config).await {
-            Ok(response) => {
-                let plan = response
-                    .content
-                    .iter()
-                    .find_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-
-                if plan.is_empty() {
-                    return None;
-                }
-
-                debug!(
-                    "Architect plan generated ({} chars, model={})",
-                    plan.len(),
-                    reasoning
-                );
-                Some(plan)
-            }
-            Err(e) => {
-                warn!(
-                    "Architect planning failed (falling back to direct execution): {}",
-                    e
-                );
-                None
-            }
-        }
+        planning::architect_plan(
+            self.reasoning_model.as_deref(),
+            user_input,
+            &self.config,
+            self.provider.as_ref(),
+        )
+        .await
     }
 
     /// Continue from existing history (resume). Does not push a new user message; runs the loop until EndTurn or max_turns.
@@ -882,7 +589,7 @@ impl AgentLoop {
                 let proactive_limit = ((max_tok as f64) * PROACTIVE_SUMMARIZE_THRESHOLD) as u32;
                 if current > proactive_limit {
                     let fast_cfg = self.fast_config();
-                    let count = proactive_summarize_pairs(
+                    let count = context::proactive_summarize_pairs(
                         &mut self.history,
                         self.provider.as_ref(),
                         &fast_cfg,
@@ -1450,7 +1157,7 @@ impl AgentLoop {
                 let proactive_limit = ((max_tok as f64) * PROACTIVE_SUMMARIZE_THRESHOLD) as u32;
                 if current > proactive_limit {
                     let fast_cfg = self.fast_config();
-                    let count = proactive_summarize_pairs(
+                    let count = context::proactive_summarize_pairs(
                         &mut self.history,
                         self.provider.as_ref(),
                         &fast_cfg,
@@ -2244,381 +1951,6 @@ async fn open_in_editor_blocking(proposed: &str, file_path: &std::path::Path) ->
     .await
     .map_err(|e| ClidoError::Other(anyhow::anyhow!("spawn_blocking: {}", e)))?
 }
-
-// ── Context compaction with LLM summarization ─────────────────────────────────
-
-/// Drop-in async replacement for `assemble()` that uses the provider to produce
-/// a meaningful summary of the dropped history instead of a static placeholder.
-///
-/// Falls back to the static-placeholder path (identical to `assemble()`) if the
-/// summarization call fails for any reason, so the agent loop is never blocked.
-/// Find indices of the oldest tool_call + tool_result message pairs in history
-/// that haven't already been summarized. Returns pairs of (assistant_idx, user_idx).
-fn find_unsummarized_tool_pairs(messages: &[Message], max: usize) -> Vec<(usize, usize)> {
-    let mut pairs = Vec::new();
-    let mut i = 0;
-    while i < messages.len().saturating_sub(1) && pairs.len() < max {
-        let msg = &messages[i];
-        let next = &messages[i + 1];
-        // Look for Assistant message with ToolUse followed by User message with ToolResult
-        if msg.role == Role::Assistant
-            && next.role == Role::User
-            && msg
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-            && next
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-        {
-            // Skip if already summarized (contains our marker)
-            let already_summarized = next.content.iter().any(|b| {
-                if let ContentBlock::ToolResult { content, .. } = b {
-                    content.starts_with("[Summary]")
-                } else {
-                    false
-                }
-            });
-            if !already_summarized {
-                pairs.push((i, i + 1));
-            }
-        }
-        i += 1;
-    }
-    pairs
-}
-
-/// Proactively summarize oldest tool pairs to reduce context before hitting compaction.
-/// Replaces the tool result content with a 1-sentence LLM summary.
-async fn proactive_summarize_pairs(
-    history: &mut [Message],
-    provider: &dyn ModelProvider,
-    config: &AgentConfig,
-    preserve_recent: usize,
-) -> usize {
-    // Only consider messages outside the "recent" window
-    let safe_len = history.len().saturating_sub(preserve_recent);
-    if safe_len < 2 {
-        return 0;
-    }
-
-    let pairs =
-        find_unsummarized_tool_pairs(&history[..safe_len], MAX_PROACTIVE_SUMMARIES_PER_TURN);
-    if pairs.is_empty() {
-        return 0;
-    }
-
-    let mut summarized = 0;
-    for (asst_idx, user_idx) in &pairs {
-        // Build a concise representation of the tool call + result
-        let tool_call_text: String = history[*asst_idx]
-            .content
-            .iter()
-            .filter_map(|b| {
-                if let ContentBlock::ToolUse { name, input, .. } = b {
-                    let input_preview: String = serde_json::to_string(input)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(200)
-                        .collect();
-                    Some(format!("{}({})", name, input_preview))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let result_text: String = history[*user_idx]
-            .content
-            .iter()
-            .filter_map(|b| {
-                if let ContentBlock::ToolResult {
-                    content, is_error, ..
-                } = b
-                {
-                    let prefix = if *is_error { "ERROR: " } else { "" };
-                    let preview: String = content.chars().take(500).collect();
-                    Some(format!("{}{}", prefix, preview))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let prompt = format!(
-            "Summarize this tool interaction in ONE sentence (max 100 words). \
-             Focus on the outcome/result, not the process.\n\n\
-             Tool call: {}\nResult: {}",
-            tool_call_text, result_text
-        );
-
-        // Use fast model for summarization
-        let messages_for_llm = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: prompt.clone(),
-            }],
-        }];
-
-        match provider.complete(&messages_for_llm, &[], config).await {
-            Ok(response) => {
-                let summary = response
-                    .content
-                    .iter()
-                    .find_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| "Tool interaction completed.".to_string());
-
-                // Replace tool result content with summary
-                for block in &mut history[*user_idx].content {
-                    if let ContentBlock::ToolResult { content, .. } = block {
-                        *content = format!("[Summary] {}", summary);
-                    }
-                }
-                summarized += 1;
-            }
-            Err(e) => {
-                warn!("Proactive summarization failed: {}", e);
-                break; // Stop if LLM call fails
-            }
-        }
-    }
-    summarized
-}
-
-/// Compress tool result content in older messages to reduce context before summarization.
-/// Keeps the last `preserve_recent` messages intact, only compresses older ones.
-fn compress_tool_results(messages: &mut [Message], preserve_recent: usize) {
-    let compress_end = messages.len().saturating_sub(preserve_recent);
-    for msg in messages[..compress_end].iter_mut() {
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                if content.len() > 500 {
-                    // Use char_indices for safe multi-byte truncation.
-                    let boundary = content
-                        .char_indices()
-                        .nth(300)
-                        .map(|(i, _)| i)
-                        .unwrap_or(content.len());
-                    let truncated = format!(
-                        "{}... [truncated {} chars]",
-                        &content[..boundary],
-                        content.len() - boundary
-                    );
-                    *content = truncated;
-                }
-            }
-        }
-    }
-}
-
-async fn compact_with_summary(
-    messages: &[Message],
-    system_prompt_tokens: u32,
-    max_context_tokens: u32,
-    compaction_threshold: f64,
-    provider: &dyn ModelProvider,
-    config: &AgentConfig,
-) -> Result<Vec<Message>> {
-    // Deduplicate repeated file reads before counting tokens.
-    // Then repair any orphaned tool_use blocks that dedup may have created by
-    // dropping a user message whose ToolResult content was a duplicate.
-    let mut deduped = dedup_file_reads(messages);
-    repair_orphaned_tool_calls(&mut deduped);
-    let msgs = deduped.as_slice();
-
-    let threshold_limit = ((max_context_tokens as f64) * compaction_threshold) as u32;
-    let total = system_prompt_tokens + estimate_tokens_messages(msgs);
-
-    // Under threshold — nothing to do.
-    if total <= threshold_limit {
-        return Ok(msgs.to_vec());
-    }
-
-    // Find the split point: keep the tail that fits within max_context_tokens.
-    // Reserve 512 tokens for the summary message.
-    const SUMMARY_RESERVE: u32 = 2048;
-    let mut kept_tokens = 0u32;
-    let mut start = msgs.len();
-    for (i, m) in msgs.iter().enumerate().rev() {
-        let mt = estimate_tokens_message(m);
-        if kept_tokens + mt + system_prompt_tokens + SUMMARY_RESERVE > max_context_tokens {
-            break;
-        }
-        kept_tokens += mt;
-        start = i;
-    }
-
-    // Never split between an Assistant(ToolUse) and its User(ToolResult).
-    while start > 0 && start < msgs.len() {
-        let msg = &msgs[start];
-        if msg.role == Role::User
-            && msg
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-        {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-
-    // Nothing to compact (entire history fits in tail) — let assemble() handle it.
-    if start == 0 {
-        return assemble(
-            msgs,
-            system_prompt_tokens,
-            max_context_tokens,
-            compaction_threshold,
-        );
-    }
-
-    let to_compact = &msgs[..start];
-    let tail = &msgs[start..];
-
-    // Compress old tool results to reduce summarization input.
-    let mut compressed = to_compact.to_vec();
-    compress_tool_results(&mut compressed, 4);
-
-    // Try LLM summarization; log and fall back to static text on failure.
-    let summary_text = match summarize_messages(&compressed, provider, config).await {
-        Ok(s) => {
-            tracing::info!(
-                dropped = to_compact.len(),
-                kept = tail.len(),
-                summary_chars = s.len(),
-                "context compacted with LLM summary"
-            );
-            format!("[Compacted history] {s}")
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "context compaction: summarization failed, using static placeholder"
-            );
-            "[Compacted history] Earlier messages were omitted to fit context.".to_string()
-        }
-    };
-
-    // Verify the compacted result still fits.
-    let summary_tokens = estimate_tokens_str(&summary_text) + 4;
-    let total_after = system_prompt_tokens + summary_tokens + kept_tokens;
-    if total_after > max_context_tokens {
-        return Err(ClidoError::ContextLimit {
-            tokens: total_after as u64,
-        });
-    }
-
-    let mut out = vec![Message {
-        role: Role::System,
-        content: vec![ContentBlock::Text { text: summary_text }],
-    }];
-    out.extend_from_slice(tail);
-    Ok(out)
-}
-
-/// Format `messages` as a flat transcript and ask the provider to summarize them.
-async fn summarize_messages(
-    messages: &[Message],
-    provider: &dyn ModelProvider,
-    config: &AgentConfig,
-) -> Result<String> {
-    const MAX_TOOL_RESULT_CHARS: usize = 1_500;
-
-    let mut transcript = String::new();
-    for msg in messages {
-        let role_label = match msg.role {
-            Role::User => "User",
-            Role::Assistant => "Assistant",
-            Role::System => "System",
-        };
-        for block in &msg.content {
-            match block {
-                ContentBlock::Text { text } => {
-                    transcript.push_str(&format!("[{role_label}]: {text}\n\n"));
-                }
-                ContentBlock::ToolUse { name, input, .. } => {
-                    transcript.push_str(&format!("[{role_label}] Tool call: {name}({input})\n\n"));
-                }
-                ContentBlock::ToolResult {
-                    content, is_error, ..
-                } => {
-                    let label = if *is_error {
-                        "Tool error"
-                    } else {
-                        "Tool result"
-                    };
-                    let body = if content.chars().count() > MAX_TOOL_RESULT_CHARS {
-                        format!(
-                            "{}… (truncated)",
-                            content
-                                .chars()
-                                .take(MAX_TOOL_RESULT_CHARS)
-                                .collect::<String>()
-                        )
-                    } else {
-                        content.clone()
-                    };
-                    transcript.push_str(&format!("[{role_label}] {label}: {body}\n\n"));
-                }
-                _ => {} // skip Image / Thinking blocks
-            }
-        }
-    }
-
-    let prompt = format!(
-        "You are a summarizer for a coding agent session.\n\
-        Summarize the following conversation history in 2–4 concise paragraphs.\n\
-        Preserve:\n\
-        - Every file path that was read or edited (list them).\n\
-        - Every tool name that was called (list them).\n\
-        - The user's high-level goal and any constraints they stated.\n\
-        - The current state of the task (what was done, what might be left).\n\
-        \n\
-        Output only the summary, no preamble.\n\
-        \n\
-        ---\n\n\
-        {transcript}"
-    );
-
-    let request = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text { text: prompt }],
-    }];
-
-    let response = provider.complete(&request, &[], config).await?;
-
-    let text: String = response
-        .content
-        .iter()
-        .filter_map(|b| {
-            if let ContentBlock::Text { text } = b {
-                Some(text.as_str())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("");
-
-    if text.is_empty() {
-        return Err(ClidoError::Other(anyhow::anyhow!(
-            "summarization returned empty response"
-        )));
-    }
-
-    Ok(text)
-}
-
 /// Fire-and-forget hook execution.
 ///
 /// stdio is redirected to /dev/null so hook output never corrupts the TUI's
@@ -2640,7 +1972,6 @@ fn run_hook(cmd: &str, env_vars: &[(&str, &str)]) {
         warn!("hook spawn failed (cmd={:?}): {}", cmd, e);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3250,7 +2581,7 @@ mod tests {
                 }],
             },
         ];
-        let result = summarize_messages(&messages, &provider, &mock_config())
+        let result = context::summarize_messages(&messages, &provider, &mock_config())
             .await
             .unwrap();
         assert_eq!(result, "Summary of conversation.");
@@ -3265,7 +2596,7 @@ mod tests {
                 text: "hello".to_string(),
             }],
         }];
-        let result = summarize_messages(&messages, &provider, &mock_config()).await;
+        let result = context::summarize_messages(&messages, &provider, &mock_config()).await;
         assert!(result.is_err());
     }
 
@@ -3290,7 +2621,7 @@ mod tests {
                 }],
             },
         ];
-        let result = summarize_messages(&messages, &provider, &mock_config())
+        let result = context::summarize_messages(&messages, &provider, &mock_config())
             .await
             .unwrap();
         assert_eq!(result, "Summarized tool work.");
