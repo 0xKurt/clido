@@ -372,4 +372,186 @@ mod tests {
         );
         assert!(res.unwrap_err().contains("protected"));
     }
+
+    // ── resolve_and_check ──────────────────────────────────────────────
+
+    #[test]
+    fn resolve_and_check_relative_nested_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let deep = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("deep.txt");
+        std::fs::write(&file, "deep").unwrap();
+
+        let guard = PathGuard::new(root.clone());
+        let res = guard.resolve_and_check("a/b/c/deep.txt").unwrap();
+        assert_eq!(res, file);
+    }
+
+    #[test]
+    fn resolve_and_check_absolute_outside_separate_tmpdir() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_file = other.path().join("other.txt");
+        std::fs::write(&other_file, "data").unwrap();
+
+        let guard = PathGuard::new(workspace.path().to_path_buf());
+        let res = guard.resolve_and_check(other_file.to_str().unwrap());
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+    }
+
+    #[test]
+    fn resolve_and_check_dotdot_staying_inside_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let sub = root.join("dir");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = root.join("top.txt");
+        std::fs::write(&file, "top").unwrap();
+
+        let guard = PathGuard::new(root.clone());
+        // "dir/../top.txt" traverses up but stays inside workspace
+        let res = guard.resolve_and_check("dir/../top.txt").unwrap();
+        assert_eq!(res, file);
+    }
+
+    #[test]
+    fn resolve_and_check_dotdot_escaping_from_child_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        // Workspace is the child dir; "../" escapes to root
+        let guard = PathGuard::new(child.clone());
+        let res = guard.resolve_and_check("../");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+    }
+
+    #[test]
+    fn resolve_and_check_multiple_blocked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let f1 = root.join("secret1.key");
+        let f2 = root.join("secret2.key");
+        let f3 = root.join("public.txt");
+        std::fs::write(&f1, "k1").unwrap();
+        std::fs::write(&f2, "k2").unwrap();
+        std::fs::write(&f3, "pub").unwrap();
+
+        let guard = PathGuard::new(root.clone()).with_blocked(vec![f1.clone(), f2.clone()]);
+
+        let r1 = guard.resolve_and_check("secret1.key");
+        assert!(r1.is_err());
+        assert!(r1.unwrap_err().contains("protected"));
+
+        let r2 = guard.resolve_and_check("secret2.key");
+        assert!(r2.is_err());
+        assert!(r2.unwrap_err().contains("protected"));
+
+        // Non-blocked file is fine
+        let r3 = guard.resolve_and_check("public.txt").unwrap();
+        assert_eq!(r3, f3);
+    }
+
+    // ── resolve_for_write ──────────────────────────────────────────────
+
+    #[test]
+    fn resolve_for_write_relative_existing_in_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let sub = root.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("lib.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let guard = PathGuard::new(root.clone());
+        let res = guard.resolve_for_write("src/lib.rs").unwrap();
+        assert_eq!(res, file);
+    }
+
+    #[test]
+    fn resolve_for_write_new_file_existing_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let sub = root.join("docs");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let guard = PathGuard::new(root.clone());
+        let res = guard.resolve_for_write("docs/new_page.md").unwrap();
+        assert_eq!(res, sub.join("new_page.md"));
+    }
+
+    #[test]
+    fn resolve_for_write_absolute_outside_separate_tmpdir() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_file = std::fs::canonicalize(other.path())
+            .unwrap()
+            .join("external.txt");
+        std::fs::write(&other_file, "ext").unwrap();
+
+        let guard = PathGuard::new(workspace.path().to_path_buf());
+        let res = guard.resolve_for_write(other_file.to_str().unwrap());
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+    }
+
+    #[test]
+    fn resolve_for_write_dotdot_escaping_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let child = root.join("sandbox");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let guard = PathGuard::new(child.clone());
+        let res = guard.resolve_for_write("../escape.txt");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+    }
+
+    // ── with_blocked / is_blocked ──────────────────────────────────────
+
+    #[test]
+    fn with_blocked_canonicalizes_existing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("guarded.txt");
+        std::fs::write(&file, "g").unwrap();
+
+        // Pass non-canonical path (via tempdir original path)
+        let non_canon = tmp.path().join("guarded.txt");
+        let guard = PathGuard::new(root.clone()).with_blocked(vec![non_canon]);
+        assert!(guard.is_blocked(&file));
+    }
+
+    #[test]
+    fn is_blocked_returns_false_for_unblocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let blocked = root.join("blocked.txt");
+        let safe = root.join("safe.txt");
+        std::fs::write(&blocked, "b").unwrap();
+        std::fs::write(&safe, "s").unwrap();
+
+        let guard = PathGuard::new(root.clone()).with_blocked(vec![blocked.clone()]);
+        assert!(guard.is_blocked(&blocked));
+        assert!(!guard.is_blocked(&safe));
+    }
+
+    #[test]
+    fn with_blocked_empty_vec_blocks_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("anything.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        let guard = PathGuard::new(root.clone()).with_blocked(vec![]);
+        assert!(!guard.is_blocked(&file));
+        let res = guard.resolve_and_check("anything.txt").unwrap();
+        assert_eq!(res, file);
+    }
 }

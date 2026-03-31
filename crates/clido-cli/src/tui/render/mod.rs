@@ -1696,33 +1696,30 @@ pub(super) fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
         };
     }
 
+    // Push a style derived from the current top-of-stack with an extra modifier.
+    macro_rules! push_style {
+        ($modifier:expr) => {{
+            let s = style_stack
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .add_modifier($modifier);
+            style_stack.push(s);
+        }};
+    }
+
     for event in parser {
         match event {
             // ── Start tags ────────────────────────────────────────────────
             Event::Start(tag) => match tag {
                 Tag::Strong => {
-                    let s = style_stack
-                        .last()
-                        .copied()
-                        .unwrap_or_default()
-                        .add_modifier(Modifier::BOLD);
-                    style_stack.push(s);
+                    push_style!(Modifier::BOLD);
                 }
                 Tag::Emphasis => {
-                    let s = style_stack
-                        .last()
-                        .copied()
-                        .unwrap_or_default()
-                        .add_modifier(Modifier::ITALIC);
-                    style_stack.push(s);
+                    push_style!(Modifier::ITALIC);
                 }
                 Tag::Strikethrough => {
-                    let s = style_stack
-                        .last()
-                        .copied()
-                        .unwrap_or_default()
-                        .add_modifier(Modifier::CROSSED_OUT);
-                    style_stack.push(s);
+                    push_style!(Modifier::CROSSED_OUT);
                 }
                 Tag::Link(..) => {
                     let s = style_stack

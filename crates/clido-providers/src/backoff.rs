@@ -92,4 +92,42 @@ mod tests {
         assert_eq!(network_backoff_secs(4), 4); // capped
         assert_eq!(network_backoff_secs(10), 4); // still capped
     }
+
+    // ── is_subscription_limit ────────────────────────────────────────────
+
+    #[test]
+    fn subscription_limit_large_retry_after() {
+        assert!(is_subscription_limit(Some(301), ""));
+        assert!(is_subscription_limit(Some(3600), ""));
+    }
+
+    #[test]
+    fn subscription_limit_keyword_quota() {
+        assert!(is_subscription_limit(None, "you have exceeded your quota"));
+    }
+
+    #[test]
+    fn subscription_limit_keyword_subscription() {
+        assert!(is_subscription_limit(None, "upgrade your subscription plan"));
+    }
+
+    #[test]
+    fn subscription_limit_keyword_limit_exceeded() {
+        assert!(is_subscription_limit(None, "rate limit exceeded for tier"));
+    }
+
+    #[test]
+    fn subscription_limit_keyword_allowance() {
+        assert!(is_subscription_limit(None, "monthly allowance reached"));
+    }
+
+    #[test]
+    fn subscription_limit_false_low_retry_after_no_keywords() {
+        assert!(!is_subscription_limit(Some(60), "rate limited, please retry"));
+    }
+
+    #[test]
+    fn subscription_limit_false_none_retry_after_no_keywords() {
+        assert!(!is_subscription_limit(None, "rate limited, please retry"));
+    }
 }

@@ -548,6 +548,72 @@ mod tests {
         assert!(h.post_tool_use.is_none());
     }
 
+    // ── Direct glob_match tests ─────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_star_wildcard() {
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(glob_match("src/*.rs", "src/lib.rs"));
+        // * does not cross directory boundaries
+        assert!(!glob_match("src/*.rs", "src/sub/lib.rs"));
+        // * matches empty
+        assert!(glob_match("*.rs", "lib.rs"));
+    }
+
+    #[test]
+    fn glob_match_double_star_wildcard() {
+        assert!(glob_match("src/**", "src/main.rs"));
+        assert!(glob_match("src/**", "src/a/b/c.rs"));
+        assert!(glob_match("**/*.rs", "deep/nested/file.rs"));
+        assert!(glob_match("**", "anything/at/all"));
+        // ** at the start
+        assert!(glob_match("**/config.rs", "src/config.rs"));
+        assert!(glob_match("**/config.rs", "a/b/c/config.rs"));
+    }
+
+    #[test]
+    fn glob_match_exact_path() {
+        assert!(glob_match("src/main.rs", "src/main.rs"));
+        assert!(!glob_match("src/main.rs", "src/lib.rs"));
+        assert!(!glob_match("src/main.rs", "tests/main.rs"));
+    }
+
+    // ── evaluate_rules dedicated deny test ──────────────────────────────────
+
+    #[test]
+    fn evaluate_rules_deny_rule_match() {
+        let rules = vec![PermissionRule {
+            pattern: "secrets/**".to_string(),
+            action: RuleAction::Deny,
+            reason: Some("sensitive area".to_string()),
+        }];
+        let result = evaluate_rules(&rules, "secrets/key.pem");
+        assert_eq!(result, Some((RuleAction::Deny, Some("sensitive area".to_string()))));
+    }
+
+    #[test]
+    fn evaluate_rules_allow_rule_match() {
+        let rules = vec![PermissionRule {
+            pattern: "docs/**".to_string(),
+            action: RuleAction::Allow,
+            reason: None,
+        }];
+        let result = evaluate_rules(&rules, "docs/README.md");
+        assert_eq!(result, Some((RuleAction::Allow, None)));
+    }
+
+    // ── RuleAction Copy trait ───────────────────────────────────────────────
+
+    #[test]
+    fn rule_action_is_copy() {
+        let a = RuleAction::Allow;
+        let b = a; // Copy
+        #[allow(clippy::clone_on_copy)]
+        let c = a.clone(); // Clone
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
     #[test]
     fn agent_config_json_with_all_fields() {
         let json = r#"{

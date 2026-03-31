@@ -79,3 +79,69 @@ where
 
     rx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn parse_sse_stream_dispatches_data_lines() {
+        let chunks: Vec<reqwest::Result<bytes::Bytes>> = vec![
+            Ok(bytes::Bytes::from("data: {\"text\":\"hello\"}\n")),
+            Ok(bytes::Bytes::from("data: {\"text\":\"world\"}\n")),
+        ];
+        let byte_stream = stream::iter(chunks);
+
+        let out = parse_sse_stream(byte_stream, (), |line, tx, _state| {
+            if let Some(payload) = line.strip_prefix("data: ") {
+                let _ = tx.unbounded_send(Ok(StreamEvent::TextDelta(payload.to_string())));
+            }
+            true
+        });
+
+        let events: Vec<_> = out.collect().await;
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], Ok(StreamEvent::TextDelta(s)) if s == "{\"text\":\"hello\"}"));
+        assert!(matches!(&events[1], Ok(StreamEvent::TextDelta(s)) if s == "{\"text\":\"world\"}"));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_stream_buffers_partial_lines() {
+        // Send a line split across two chunks.
+        let chunks: Vec<reqwest::Result<bytes::Bytes>> = vec![
+            Ok(bytes::Bytes::from("data: par")),
+            Ok(bytes::Bytes::from("tial\n")),
+        ];
+        let byte_stream = stream::iter(chunks);
+
+        let out = parse_sse_stream(byte_stream, (), |line, tx, _state| {
+            if let Some(payload) = line.strip_prefix("data: ") {
+                let _ = tx.unbounded_send(Ok(StreamEvent::TextDelta(payload.to_string())));
+            }
+            true
+        });
+
+        let events: Vec<_> = out.collect().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], Ok(StreamEvent::TextDelta(s)) if s == "partial"));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_stream_stops_on_false() {
+        let chunks: Vec<reqwest::Result<bytes::Bytes>> = vec![
+            Ok(bytes::Bytes::from("line1\nline2\nline3\n")),
+        ];
+        let byte_stream = stream::iter(chunks);
+
+        let out = parse_sse_stream(byte_stream, 0u32, |_line, tx, count| {
+            *count += 1;
+            let _ = tx.unbounded_send(Ok(StreamEvent::TextDelta(format!("#{count}"))));
+            // Stop after processing two lines.
+            *count < 2
+        });
+
+        let events: Vec<_> = out.collect().await;
+        assert_eq!(events.len(), 2);
+    }
+}

@@ -1738,7 +1738,7 @@ pub(super) async fn event_loop(
                                         step: ProfileCreateStep::ApiKey,
                                     } | ProfileOverlayMode::EditField(ProfileEditField::ApiKey)
                                 ) {
-                                    text.lines().collect::<Vec<_>>().join("")
+                                    text.replace('\n', "")
                                 } else {
                                     text.clone()
                                 };

@@ -151,4 +151,43 @@ mod tests {
         assert_eq!(cache.get(&p, "h1"), None);
         assert_eq!(cache.get(&p, "h2"), None);
     }
+
+    #[test]
+    fn get_returns_none_for_never_inserted_key() {
+        let cache = ReadCache::new();
+        let path = PathBuf::from("/tmp/nonexistent.rs");
+        assert_eq!(cache.get(&path, "anyhash"), None);
+    }
+
+    #[test]
+    fn lru_eviction_removes_first_inserted() {
+        let cache = ReadCache::new();
+        // Insert exactly MAX_ENTRIES + 1 items without touching any of them
+        // via get, so the first inserted (generation=1) is the LRU.
+        for i in 0..=MAX_ENTRIES {
+            let p = PathBuf::from(format!("/f/{}.rs", i));
+            cache.insert(p, format!("h{}", i), format!("c{}", i));
+        }
+        // The very first entry should have been evicted.
+        let first = PathBuf::from("/f/0.rs");
+        assert_eq!(cache.get(&first, "h0"), None);
+        // The last entry should still be present.
+        let last = PathBuf::from(format!("/f/{}.rs", MAX_ENTRIES));
+        assert_eq!(
+            cache.get(&last, &format!("h{}", MAX_ENTRIES)),
+            Some(format!("c{}", MAX_ENTRIES))
+        );
+    }
+
+    #[test]
+    fn invalidate_does_not_affect_other_paths() {
+        let cache = ReadCache::new();
+        let p1 = PathBuf::from("/a.rs");
+        let p2 = PathBuf::from("/b.rs");
+        cache.insert(p1.clone(), "h1", "c1");
+        cache.insert(p2.clone(), "h2", "c2");
+        cache.invalidate(&p1);
+        assert_eq!(cache.get(&p1, "h1"), None);
+        assert_eq!(cache.get(&p2, "h2"), Some("c2".to_string()));
+    }
 }
