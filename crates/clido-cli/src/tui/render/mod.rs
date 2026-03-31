@@ -114,7 +114,9 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         },
         dim,
     )];
-    if app.stats.session_total_cost_usd > 0.0 {
+    if app.stats.session_total_cost_usd > 0.0
+        || app.stats.session_total_input_tokens > 0
+    {
         // Format token count (combined in+out for this session)
         let sum_tokens =
             app.stats.session_total_input_tokens + app.stats.session_total_output_tokens;
@@ -136,19 +138,35 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
             String::new()
         };
 
-        // Cost display — show "spent / budget" when budget is set
-        let cost_str = if let Some(budget) = app.max_budget_usd {
-            format!("${:.4} / ${:.2}", app.stats.session_total_cost_usd, budget)
-        } else {
-            format!("${:.4}", app.stats.session_total_cost_usd)
-        };
+        let is_subscription = clido_providers::is_subscription_provider(&app.provider);
 
-        hline2.push(Span::styled(
-            format!("   session: {}  {}{}", cost_str, tok_str, ctx_str),
-            dim,
-        ));
+        if is_subscription {
+            // Subscription providers: show tokens + turns, no dollar cost
+            let turn_str = if app.stats.session_turn_count > 0 {
+                format!("  {} turns", app.stats.session_turn_count)
+            } else {
+                String::new()
+            };
+            hline2.push(Span::styled(
+                format!("   session: {}{}{}", tok_str, turn_str, ctx_str),
+                dim,
+            ));
+        } else {
+            // On-demand providers: show cost in USD
+            let cost_str = if let Some(budget) = app.max_budget_usd {
+                format!("${:.4} / ${:.2}", app.stats.session_total_cost_usd, budget)
+            } else {
+                format!("${:.4}", app.stats.session_total_cost_usd)
+            };
+            hline2.push(Span::styled(
+                format!("   session: {}  {}{}", cost_str, tok_str, ctx_str),
+                dim,
+            ));
+        }
     } else if let Some(budget) = app.max_budget_usd {
-        hline2.push(Span::styled(format!("   budget: ${:.2}", budget), dim));
+        if !clido_providers::is_subscription_provider(&app.provider) {
+            hline2.push(Span::styled(format!("   budget: ${:.2}", budget), dim));
+        }
     }
 
     // Decide header height: 1 line if everything fits side-by-side, else 2.

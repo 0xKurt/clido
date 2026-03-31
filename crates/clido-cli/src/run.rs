@@ -81,6 +81,7 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
 
     // Capture model name and tool names before the registry is consumed by AgentLoop.
     let model = setup.config.model.clone();
+    let provider_name = setup.provider_name.clone();
     let fast_provider = setup.fast_provider.clone();
     let fast_config = setup.fast_config.clone();
     let tool_names: Vec<String> = setup
@@ -316,6 +317,7 @@ pub async fn run_agent(cli: Cli) -> Result<(), anyhow::Error> {
             total_cost_usd,
             quiet: cli.quiet,
             model: &model,
+            provider_name: &provider_name,
             input_tokens,
             output_tokens,
             cache_read_tokens,
@@ -403,6 +405,7 @@ pub(crate) struct EmitResultParams<'a> {
     pub total_cost_usd: f64,
     pub quiet: bool,
     pub model: &'a str,
+    pub provider_name: &'a str,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -421,6 +424,7 @@ pub(crate) fn emit_result(
         total_cost_usd,
         quiet,
         model,
+        provider_name,
         input_tokens,
         output_tokens,
         cache_read_tokens,
@@ -468,10 +472,18 @@ pub(crate) fn emit_result(
             } else {
                 println!("{}", text);
                 if !quiet && (total_cost_usd > 0.0 || num_turns > 0) {
-                    let footer = format!(
-                        "  \u{21b3} {} turns \u{00b7} ${:.4} \u{00b7} {}ms",
-                        num_turns, total_cost_usd, duration_ms
-                    );
+                    let is_sub = clido_providers::is_subscription_provider(provider_name);
+                    let footer = if is_sub {
+                        format!(
+                            "  \u{21b3} {} turns \u{00b7} {}ms",
+                            num_turns, duration_ms
+                        )
+                    } else {
+                        format!(
+                            "  \u{21b3} {} turns \u{00b7} ${:.4} \u{00b7} {}ms",
+                            num_turns, total_cost_usd, duration_ms
+                        )
+                    };
                     if cli_use_color() {
                         eprintln!("{}{}{}", ansi::DIM, footer, ansi::RESET);
                     } else {
@@ -626,6 +638,7 @@ mod tests {
                 total_cost_usd: 0.0,
                 quiet: true,
                 model: "claude-sonnet-4-6",
+                provider_name: "anthropic",
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_read_tokens: 0,
@@ -647,6 +660,7 @@ mod tests {
                 total_cost_usd: 0.001,
                 quiet: false,
                 model: "claude-sonnet-4-6",
+                provider_name: "anthropic",
                 input_tokens: 1500,
                 output_tokens: 45,
                 cache_read_tokens: 200,
@@ -668,6 +682,7 @@ mod tests {
                 total_cost_usd: 0.0005,
                 quiet: false,
                 model: "claude-sonnet-4-6",
+                provider_name: "anthropic",
                 input_tokens: 800,
                 output_tokens: 30,
                 cache_read_tokens: 0,
@@ -689,6 +704,7 @@ mod tests {
                 total_cost_usd: 1.5,
                 quiet: false,
                 model: "claude-sonnet-4-6",
+                provider_name: "anthropic",
                 input_tokens: 50000,
                 output_tokens: 2000,
                 cache_read_tokens: 5000,
@@ -710,6 +726,7 @@ mod tests {
                 total_cost_usd: 0.0002,
                 quiet: false,
                 model: "claude-sonnet-4-6",
+                provider_name: "anthropic",
                 input_tokens: 500,
                 output_tokens: 20,
                 cache_read_tokens: 0,

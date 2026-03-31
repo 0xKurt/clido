@@ -14,7 +14,7 @@ pub const MIN_ELAPSED_SECS: u64 = 10;
 /// `desktop-notify` Cargo feature.
 ///
 /// Falls back silently on any failure — notifications are non-fatal.
-pub fn notify_done(session_id: &str, elapsed_secs: u64, cost_usd: f64) {
+pub fn notify_done(session_id: &str, elapsed_secs: u64, cost_usd: f64, provider: &str) {
     if !should_notify(elapsed_secs) {
         return;
     }
@@ -25,10 +25,12 @@ pub fn notify_done(session_id: &str, elapsed_secs: u64, cost_usd: f64) {
     #[cfg(feature = "desktop-notify")]
     {
         let summary = "clido done";
-        let body = format!(
-            "Session {} · {}s · ${:.4}",
-            session_id, elapsed_secs, cost_usd
-        );
+        let cost_part = if clido_providers::is_subscription_provider(provider) {
+            String::new()
+        } else {
+            format!(" · ${:.4}", cost_usd)
+        };
+        let body = format!("Session {} · {}s{}", session_id, elapsed_secs, cost_part);
         use notify_rust::Notification;
         let _ = Notification::new().summary(summary).body(&body).show();
         let _ = session_id; // suppress unused warning when log line below is removed
@@ -40,6 +42,7 @@ pub fn notify_done(session_id: &str, elapsed_secs: u64, cost_usd: f64) {
     {
         let _ = session_id;
         let _ = cost_usd;
+        let _ = provider;
     }
 }
 

@@ -23,6 +23,8 @@ type TodoStore = std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>;
 
 pub struct AgentSetup {
     pub provider: Arc<dyn clido_providers::ModelProvider>,
+    /// Provider ID string (e.g. "kimi-code", "openrouter") — used for subscription checks.
+    pub provider_name: String,
     pub registry: ToolRegistry,
     pub config: AgentConfig,
     pub ask_user: Option<Arc<dyn AskUser>>,
@@ -312,6 +314,7 @@ impl AgentSetup {
 
         Ok(AgentSetup {
             provider,
+            provider_name: provider_name.to_string(),
             registry,
             config,
             ask_user,

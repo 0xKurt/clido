@@ -126,6 +126,7 @@ async fn handle_slash_command(
     cmd: &str,
     total_turns: u32,
     total_cost_usd: f64,
+    provider_name: &str,
     agent_loop: &mut AgentLoop,
 ) -> Option<bool> {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
@@ -152,10 +153,14 @@ async fn handle_slash_command(
             eprintln!("  @explore <query>   — hint to explore/search the codebase");
         }
         "/cost" => {
-            eprintln!(
-                "Session: {} turns, ${:.4} total",
-                total_turns, total_cost_usd
-            );
+            if clido_providers::is_subscription_provider(provider_name) {
+                eprintln!("Session: {} turns (subscription)", total_turns);
+            } else {
+                eprintln!(
+                    "Session: {} turns, ${:.4} total",
+                    total_turns, total_cost_usd
+                );
+            }
         }
         "/compact" => {
             eprint!("Compacting history…");
@@ -242,6 +247,7 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
     let git_wr = workspace_root.clone();
     let git_fn: Box<dyn Fn() -> Option<String> + Send + Sync> =
         Box::new(move || GitContext::discover(&git_wr).map(|ctx| ctx.to_prompt_section()));
+    let provider_name = setup.provider_name.clone();
     let mut loop_ = AgentLoop::new(setup.provider, setup.registry, setup.config, setup.ask_user)
         .with_fast_provider(setup.fast_provider, setup.fast_config)
         .with_git_context_fn(git_fn);
@@ -271,7 +277,7 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
         let prompt: String = if line.starts_with("//") {
             line[1..].to_string()
         } else if line.starts_with('/') {
-            match handle_slash_command(line, total_turns, total_cost_usd, &mut loop_).await {
+            match handle_slash_command(line, total_turns, total_cost_usd, &provider_name, &mut loop_).await {
                 Some(true) => break,      // /exit or /quit
                 Some(false) => continue,  // handled locally, nothing to send
                 None => line.to_string(), // unknown — pass to agent as-is

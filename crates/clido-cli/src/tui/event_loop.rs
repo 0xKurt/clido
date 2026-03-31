@@ -1928,6 +1928,7 @@ pub(super) async fn event_loop(
                                 session_id,
                                 elapsed,
                                 app.stats.session_total_cost_usd,
+                                &app.provider,
                             );
                         }
                         // Revert per-turn model override if active.
