@@ -114,9 +114,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         },
         dim,
     )];
-    if app.stats.session_total_cost_usd > 0.0
-        || app.stats.session_total_input_tokens > 0
-    {
+    if app.stats.session_total_cost_usd > 0.0 || app.stats.session_total_input_tokens > 0 {
         // Format token count (combined in+out for this session)
         let sum_tokens =
             app.stats.session_total_input_tokens + app.stats.session_total_output_tokens;
@@ -251,26 +249,24 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
 
         // ── Selection highlight overlay ──
         if let (Some(anchor), Some(end)) = (app.selection_anchor, app.selection_end) {
-            let sel_start_y = anchor.1.min(end.1);
-            let sel_end_y = anchor.1.max(end.1);
-            let (sel_start_x, sel_end_x) =
-                if anchor.1 < end.1 || (anchor.1 == end.1 && anchor.0 <= end.0) {
-                    (anchor.0, end.0)
-                } else {
-                    (end.0, anchor.0)
-                };
+            // anchor/end are (row, column) screen coordinates.
+            let (start, end) = if anchor.0 < end.0 || (anchor.0 == end.0 && anchor.1 <= end.1) {
+                (anchor, end)
+            } else {
+                (end, anchor)
+            };
             let buf = frame.buffer_mut();
-            for y in sel_start_y..=sel_end_y {
+            for y in start.0..=end.0 {
                 if y < chat_area.y || y >= chat_area.y + chat_area.height {
                     continue;
                 }
-                let x_start = if y == sel_start_y {
-                    sel_start_x.max(chat_area.x)
+                let x_start = if y == start.0 {
+                    start.1.max(chat_area.x)
                 } else {
                     chat_area.x
                 };
-                let x_end = if y == sel_end_y {
-                    sel_end_x.min(chat_area.x + chat_area.width)
+                let x_end = if y == end.0 {
+                    end.1.min(chat_area.x + chat_area.width)
                 } else {
                     chat_area.x + chat_area.width
                 };

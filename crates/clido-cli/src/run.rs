@@ -474,10 +474,7 @@ pub(crate) fn emit_result(
                 if !quiet && (total_cost_usd > 0.0 || num_turns > 0) {
                     let is_sub = clido_providers::is_subscription_provider(provider_name);
                     let footer = if is_sub {
-                        format!(
-                            "  \u{21b3} {} turns \u{00b7} {}ms",
-                            num_turns, duration_ms
-                        )
+                        format!("  \u{21b3} {} turns \u{00b7} {}ms", num_turns, duration_ms)
                     } else {
                         format!(
                             "  \u{21b3} {} turns \u{00b7} ${:.4} \u{00b7} {}ms",

@@ -297,6 +297,33 @@ impl App {
         self.toasts.retain(|t| t.expires > now);
     }
 
+    /// Determine which component currently owns input focus.
+    /// Mirrors the priority cascade in `handle_key` but as a single query.
+    pub(super) fn focus(&self) -> super::state::FocusTarget {
+        use super::state::FocusTarget;
+        if self.plan.text_editor.is_some() {
+            FocusTarget::PlanTextEditor
+        } else if self.plan.editor.is_some() {
+            FocusTarget::PlanEditor
+        } else if self.profile_overlay.is_some() {
+            FocusTarget::ProfileOverlay
+        } else if !self.overlay_stack.is_empty() {
+            FocusTarget::Overlay
+        } else if self.model_picker.is_some() {
+            FocusTarget::ModelPicker
+        } else if self.session_picker.is_some() {
+            FocusTarget::SessionPicker
+        } else if self.profile_picker.is_some() {
+            FocusTarget::ProfilePicker
+        } else if self.role_picker.is_some() {
+            FocusTarget::RolePicker
+        } else if self.pending_perm.is_some() {
+            FocusTarget::Permission
+        } else {
+            FocusTarget::ChatInput
+        }
+    }
+
     /// Send immediately (not busy). Moves input → chat + agent.
     /// If input starts with `@model-name prompt`, applies a per-turn model override.
     /// Send `prompt` to the agent without showing anything in the chat.

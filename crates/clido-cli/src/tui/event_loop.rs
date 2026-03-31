@@ -1780,19 +1780,82 @@ pub(super) async fn event_loop(
                         }
                     }
                     Some(Ok(Event::Mouse(m))) => {
+                        use super::state::FocusTarget;
+                        let focus = app.focus();
                         match m.kind {
-                            MouseEventKind::ScrollDown => scroll_down(app, 3),
-                            MouseEventKind::ScrollUp => scroll_up(app, 3),
+                            MouseEventKind::ScrollDown => {
+                                match focus {
+                                    FocusTarget::Overlay => {
+                                        app.overlay_stack.scroll_by(3);
+                                    }
+                                    FocusTarget::ModelPicker => {
+                                        if let Some(mp) = app.model_picker.as_mut() {
+                                            let n = mp.filtered().len();
+                                            if n > 0 {
+                                                mp.selected = (mp.selected + 3).min(n - 1);
+                                                mp.scroll_offset = mp.scroll_offset.min(mp.selected);
+                                            }
+                                        }
+                                    }
+                                    FocusTarget::SessionPicker => {
+                                        if let Some(sp) = app.session_picker.as_mut() {
+                                            for _ in 0..3 { sp.picker.move_down(); }
+                                        }
+                                    }
+                                    FocusTarget::ProfilePicker => {
+                                        if let Some(pp) = app.profile_picker.as_mut() {
+                                            for _ in 0..3 { pp.picker.move_down(); }
+                                        }
+                                    }
+                                    FocusTarget::RolePicker => {
+                                        if let Some(rp) = app.role_picker.as_mut() {
+                                            for _ in 0..3 { rp.picker.move_down(); }
+                                        }
+                                    }
+                                    _ => scroll_down(app, 3),
+                                }
+                            }
+                            MouseEventKind::ScrollUp => {
+                                match focus {
+                                    FocusTarget::Overlay => {
+                                        app.overlay_stack.scroll_by(-3);
+                                    }
+                                    FocusTarget::ModelPicker => {
+                                        if let Some(mp) = app.model_picker.as_mut() {
+                                            mp.selected = mp.selected.saturating_sub(3);
+                                        }
+                                    }
+                                    FocusTarget::SessionPicker => {
+                                        if let Some(sp) = app.session_picker.as_mut() {
+                                            for _ in 0..3 { sp.picker.move_up(); }
+                                        }
+                                    }
+                                    FocusTarget::ProfilePicker => {
+                                        if let Some(pp) = app.profile_picker.as_mut() {
+                                            for _ in 0..3 { pp.picker.move_up(); }
+                                        }
+                                    }
+                                    FocusTarget::RolePicker => {
+                                        if let Some(rp) = app.role_picker.as_mut() {
+                                            for _ in 0..3 { rp.picker.move_up(); }
+                                        }
+                                    }
+                                    _ => scroll_up(app, 3),
+                                }
+                            }
                             MouseEventKind::Down(MouseButton::Left) => {
-                                let (chat_y_start, chat_y_end) = app.chat_area_y;
-                                if m.row >= chat_y_start && m.row < chat_y_end {
-                                    app.selection_anchor = Some((m.row, m.column));
-                                    app.selection_end = Some((m.row, m.column));
-                                    app.selecting = true;
+                                // Only start selection in chat area when no modal is open.
+                                if !focus.is_modal() {
+                                    let (chat_y_start, chat_y_end) = app.chat_area_y;
+                                    if m.row >= chat_y_start && m.row < chat_y_end {
+                                        app.selection_anchor = Some((m.row, m.column));
+                                        app.selection_end = Some((m.row, m.column));
+                                        app.selecting = true;
+                                    }
                                 }
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
-                                if app.selecting {
+                                if app.selecting && !focus.is_modal() {
                                     let (chat_y_start, chat_y_end) = app.chat_area_y;
                                     app.selection_end = Some((m.row, m.column));
                                     // Auto-scroll when dragging past chat area edges.
@@ -1819,9 +1882,6 @@ pub(super) async fn event_loop(
                                             }
                                         }
                                     }
-                                    // Clear selection after brief delay (render shows it
-                                    // one more frame so user sees what was copied).
-                                    // Actual clearing happens on next mouse down or keypress.
                                 }
                             }
                             _ => {}

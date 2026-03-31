@@ -277,7 +277,15 @@ pub async fn run_repl(cli: Cli) -> Result<(), anyhow::Error> {
         let prompt: String = if line.starts_with("//") {
             line[1..].to_string()
         } else if line.starts_with('/') {
-            match handle_slash_command(line, total_turns, total_cost_usd, &provider_name, &mut loop_).await {
+            match handle_slash_command(
+                line,
+                total_turns,
+                total_cost_usd,
+                &provider_name,
+                &mut loop_,
+            )
+            .await
+            {
                 Some(true) => break,      // /exit or /quit
                 Some(false) => continue,  // handled locally, nothing to send
                 None => line.to_string(), // unknown — pass to agent as-is

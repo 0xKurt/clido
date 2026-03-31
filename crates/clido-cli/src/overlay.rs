@@ -352,6 +352,43 @@ impl OverlayKind {
         }
     }
 
+    /// Scroll the overlay by `delta` lines (positive = down, negative = up).
+    pub fn scroll_by(&mut self, delta: i32) {
+        match self {
+            Self::Error(o) => {
+                if delta < 0 {
+                    o.scroll_offset = o
+                        .scroll_offset
+                        .saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    o.scroll_offset = (o.scroll_offset + delta as usize).min(o.max_scroll);
+                }
+            }
+            Self::ReadOnly(o) => {
+                if delta < 0 {
+                    o.scroll_offset = o
+                        .scroll_offset
+                        .saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    let max = o.max_scroll;
+                    o.scroll_offset = (o.scroll_offset + delta as usize).min(max);
+                }
+            }
+            Self::Choice(o) => {
+                // Choice overlays scroll the selection, not the viewport.
+                let len = o.choices.len();
+                if len == 0 {
+                    return;
+                }
+                if delta < 0 {
+                    o.selected = o.selected.saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    o.selected = (o.selected + delta as usize).min(len - 1);
+                }
+            }
+        }
+    }
+
     /// Route a paste event to the active overlay. Returns true if consumed.
     pub fn handle_paste(&mut self, _text: &str) -> bool {
         match self {
@@ -470,6 +507,17 @@ impl OverlayStack {
     pub fn handle_paste(&mut self, text: &str) -> bool {
         if let Some(overlay) = self.stack.last_mut() {
             overlay.handle_paste(text)
+        } else {
+            false
+        }
+    }
+
+    /// Scroll the topmost overlay by `delta` lines (positive = down, negative = up).
+    /// Returns true if an overlay consumed the scroll.
+    pub fn scroll_by(&mut self, delta: i32) -> bool {
+        if let Some(overlay) = self.stack.last_mut() {
+            overlay.scroll_by(delta);
+            true
         } else {
             false
         }
@@ -1007,5 +1055,118 @@ mod tests {
         assert_eq!(stack.len(), 3);
         assert_eq!(stack.pop().unwrap().title(), "Error");
         assert_eq!(stack.top().unwrap().title(), "ro");
+    }
+
+    // ── scroll_by ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn scroll_by_empty_stack_returns_false() {
+        let mut stack = OverlayStack::new();
+        assert!(!stack.scroll_by(3));
+    }
+
+    #[test]
+    fn scroll_by_error_overlay_scrolls_down() {
+        let mut stack = OverlayStack::new();
+        let mut e = ErrorOverlay::new("test");
+        e.max_scroll = 20;
+        stack.push(OverlayKind::Error(e));
+
+        assert!(stack.scroll_by(5));
+        if let Some(OverlayKind::Error(e)) = stack.top() {
+            assert_eq!(e.scroll_offset, 5);
+        } else {
+            panic!("expected error overlay");
+        }
+    }
+
+    #[test]
+    fn scroll_by_error_overlay_scrolls_up() {
+        let mut stack = OverlayStack::new();
+        let mut e = ErrorOverlay::new("test");
+        e.max_scroll = 20;
+        e.scroll_offset = 10;
+        stack.push(OverlayKind::Error(e));
+
+        stack.scroll_by(-3);
+        if let Some(OverlayKind::Error(e)) = stack.top() {
+            assert_eq!(e.scroll_offset, 7);
+        } else {
+            panic!("expected error overlay");
+        }
+    }
+
+    #[test]
+    fn scroll_by_clamps_to_max() {
+        let mut stack = OverlayStack::new();
+        let mut e = ErrorOverlay::new("test");
+        e.max_scroll = 5;
+        stack.push(OverlayKind::Error(e));
+
+        stack.scroll_by(100);
+        if let Some(OverlayKind::Error(e)) = stack.top() {
+            assert_eq!(e.scroll_offset, 5);
+        } else {
+            panic!("expected error overlay");
+        }
+    }
+
+    #[test]
+    fn scroll_by_clamps_to_zero() {
+        let mut stack = OverlayStack::new();
+        let mut e = ErrorOverlay::new("test");
+        e.max_scroll = 20;
+        e.scroll_offset = 2;
+        stack.push(OverlayKind::Error(e));
+
+        stack.scroll_by(-10);
+        if let Some(OverlayKind::Error(e)) = stack.top() {
+            assert_eq!(e.scroll_offset, 0);
+        } else {
+            panic!("expected error overlay");
+        }
+    }
+
+    #[test]
+    fn scroll_by_choice_moves_selection() {
+        let mut stack = OverlayStack::new();
+        let choice = ChoiceOverlay::new(
+            "Pick",
+            "Choose one",
+            vec![
+                ChoiceItem {
+                    label: "a".into(),
+                    action: AppAction::Quit,
+                },
+                ChoiceItem {
+                    label: "b".into(),
+                    action: AppAction::Quit,
+                },
+                ChoiceItem {
+                    label: "c".into(),
+                    action: AppAction::Quit,
+                },
+                ChoiceItem {
+                    label: "d".into(),
+                    action: AppAction::Quit,
+                },
+            ],
+        );
+        stack.push(OverlayKind::Choice(choice));
+
+        stack.scroll_by(2);
+        if let Some(OverlayKind::Choice(c)) = stack.top() {
+            assert_eq!(c.selected, 2);
+        } else {
+            panic!("expected choice overlay");
+        }
+
+        // Clamps to last item
+        stack.scroll_by(10);
+        if let Some(OverlayKind::Choice(c)) = stack.top() {
+            assert_eq!(c.selected, 3);
+        } else {
+            panic!("expected choice overlay");
+        }
     }
 }

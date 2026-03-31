@@ -7,6 +7,43 @@ use crate::list_picker::{ListPicker, PickerItem};
 use super::render::parse_plan_from_text;
 use super::{AgentEvent, PermGrant};
 
+// ── Focus management ──────────────────────────────────────────────────────────
+
+/// Which component currently owns keyboard (and optionally mouse) input.
+/// Determined dynamically from App state — no separate stack needed because the
+/// existing Option fields already encode the open/close lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusTarget {
+    /// Main text input field — the default when nothing else is open.
+    ChatInput,
+    /// Plan text editor (nano-style, full-screen).
+    PlanTextEditor,
+    /// Plan editor modal (task list, full-screen).
+    PlanEditor,
+    /// Profile overlay (overview / create / edit wizard).
+    ProfileOverlay,
+    /// Unified overlay stack (error, read-only, choice).
+    Overlay,
+    /// Model picker popup.
+    ModelPicker,
+    /// Session picker popup.
+    SessionPicker,
+    /// Profile picker popup.
+    ProfilePicker,
+    /// Role picker popup.
+    RolePicker,
+    /// Permission approval dialog.
+    Permission,
+}
+
+impl FocusTarget {
+    /// Whether this target is a modal that should receive scroll events
+    /// instead of the main chat area, and block text selection.
+    pub(crate) fn is_modal(self) -> bool {
+        !matches!(self, FocusTarget::ChatInput)
+    }
+}
+
 // ── Session statistics ────────────────────────────────────────────────────────
 
 /// Accumulated token/cost counters for the current TUI session.
@@ -886,5 +923,25 @@ mod tests {
         assert_eq!(state.notes, "some notes");
         assert_eq!(state.complexity, Complexity::Medium);
         assert_eq!(state.focused_field, TaskEditField::Description);
+    }
+
+    // ── FocusTarget ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn focus_target_chat_input_is_not_modal() {
+        assert!(!FocusTarget::ChatInput.is_modal());
+    }
+
+    #[test]
+    fn focus_target_all_others_are_modal() {
+        assert!(FocusTarget::PlanTextEditor.is_modal());
+        assert!(FocusTarget::PlanEditor.is_modal());
+        assert!(FocusTarget::ProfileOverlay.is_modal());
+        assert!(FocusTarget::Overlay.is_modal());
+        assert!(FocusTarget::ModelPicker.is_modal());
+        assert!(FocusTarget::SessionPicker.is_modal());
+        assert!(FocusTarget::ProfilePicker.is_modal());
+        assert!(FocusTarget::RolePicker.is_modal());
+        assert!(FocusTarget::Permission.is_modal());
     }
 }
