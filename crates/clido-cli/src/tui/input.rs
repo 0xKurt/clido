@@ -1212,8 +1212,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                         app.model_prefs.save();
                         // Rebuild known_models with updated favorites.
                         let (pricing, _) = clido_core::load_pricing();
-                        app.known_models =
-                            build_model_list(&pricing, &app.model_prefs);
+                        app.known_models = build_model_list(&pricing, &app.model_prefs);
                         picker.models = app.known_models.clone();
                         picker.clamp();
                     }

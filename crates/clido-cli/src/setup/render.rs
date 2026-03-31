@@ -69,15 +69,9 @@ pub(super) fn draw_setup(f: &mut Frame, s: &SetupState) {
         SetupStep::FetchingModels => draw_fetching(f, body),
         SetupStep::Model => draw_model(f, body, s),
         SetupStep::FastProviderIntro => draw_fast_intro(f, body, s),
-        SetupStep::FastProvider => {
-            draw_subagent_provider(f, body, s)
-        }
-        SetupStep::FastCredential => {
-            draw_subagent_credential(f, body, s)
-        }
-        SetupStep::FetchingFastModels => {
-            draw_fetching(f, body)
-        }
+        SetupStep::FastProvider => draw_subagent_provider(f, body, s),
+        SetupStep::FastCredential => draw_subagent_credential(f, body, s),
+        SetupStep::FetchingFastModels => draw_fetching(f, body),
         SetupStep::FastModel => draw_fast_model(f, body, s),
     }
 

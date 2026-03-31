@@ -7,8 +7,7 @@ use clido_providers::registry::PROVIDER_REGISTRY;
 
 use super::render::draw_setup;
 use super::types::{
-    make_model_picker, ModelOption, SetupOutcome, SetupPreFill, SetupState,
-    SetupStep,
+    make_model_picker, ModelOption, SetupOutcome, SetupPreFill, SetupState, SetupStep,
 };
 
 use super::FAST_PROVIDER_OPTIONS;
