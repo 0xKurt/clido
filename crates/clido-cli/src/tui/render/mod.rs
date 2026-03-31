@@ -246,38 +246,6 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
             para.scroll((scroll.min(u16::MAX as u32) as u16, 0)),
             chat_area,
         );
-
-        // ── Selection highlight overlay ──
-        if let (Some(anchor), Some(end)) = (app.selection_anchor, app.selection_end) {
-            // anchor/end are (row, column) screen coordinates.
-            let (start, end) = if anchor.0 < end.0 || (anchor.0 == end.0 && anchor.1 <= end.1) {
-                (anchor, end)
-            } else {
-                (end, anchor)
-            };
-            let buf = frame.buffer_mut();
-            for y in start.0..=end.0 {
-                if y < chat_area.y || y >= chat_area.y + chat_area.height {
-                    continue;
-                }
-                let x_start = if y == start.0 {
-                    start.1.max(chat_area.x)
-                } else {
-                    chat_area.x
-                };
-                let x_end = if y == end.0 {
-                    end.1.min(chat_area.x + chat_area.width)
-                } else {
-                    chat_area.x + chat_area.width
-                };
-                for x in x_start..x_end {
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_bg(Color::Rgb(60, 80, 120));
-                        cell.set_fg(Color::White);
-                    }
-                }
-            }
-        }
     }
 
     // ── Status strip ──
