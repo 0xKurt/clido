@@ -23,7 +23,6 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/models` | Open the interactive model picker overlay | `/models` | Live type-to-filter; shows pricing, context window, and role assignments |
 | `/fast` | Switch to the fast (cheap) model | `/fast` | Uses `[roles] fast` from config, falls back to `claude-haiku-4-5-20251001` |
 | `/smart` | Switch to the smart (powerful) model | `/smart` | Uses `[roles] reasoning` from config, falls back to `claude-opus-4-6` |
-| `/role <name>` | Switch to the model assigned to a role | `/role critic` | Roles defined in `[roles]` config or user model prefs |
 | `/fav` | Toggle current model in/out of favorites | `/fav` | Favorites shown with ★ in the model picker and `/model` output |
 | `/reviewer [on\|off]` | Toggle reviewer sub-agent | `/reviewer on` | When on, a second model reviews each assistant response before it is shown |
 
@@ -61,7 +60,7 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 
 | Command | Description | Example | Notes |
 |---------|-------------|---------|-------|
-| `/agents` | Show current agent configuration | `/agents` | Lists main, worker, and reviewer slots with active model |
+| `/agents` | Show current agent configuration | `/agents` | Lists main provider and fast provider (if configured) |
 | `/profiles` | List all profiles | `/profiles` | Shows active model per slot for each profile |
 | `/profile` | Open profile picker | `/profile` | Switch, create, or edit profiles interactively |
 | `/profile new` | Create a new profile | `/profile new` | Launches the guided setup wizard |

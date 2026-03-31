@@ -75,8 +75,18 @@ model       = "qwen-max"
 api_key_env = "DASHSCOPE_API_KEY"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [profile.<name>.fast]
+# Optional fast/cheap provider for utility tasks (titles, summaries, commit
+# messages, prompt enhancement). Falls back to the main provider when not set.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[profile.default.fast]
+provider = "openai"
+model    = "gpt-4o-mini"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # [roles]
-# Map role names to model IDs for use by /fast, /smart, /role in the TUI.
+# Map role names to model IDs for use by /fast and /smart in the TUI.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [roles]
@@ -174,6 +184,18 @@ post_tool_use = ""
 | `api_key_env` | string | No | Environment variable name for API key |
 | `base_url` | string | No | Custom endpoint URL |
 
+### `[profile.<name>.fast]`
+
+Optional fast/cheap provider for utility tasks (title generation, summaries, commit messages, prompt enhancement). Falls back to the main profile provider when not set.
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `provider` | string | Yes | Provider identifier |
+| `model` | string | Yes | Model name |
+| `api_key` | string | No | API key (stored in plain text) |
+| `api_key_env` | string | No | Environment variable name for API key |
+| `base_url` | string | No | Custom endpoint URL |
+
 ### `[agent]`
 
 | Key | Type | Default | Description |
@@ -211,22 +233,17 @@ post_tool_use = ""
 
 ### `[roles]`
 
-Maps role names to model IDs. Used by `/fast`, `/smart`, and `/role <name>` TUI commands.
+Maps role names to model IDs. Used by `/fast` and `/smart` TUI commands.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `fast` | string | `claude-haiku-4-5-20251001` | Model for `/fast` |
 | `reasoning` | string | `claude-opus-4-6` | Model for `/smart` |
-| `critic` | string | — | Model for `/role critic` |
-| `planner` | string | — | Model for `/role planner` |
-| *(any name)* | string | — | Arbitrary role, accessible via `/role <name>` |
 
 ```toml
 [roles]
 fast      = "claude-haiku-4-5-20251001"
 reasoning = "claude-opus-4-6"
-critic    = "claude-opus-4-6"
-planner   = "claude-sonnet-4-6"
 ```
 
 User-level role overrides and model favorites/recency are stored in `~/.config/clido/model_prefs.json` and managed through the TUI (`/fav`, `/role`, `/models`).

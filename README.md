@@ -73,14 +73,10 @@ api_key = "sk-..."            # optional — inline key (env var preferred)
 api_key_env = "MY_KEY"        # optional — name of env var holding the key
 base_url = "https://..."      # optional — override API endpoint
 
-# Optional sub-agent slots (used for multi-agent workflows)
-[profiles.myprofile.worker]
-provider = "anthropic"
-model = "claude-haiku-4-5"
-
-[profiles.myprofile.reviewer]
+# Optional fast/cheap provider for utility tasks (titles, summaries, etc.)
+[profiles.myprofile.fast]
 provider = "openai"
-model = "gpt-4o"
+model = "gpt-4o-mini"
 ```
 
 **Managing profiles:**
@@ -268,10 +264,6 @@ Type `/` in the input bar to see completions. Commands are grouped by category:
 | `/models` | Open interactive model picker (search, filter, favorites, pricing) |
 | `/fast` | Switch to fast (cheap) model (respects `[roles] fast` in config) |
 | `/smart` | Switch to smart (powerful) model (respects `[roles] reasoning` in config) |
-| `/role [name]` | Pick a role or switch to a named role |
-| `/role add <name> <model>` | Create a new role mapping |
-| `/role delete <name>` | Remove a role mapping |
-| `/role list` | List all configured roles |
 | `/fav` | Toggle the current model as a favorite |
 | `/reviewer [on\|off]` | Show or toggle reviewer sub-agent |
 
@@ -321,7 +313,7 @@ Type `/` in the input bar to see completions. Commands are grouped by category:
 
 | Command | Description |
 |---|---|
-| `/agents` | Show current agent configuration (main, worker, reviewer) |
+| `/agents` | Show current agent configuration (main + fast provider) |
 | `/profiles` | List all profiles with active model per slot |
 | `/profile [name]` | Open profile picker — switch, create, or edit |
 | `/profile new` | Create a new profile via the guided wizard |
@@ -498,7 +490,7 @@ See [Building](docs/developer/building.md) for build/test commands and [Contribu
 
 ## Status
 
-**V1+ implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes, `clido doctor` and `clido init`, interactive TUI (`clido` with no args at a TTY), first-run setup, memory, repo index, declarative workflows, audit log, stats, shell completions, man page, list-models, planner (experimental), MCP support, agent profiles (create/switch/edit/delete with worker and reviewer sub-agent slots), checkpoints and rollback, and multi-provider support including Anthropic, OpenAI, OpenRouter, Mistral, MiniMax, Alibaba Cloud, and local (Ollama). Build and test: see **Build** above.
+**V1+ implementation:** Core agent loop, six tools, config with profiles, sessions with resume and stale-file detection, context compaction, permission modes, `clido doctor` and `clido init`, interactive TUI (`clido` with no args at a TTY), first-run setup, memory, repo index, declarative workflows, audit log, stats, shell completions, man page, list-models, planner (experimental), MCP support, agent profiles (create/switch/edit/delete with optional fast provider), checkpoints and rollback, and multi-provider support including Anthropic, OpenAI, OpenRouter, Mistral, MiniMax, Alibaba Cloud, and local (Ollama). Build and test: see **Build** above.
 
 ## Documentation
 

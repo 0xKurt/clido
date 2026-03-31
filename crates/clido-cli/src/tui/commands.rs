@@ -1487,10 +1487,10 @@ pub(super) fn cmd_configure(app: &mut App, cmd: &str) {
             api_key_env = \"ANTHROPIC_API_KEY\"  # env var name\n\
             base_url = \"\"            # optional custom endpoint\n\
             \n\
-            # Per-profile sub-agents (override global [agents.*]):\n\
-            # [profile.default.worker]\n\
-            # provider = \"anthropic\"\n\
-            # model    = \"claude-haiku-4-5-20251001\"\n\
+            # Optional fast/cheap provider for utility tasks (titles, summaries, etc.):\n\
+            # [profile.default.fast]\n\
+            # provider = \"openai\"\n\
+            # model    = \"gpt-4o-mini\"\n\
             \n\
             [agent]\n\
             max-turns            = 200     # maximum tool-use turns per run\n\

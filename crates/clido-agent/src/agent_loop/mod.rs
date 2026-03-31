@@ -497,12 +497,17 @@ impl AgentLoop {
         Ok((text, response.usage))
     }
 
+    /// Send a user prompt to the utility (fast) provider and return the text response.
+    /// Falls back to the main provider if no fast provider is configured.
     pub async fn complete_simple_fast(&self, prompt: &str) -> clido_core::Result<String> {
         self.complete_simple_fast_with_usage(prompt)
             .await
             .map(|(text, _)| text)
     }
 
+    /// Send a user prompt to the utility (fast) provider and return the text response
+    /// together with token usage. Falls back to the main provider if no fast provider
+    /// is configured.
     pub async fn complete_simple_fast_with_usage(
         &self,
         prompt: &str,
