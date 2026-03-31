@@ -17,15 +17,15 @@ Planned capabilities include: core agent loop with tools, sessions, context and 
 
 ## Installation
 
-**Prerequisites:** [Rust](https://rustup.rs) (install via `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
+```sh
+curl -fsSL https://raw.githubusercontent.com/0xkurt/clido/main/scripts/install.sh | sh
+```
+
+Or build from source (requires [Rust 1.94+](https://rustup.rs)):
 
 ```sh
-# Build and install from source
-cargo install --path crates/clido-cli
-
-# Or build a release binary manually
-cargo build --release
-# binary at: target/release/clido
+git clone https://github.com/0xkurt/clido.git && cd clido
+cargo install --path crates/clido-cli --locked
 ```
 
 ### First-run setup

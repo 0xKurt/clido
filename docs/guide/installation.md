@@ -1,62 +1,34 @@
 # Installation
 
-clido is distributed as a Rust crate. There are no pre-built binaries yet, so you build from source using Cargo.
-
-## Prerequisites
-
-### Rust toolchain
-
-clido requires a recent stable Rust toolchain. The minimum supported version is specified in `rust-toolchain.toml` in the repository root.
-
-Install Rust via [rustup](https://rustup.rs/):
+## Quick install (recommended)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -fsSL https://raw.githubusercontent.com/0xkurt/clido/main/scripts/install.sh | sh
 ```
 
-Verify your toolchain:
+This detects your OS and architecture, downloads the latest release binary, and installs it to `~/.local/bin`.
+
+**Options:**
 
 ```bash
-rustc --version   # should print rustc 1.78.0 or later
-cargo --version
+# Install a specific version
+CLIDO_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/0xkurt/clido/main/scripts/install.sh | sh
+
+# Install to a custom directory
+CLIDO_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/0xkurt/clido/main/scripts/install.sh | sh
 ```
 
-### API key
-
-You need an API key for at least one supported provider:
-
-| Provider | Key variable | Where to get one |
-|----------|-------------|------------------|
-| Anthropic (recommended) | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
-| OpenAI-compatible | `OPENAI_API_KEY` | Your provider's dashboard |
-| OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai](https://openrouter.ai) |
-| Local (Ollama) | — | [ollama.ai](https://ollama.ai) — no key needed |
-
-You can store the key in your shell profile or enter it during `clido init`.
+**Supported platforms:** macOS (arm64, x86_64), Linux (x86_64, aarch64)
 
 ## Build from source
 
-Clone the repository and install with Cargo:
+Requires Rust 1.94+ ([rustup.rs](https://rustup.rs/)).
 
 ```bash
-git clone https://github.com/kurtbuilds/clido.git
+git clone https://github.com/0xkurt/clido.git
 cd clido
-cargo install --path crates/clido-cli
-```
-
-This compiles the workspace and copies the `clido` binary into `~/.cargo/bin/`, which should already be on your `PATH` if you used rustup.
-
-::: tip Release build
-The default `cargo install` builds in release mode. If you want a debug build for development, use `cargo build --workspace` and run `./target/debug/clido` directly.
-:::
-
-### Build with all features
-
-```bash
 cargo install --path crates/clido-cli --locked
 ```
-
-The `--locked` flag ensures the exact dependency versions from `Cargo.lock` are used, which is recommended for reproducible builds.
 
 ## Verify the installation
 
