@@ -30,8 +30,6 @@ pub(crate) enum FocusTarget {
     SessionPicker,
     /// Profile picker popup.
     ProfilePicker,
-    /// Role picker popup.
-    RolePicker,
     /// Permission approval dialog.
     Permission,
 }
@@ -216,12 +214,6 @@ pub(crate) struct ProfilePickerState {
     pub(crate) picker: ListPicker<(String, clido_core::ProfileEntry)>,
     /// Currently active profile name (shown with ▶ marker).
     pub(crate) active: String,
-}
-
-// ── Role picker popup state ────────────────────────────────────────────────────
-
-pub(crate) struct RolePickerState {
-    pub(crate) picker: ListPicker<(String, String)>,
 }
 
 // ── Model picker popup state ──────────────────────────────────────────────────
@@ -718,50 +710,6 @@ impl ProfileOverlayState {
     pub(crate) fn masked_api_key(&self) -> String {
         crate::setup::anonymize_key(&self.api_key)
     }
-}
-
-// ── Config file helpers (used by /role commands) ──────────────────────────────
-
-/// Read config file, update `[roles]` section, write back.
-pub(crate) fn save_roles_to_config(
-    path: &std::path::Path,
-    roles: &[(String, String)],
-) -> Result<(), String> {
-    // Read existing config text (may not exist yet).
-    let existing = if path.exists() {
-        std::fs::read_to_string(path).map_err(|e| format!("read config: {e}"))?
-    } else {
-        String::new()
-    };
-
-    // Parse as toml::Value so we can round-trip non-roles sections.
-    let mut doc: toml::Value = if existing.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&existing).map_err(|e| format!("parse config TOML: {e}"))?
-    };
-
-    // Build the new [roles] table.
-    let roles_table: toml::map::Map<String, toml::Value> = roles
-        .iter()
-        .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
-        .collect();
-
-    if let toml::Value::Table(ref mut t) = doc {
-        if roles_table.is_empty() {
-            t.remove("roles");
-        } else {
-            t.insert("roles".into(), toml::Value::Table(roles_table));
-        }
-    }
-
-    let new_text = toml::to_string_pretty(&doc).map_err(|e| format!("serialize config: {e}"))?;
-    // Ensure parent directory exists.
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
-    }
-    std::fs::write(path, new_text).map_err(|e| format!("write config: {e}"))?;
-    Ok(())
 }
 
 /// Update `[profile.<profile>].model` in the config file. Preserves all other keys.

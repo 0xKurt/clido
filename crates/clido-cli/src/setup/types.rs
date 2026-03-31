@@ -15,8 +15,6 @@ pub struct SetupPreFill {
     pub api_key: String,
     /// Current model ID (pre-selected in list).
     pub model: String,
-    /// Current roles (pre-populated in roles step).
-    pub roles: Vec<(String, String)>,
     /// Profile name (used in profile-create / profile-edit flows).
     pub profile_name: String,
     /// True when creating a brand-new named profile (shows ProfileName step first).
@@ -120,7 +118,7 @@ pub(super) fn make_model_picker(models: &[ModelEntry]) -> ListPicker<ModelOption
 
 // ── TUI setup state ───────────────────────────────────────────────────────────
 
-/// Setup steps: [ProfileName →] Provider → Credential → FetchModels → Model → SubAgentIntro → [Worker] → [Reviewer] → Roles → Done.
+/// Setup steps: [ProfileName →] Provider → Credential → FetchModels → Model → FastProviderIntro → [Fast] → Done.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum SetupStep {
     /// New named profile: ask for a profile name first.
@@ -130,18 +128,12 @@ pub(super) enum SetupStep {
     Credential,
     FetchingModels,
     Model,
-    // Sub-agents (optional)
-    SubAgentIntro,
-    WorkerProvider,
-    WorkerCredential,
-    FetchingWorkerModels,
-    WorkerModel,
-    ReviewerProvider,
-    ReviewerCredential,
-    FetchingReviewerModels,
-    ReviewerModel,
-    // Roles (optional)
-    Roles,
+    // Fast provider (optional)
+    FastProviderIntro,
+    FastProvider,
+    FastCredential,
+    FetchingFastModels,
+    FastModel,
 }
 
 pub(super) struct SetupState {
@@ -157,31 +149,17 @@ pub(super) struct SetupState {
     pub model: String,
     pub text_input: TextInput,
     pub fetched_models: Vec<ModelEntry>,
-    // ── Roles step ────────────────────────────────────────────
-    pub roles: Vec<(String, String)>, // (role_name, model_id)
-    pub role_cursor: usize,
-    pub role_edit_field: RoleEditField,
-    pub role_input: String, // text being typed in a role field
-    // ── Sub-agent configuration ────────────────────────────────
-    pub subagent_intro_cursor: usize,
-    pub configure_worker: bool,
-    pub configure_reviewer: bool,
-    pub worker_provider: usize,
-    pub worker_provider_picker: ListPicker<ProviderEntry>,
-    pub worker_credential: String,
-    pub worker_model: String,
-    pub worker_fetched_models: Vec<ModelEntry>,
-    pub worker_model_picker: ListPicker<ModelOption>,
-    pub worker_custom_model: bool,
-    pub reviewer_provider: usize,
-    pub reviewer_provider_picker: ListPicker<ProviderEntry>,
-    pub reviewer_credential: String,
-    pub reviewer_model: String,
-    pub reviewer_fetched_models: Vec<ModelEntry>,
-    pub reviewer_model_picker: ListPicker<ModelOption>,
-    pub reviewer_custom_model: bool,
-    pub worker_needs_fetch: bool,
-    pub reviewer_needs_fetch: bool,
+    // ── Fast provider configuration ───────────────────────────
+    pub fast_intro_cursor: usize,
+    pub configure_fast: bool,
+    pub fast_provider_idx: usize,
+    pub fast_provider_picker: ListPicker<ProviderEntry>,
+    pub fast_credential: String,
+    pub fast_model: String,
+    pub fast_fetched_models: Vec<ModelEntry>,
+    pub fast_model_picker: ListPicker<ModelOption>,
+    pub fast_custom_model: bool,
+    pub fast_needs_fetch: bool,
     // ──────────────────────────────────────────────────────────
     pub error: Option<String>,
     /// Stored credential from pre-fill (kept so user can press Enter to keep it).
@@ -203,14 +181,6 @@ pub(super) enum SetupOutcome {
     Finished(Box<SetupState>),
 }
 
-/// Which field is being edited in the roles step.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum RoleEditField {
-    None,
-    Name(usize),  // editing role name at index (usize::MAX = new)
-    Model(usize), // editing model id at index
-}
-
 impl SetupState {
     pub fn new() -> Self {
         Self {
@@ -225,29 +195,16 @@ impl SetupState {
             model: String::new(),
             text_input: TextInput::new(),
             fetched_models: Vec::new(),
-            roles: Vec::new(),
-            role_cursor: 0,
-            role_edit_field: RoleEditField::None,
-            role_input: String::new(),
-            subagent_intro_cursor: 0,
-            configure_worker: false,
-            configure_reviewer: false,
-            worker_provider: 0,
-            worker_provider_picker: make_provider_picker(),
-            worker_credential: String::new(),
-            worker_model: String::new(),
-            worker_fetched_models: Vec::new(),
-            worker_model_picker: make_model_picker(&[]),
-            worker_custom_model: false,
-            reviewer_provider: 0,
-            reviewer_provider_picker: make_provider_picker(),
-            reviewer_credential: String::new(),
-            reviewer_model: String::new(),
-            reviewer_fetched_models: Vec::new(),
-            reviewer_model_picker: make_model_picker(&[]),
-            reviewer_custom_model: false,
-            worker_needs_fetch: false,
-            reviewer_needs_fetch: false,
+            fast_intro_cursor: 0,
+            configure_fast: false,
+            fast_provider_idx: 0,
+            fast_provider_picker: make_provider_picker(),
+            fast_credential: String::new(),
+            fast_model: String::new(),
+            fast_fetched_models: Vec::new(),
+            fast_model_picker: make_model_picker(&[]),
+            fast_custom_model: false,
+            fast_needs_fetch: false,
             error: None,
             current_credential: None,
             current_model: String::new(),
@@ -285,29 +242,16 @@ impl SetupState {
             model: pre_fill.model.clone(),
             text_input: TextInput::new(),
             fetched_models: Vec::new(),
-            roles: pre_fill.roles,
-            role_cursor: 0,
-            role_edit_field: RoleEditField::None,
-            role_input: String::new(),
-            subagent_intro_cursor: 0,
-            configure_worker: false,
-            configure_reviewer: false,
-            worker_provider: provider_idx,
-            worker_provider_picker: make_provider_picker_at(provider_idx),
-            worker_credential: String::new(),
-            worker_model: String::new(),
-            worker_fetched_models: Vec::new(),
-            worker_model_picker: make_model_picker(&[]),
-            worker_custom_model: false,
-            reviewer_provider: provider_idx,
-            reviewer_provider_picker: make_provider_picker_at(provider_idx),
-            reviewer_credential: String::new(),
-            reviewer_model: String::new(),
-            reviewer_fetched_models: Vec::new(),
-            reviewer_model_picker: make_model_picker(&[]),
-            reviewer_custom_model: false,
-            worker_needs_fetch: false,
-            reviewer_needs_fetch: false,
+            fast_intro_cursor: 0,
+            configure_fast: false,
+            fast_provider_idx: provider_idx,
+            fast_provider_picker: make_provider_picker_at(provider_idx),
+            fast_credential: String::new(),
+            fast_model: String::new(),
+            fast_fetched_models: Vec::new(),
+            fast_model_picker: make_model_picker(&[]),
+            fast_custom_model: false,
+            fast_needs_fetch: false,
             error: None,
             current_credential,
             current_model: pre_fill.model,
@@ -353,11 +297,7 @@ impl SetupState {
         !self.fetched_models.is_empty() && !self.custom_model
     }
 
-    pub fn worker_model_list_mode(&self) -> bool {
-        !self.worker_fetched_models.is_empty() && !self.worker_custom_model
-    }
-
-    pub fn reviewer_model_list_mode(&self) -> bool {
-        !self.reviewer_fetched_models.is_empty() && !self.reviewer_custom_model
+    pub fn fast_model_list_mode(&self) -> bool {
+        !self.fast_fetched_models.is_empty() && !self.fast_custom_model
     }
 }
