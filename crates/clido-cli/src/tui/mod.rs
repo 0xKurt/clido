@@ -103,6 +103,7 @@ mod tests {
         let (workdir_tx, _workdir_rx) = mpsc::unbounded_channel();
         let (compact_now_tx, _compact_now_rx) = mpsc::unbounded_channel();
         let (fetch_tx, _fetch_rx) = mpsc::unbounded_channel();
+        let (kill_tx, _kill_rx) = mpsc::unbounded_channel();
         App::new(
             AgentChannels {
                 prompt_tx,
@@ -111,6 +112,7 @@ mod tests {
                 workdir_tx,
                 compact_now_tx,
                 fetch_tx,
+                kill_tx,
             },
             Arc::new(AtomicBool::new(false)),
             "openrouter".to_string(),
