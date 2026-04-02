@@ -1554,7 +1554,7 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
     }
 
     match (event.modifiers, event.code) {
-        // Esc: cancel rate-limit auto-resume if pending, otherwise clear input.
+        // Esc: cancel rate-limit auto-resume if pending, discard queue item if editing, otherwise clear input.
         (_, Esc) => {
             if app.rate_limit_resume_at.is_some() && !app.rate_limit_cancelled {
                 app.rate_limit_cancelled = true;
@@ -1562,6 +1562,13 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                 app.push(ChatLine::Info(
                     "  ✗ Auto-resume cancelled. Use /profile <name> to switch provider or just type to continue manually.".into(),
                 ));
+            } else if app.editing_queued_item.is_some() {
+                // Discard the queue item being edited (don't put it back)
+                app.editing_queued_item = None;
+                app.queue_nav_idx = None;
+                app.text_input.text = app.text_input.history_draft.clone();
+                app.text_input.cursor = 0;
+                app.selected_cmd = None;
             } else {
                 app.text_input.text.clear();
                 app.text_input.cursor = 0;
@@ -1648,12 +1655,13 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         }
         (_, Home) => app.text_input.cursor = 0,
         (_, End) => app.text_input.cursor = app.text_input.text.chars().count(),
-        // ── Up: queue nav OR multiline cursor movement OR input history ────
+        // ── Up: queue nav (editing removes from queue) OR multiline cursor movement OR input history ────
         // Chat scrolling is separate (PageUp/PageDown/mouse wheel only).
         (_, Up)
             if app.pending_perm.is_none() && slash_completions(&app.text_input.text).is_empty() =>
         {
             // First: cycle through queued items (newest first) before history
+            // When selecting a queue item, it gets REMOVED from queue for editing
             if !app.queued.is_empty() && app.text_input.history_idx.is_none() {
                 let queue_len = app.queued.len();
                 let new_idx = match app.queue_nav_idx {
@@ -1661,12 +1669,22 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                     Some(0) => queue_len - 1, // Wrap around to newest
                     Some(i) => i - 1,         // Move to older item
                 };
-                app.queue_nav_idx = Some(new_idx);
-                // Get the queue item (convert from nav index to queue position)
-                let queue_pos = new_idx;
-                if let Some(item) = app.queued.get(queue_pos) {
+
+                // If we're already editing a queue item, put current input back in queue first
+                if app.editing_queued_item.is_some() {
+                    if !app.text_input.text.trim().is_empty() {
+                        app.queued.push_back(app.text_input.text.clone());
+                    }
+                } else {
+                    // Save current draft when first entering queue nav
                     app.text_input.history_draft = app.text_input.text.clone();
-                    app.text_input.text = item.clone();
+                }
+
+                app.queue_nav_idx = Some(new_idx);
+                // Remove item from queue to edit it
+                if let Some(item) = app.queued.remove(new_idx) {
+                    app.editing_queued_item = Some(item.clone());
+                    app.text_input.text = item;
                     app.text_input.cursor = 0; // Reset cursor to start
                     app.selected_cmd = None;
                     return;
@@ -1700,27 +1718,35 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
                 app.selected_cmd = None;
             }
         }
-        // ── Down: queue nav OR multiline cursor movement OR input history ─
+        // ── Down: queue nav (put current back in queue) OR multiline cursor movement OR input history ─
         (_, Down)
             if app.pending_perm.is_none() && slash_completions(&app.text_input.text).is_empty() =>
         {
             // Handle queue navigation (moving forward through queue)
-            if let Some(idx) = app.queue_nav_idx {
+            // Put current input back in queue before moving
+            if app.queue_nav_idx.is_some() {
                 let queue_len = app.queued.len();
-                if idx + 1 >= queue_len {
+                // Put current text back in queue (if not empty)
+                if !app.text_input.text.trim().is_empty() {
+                    app.queued.push_back(app.text_input.text.clone());
+                }
+                app.editing_queued_item = None;
+
+                // Now move to next item
+                let idx = app.queue_nav_idx.unwrap();
+                if idx >= queue_len {
                     // Exhausted queue, return to draft and switch to history
                     app.queue_nav_idx = None;
                     app.text_input.text = app.text_input.history_draft.clone();
                     app.text_input.cursor = 0;
                     app.selected_cmd = None;
-                } else {
-                    let new_idx = idx + 1;
-                    app.queue_nav_idx = Some(new_idx);
-                    if let Some(item) = app.queued.get(new_idx) {
-                        app.text_input.text = item.clone();
-                        app.text_input.cursor = 0;
-                        app.selected_cmd = None;
-                    }
+                } else if let Some(item) = app.queued.remove(idx) {
+                    // Get next item from queue
+                    app.editing_queued_item = Some(item.clone());
+                    app.text_input.text = item;
+                    app.text_input.cursor = 0;
+                    app.selected_cmd = None;
+                    // Keep same idx since we removed current and next shifted up
                 }
                 return;
             }

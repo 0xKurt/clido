@@ -38,6 +38,8 @@ pub(super) struct App {
     pub(super) queued: VecDeque<String>,
     /// Index for cycling through queued items with Up arrow (None = not in queue nav mode).
     pub(super) queue_nav_idx: Option<usize>,
+    /// When editing a queued item, this stores the original text to restore if cancelled.
+    pub(super) editing_queued_item: Option<String>,
     /// Session picker popup state (Some = popup visible).
     pub(super) session_picker: Option<SessionPickerState>,
     /// Model picker popup state (Some = popup visible).
@@ -197,6 +199,7 @@ impl App {
             channels,
             queued: VecDeque::new(),
             queue_nav_idx: None,
+            editing_queued_item: None,
             session_picker: None,
             model_picker: None,
             profile_picker: None,
