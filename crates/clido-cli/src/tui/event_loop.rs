@@ -1133,6 +1133,9 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
         .workdir
         .clone()
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    // Canonicalize for consistent session storage regardless of how the path was specified
+    let workspace_root =
+        std::fs::canonicalize(&workspace_root).unwrap_or_else(|_| workspace_root.clone());
 
     // Prune session files older than 30 days in the background (non-fatal).
     {
