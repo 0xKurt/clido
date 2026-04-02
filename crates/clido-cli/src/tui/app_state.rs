@@ -330,6 +330,8 @@ impl App {
         }
         // Expand @file references in user input
         let text = expand_at_file_refs(&text, std::env::current_dir().ok().as_deref());
+        // Remember if text matches current input BEFORE any moves (to decide whether to clear after send)
+        let text_matches_input = self.text_input.text.trim() == text.trim();
         // Check for per-turn @model-name prefix.
         let send_result = if let Some((per_turn_model, actual_prompt)) = parse_per_turn_model(&text)
         {
@@ -367,8 +369,13 @@ impl App {
             return;
         }
 
-        self.text_input.text.clear();
-        self.text_input.cursor = 0;
+        // Only clear input field if this text matches what's currently in the input
+        // (user just submitted it). Don't clear if we're draining a queued item
+        // while user is typing something new.
+        if text_matches_input {
+            self.text_input.text.clear();
+            self.text_input.cursor = 0;
+        }
         self.busy = true;
         self.following = true;
         self.turn_start = Some(std::time::Instant::now());
