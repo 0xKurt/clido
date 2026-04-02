@@ -193,7 +193,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
     // Input grows with content: 1 line of text = 3 rows (2 borders + 1), capped at 12.
     // When very narrow (< 40), collapse optional rows to avoid layout panics.
     let input_line_count = app.text_input.text.matches('\n').count() + 1;
-    let input_h = (input_line_count as u16 + 2).min(12);
+    let input_h = (input_line_count as u16 + 2).min(3);
     let (hint_h, status_h) = if area.width < 40 { (0, 0) } else { (1, 2) };
     // Queue area: 1 line if empty, up to 7 lines if many items (header + 5 items + "more")
     let queue_h = if app.queued.is_empty() {
