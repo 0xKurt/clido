@@ -115,6 +115,8 @@ pub(crate) struct AgentChannels {
     pub(crate) compact_now_tx: mpsc::UnboundedSender<()>,
     /// Channel to send AgentEvents from background tasks (e.g. model fetch) to the TUI loop.
     pub(crate) fetch_tx: mpsc::UnboundedSender<AgentEvent>,
+    /// Channel to force abort the agent task immediately (for /stop command).
+    pub(crate) kill_tx: mpsc::UnboundedSender<()>,
 }
 
 // ── Plan editor state ─────────────────────────────────────────────────────────

@@ -524,9 +524,12 @@ impl App {
         if self.pending_perm.is_some() || !self.busy {
             return;
         }
+        // First try to kill the agent task immediately via channel
+        let _ = self.channels.kill_tx.send(());
+        // Also set cancel flag as fallback
         self.cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.push(ChatLine::Info("  ↻ Interrupted".into()));
+        self.push(ChatLine::Info("  ↻ Stopping...".into()));
     }
 
     pub(super) fn push_status(&mut self, tool_use_id: String, name: String, detail: String) {

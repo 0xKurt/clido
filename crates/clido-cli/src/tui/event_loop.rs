@@ -161,6 +161,7 @@ pub(super) async fn agent_task(
     image_state: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     reviewer_enabled: Arc<AtomicBool>,
     todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
+    mut kill_rx: mpsc::UnboundedReceiver<()>,
 ) {
     let setup_result = match preloaded_config {
         Some(loaded) => AgentSetup::build_with_preloaded_and_store(
@@ -415,6 +416,13 @@ pub(super) async fn agent_task(
                     Some(()) => AgentAction::CompactNow,
                     None => break,
                 }
+            }
+            _ = kill_rx.recv() => {
+                // Kill signal received - abort immediately
+                if event_tx.send(AgentEvent::Killed).is_err() {
+                    return;
+                }
+                return;
             }
         };
 
@@ -1010,6 +1018,8 @@ pub(super) struct AgentRuntimeHandles {
     todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>>,
     /// JoinHandle for the agent background task — aborted on TUI exit to prevent zombies.
     agent_handle: tokio::task::JoinHandle<()>,
+    /// Channel to force abort the agent task immediately (for /stop command).
+    kill_tx: mpsc::UnboundedSender<()>,
 }
 
 /// Resolve the API key for display purposes (welcome screen, etc.).
@@ -1070,6 +1080,7 @@ pub(super) fn start_agent_runtime(
     let (compact_now_tx, compact_now_rx) = mpsc::unbounded_channel::<()>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (perm_tx, perm_rx) = mpsc::unbounded_channel::<PermRequest>();
+    let (kill_tx, kill_rx) = mpsc::unbounded_channel::<()>();
 
     // Pre-create the shared todo store so both the agent task and the TUI app can share it.
     let todo_store: std::sync::Arc<std::sync::Mutex<Vec<clido_tools::TodoItem>>> =
@@ -1091,6 +1102,7 @@ pub(super) fn start_agent_runtime(
         image_state,
         reviewer_enabled,
         todo_store.clone(),
+        kill_rx,
     ));
 
     AgentRuntimeHandles {
@@ -1104,6 +1116,7 @@ pub(super) fn start_agent_runtime(
         fetch_tx: event_tx,
         todo_store,
         agent_handle,
+        kill_tx,
     }
 }
 
@@ -1313,6 +1326,7 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
             workdir_tx: runtime.workdir_tx.clone(),
             compact_now_tx: runtime.compact_now_tx.clone(),
             fetch_tx: runtime.fetch_tx.clone(),
+            kill_tx: runtime.kill_tx.clone(),
         },
         cancel,
         provider.clone(),
@@ -1924,6 +1938,16 @@ pub(super) async fn event_loop(
                         last_agent_activity = std::time::Instant::now();
                         app.push(ChatLine::Info("  ↻ Interrupted — processing next item".into()));
                         // Revert per-turn model override on interruption too.
+                        if let Some(prev) = app.per_turn_prev_model.take() {
+                            app.model = prev.clone();
+                            let _ = app.channels.model_switch_tx.send(prev);
+                        }
+                        app.on_agent_done();
+                    }
+                    Some(AgentEvent::Killed) => {
+                        last_agent_activity = std::time::Instant::now();
+                        app.push(ChatLine::Info("  ✗ Stopped by user".into()));
+                        // Revert per-turn model override on kill too.
                         if let Some(prev) = app.per_turn_prev_model.take() {
                             app.model = prev.clone();
                             let _ = app.channels.model_switch_tx.send(prev);
