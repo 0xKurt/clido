@@ -25,6 +25,7 @@ use similar::TextDiff;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
@@ -1795,9 +1796,23 @@ impl AgentLoop {
         self.execute_tool(name, input).await
     }
 
+    /// Global tool execution timeout to prevent indefinite hangs.
+    /// Individual tools (like Bash) may have shorter timeouts.
+    const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+
     async fn execute_tool(&self, name: &str, input: &serde_json::Value) -> ToolOutput {
         match self.tools.get(name) {
-            Some(tool) => tool.execute(input.clone()).await,
+            Some(tool) => {
+                // Wrap tool execution in a timeout to prevent hangs
+                match tokio::time::timeout(Self::TOOL_TIMEOUT, tool.execute(input.clone())).await {
+                    Ok(output) => output,
+                    Err(_) => ToolOutput::err(format!(
+                        "Tool '{}' timed out after {} seconds - operation took too long",
+                        name,
+                        Self::TOOL_TIMEOUT.as_secs()
+                    )),
+                }
+            }
             None => ToolOutput::err(format!("Tool not found: {}", name)),
         }
     }
@@ -1861,7 +1876,21 @@ impl AgentLoop {
                             }
                         };
                         match tools.get(&name) {
-                            Some(tool) => tool.execute(input).await,
+                            Some(tool) => {
+                                // Wrap in timeout like sequential execution
+                                match tokio::time::timeout(
+                                    Duration::from_secs(60),
+                                    tool.execute(input),
+                                )
+                                .await
+                                {
+                                    Ok(output) => output,
+                                    Err(_) => ToolOutput::err(format!(
+                                        "Tool '{}' timed out after 60 seconds",
+                                        name
+                                    )),
+                                }
+                            }
                             None => ToolOutput::err(format!("Tool not found: {}", name)),
                         }
                     }

@@ -1581,6 +1581,7 @@ pub(super) async fn event_loop(
     // Stall timeout: trigger recovery only if truly no activity (heartbeats keep this fresh
     // during long LLM calls, so 120 s is a reliable hard ceiling for genuinely hung agents).
     const STALL_TIMEOUT_SECS: u64 = 120;
+    const STALL_WARNING_SECS: u64 = 30;
     // Only redraw when state has actually changed to reduce CPU usage.
     let mut dirty = true;
     // Track focus to toggle mouse capture when modals open/close.
@@ -1609,10 +1610,25 @@ pub(super) async fn event_loop(
                     } else {
                         last_agent_activity
                     };
-                    if baseline.elapsed().as_secs() >= STALL_TIMEOUT_SECS {
+                    let elapsed = baseline.elapsed().as_secs();
+                    if elapsed >= STALL_TIMEOUT_SECS {
                         return Ok(EventLoopExit::Recover(
                             "agent appears stalled (no progress events)".to_string(),
                         ));
+                    }
+                    // Show warning at 30 seconds if agent seems stuck
+                    if elapsed >= STALL_WARNING_SECS {
+                        let should_warn = app.last_stall_warning.is_none_or(|t| {
+                            t.elapsed().as_secs() >= 30
+                        });
+                        if should_warn {
+                            app.push(ChatLine::Info(format!(
+                                "  ⚠ Agent hasn't responded for {}s. Press Ctrl+Enter to interrupt or wait...",
+                                elapsed
+                            )));
+                            app.last_stall_warning = Some(std::time::Instant::now());
+                            dirty = true;
+                        }
                     }
                 }
                 // Auto-resume after rate limit: when the timer expires and user

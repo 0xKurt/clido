@@ -153,6 +153,8 @@ pub(super) struct App {
     pub(super) render_cache_msg_count: usize,
     /// Non-blocking toast notifications (auto-dismiss).
     pub(super) toasts: Vec<Toast>,
+    /// Last time we showed a "agent seems stuck" warning to avoid spamming.
+    pub(super) last_stall_warning: Option<std::time::Instant>,
 }
 
 impl App {
@@ -247,6 +249,7 @@ impl App {
             render_cache: std::collections::HashMap::new(),
             render_cache_msg_count: 0,
             toasts: Vec::new(),
+            last_stall_warning: None,
         };
         app.messages.push(ChatLine::WelcomeSplash);
         app
