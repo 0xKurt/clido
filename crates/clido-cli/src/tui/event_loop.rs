@@ -1800,6 +1800,33 @@ pub(super) async fn event_loop(
                                     _ => scroll_up(app, 3),
                                 }
                             }
+                            MouseEventKind::Down(_) => {
+                                // Start selection on mouse down in chat area
+                                if focus == FocusTarget::ChatInput {
+                                    let row = m.row as usize;
+                                    let col = m.column as usize;
+                                    // Convert screen coordinates to content coordinates
+                                    let content_row = row + (app.scroll as usize);
+                                    app.selection.start(content_row, col);
+                                    app.selection_mode = true;
+                                }
+                            }
+                            MouseEventKind::Drag(_) => {
+                                // Update selection on drag
+                                if app.selection_mode && focus == FocusTarget::ChatInput {
+                                    let row = m.row as usize;
+                                    let col = m.column as usize;
+                                    let content_row = row + (app.scroll as usize);
+                                    app.selection.update(content_row, col);
+                                }
+                            }
+                            MouseEventKind::Up(_) => {
+                                // Selection complete on mouse up
+                                if app.selection_mode {
+                                    // Keep selection active for copy
+                                    app.selection_mode = false;
+                                }
+                            }
                             // Mouse capture is off in ChatInput mode — the terminal
                             // handles native text selection.  Click/drag/release
                             // events only arrive when a modal is open, which already

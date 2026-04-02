@@ -1553,6 +1553,75 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         app.selected_cmd = None;
     }
 
+    // ── Selection Mode: handle keys first ────────────────────────────────
+    if app.selection_mode {
+        match (event.modifiers, event.code) {
+            (Km::NONE, Esc) => {
+                app.selection_mode = false;
+                app.selection.clear();
+                return;
+            }
+            (Km::NONE, Char('y')) => {
+                // Copy selection to clipboard
+                if app.selection.active {
+                    let text = app.get_selected_text();
+                    if !text.is_empty() {
+                        match app.copy_to_clipboard(&text) {
+                            Ok(()) => {
+                                app.push_toast(
+                                    "Copied to clipboard".to_string(),
+                                    Color::Green,
+                                    std::time::Duration::from_secs(2),
+                                );
+                            }
+                            Err(e) => {
+                                app.push_toast(
+                                    format!("Copy failed: {}", e),
+                                    Color::Red,
+                                    std::time::Duration::from_secs(3),
+                                );
+                            }
+                        }
+                    }
+                }
+                app.selection_mode = false;
+                app.selection.clear();
+                return;
+            }
+            (Km::NONE, Up) => {
+                let (row, col) = app.selection.focus;
+                if row > 0 {
+                    app.selection.update(row - 1, col);
+                }
+                return;
+            }
+            (Km::NONE, Down) => {
+                let (row, col) = app.selection.focus;
+                app.selection.update(row + 1, col);
+                return;
+            }
+            (Km::NONE, Left) => {
+                let (row, col) = app.selection.focus;
+                if col > 0 {
+                    app.selection.update(row, col - 1);
+                }
+                return;
+            }
+            (Km::NONE, Right) => {
+                let (row, col) = app.selection.focus;
+                app.selection.update(row, col + 1);
+                return;
+            }
+            (Km::NONE, Char(' ')) => {
+                // Space toggles selection mode (sets new anchor)
+                let (row, col) = app.selection.focus;
+                app.selection.start(row, col);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     match (event.modifiers, event.code) {
         // Esc: cancel rate-limit auto-resume if pending, discard queue item if editing, otherwise clear input.
         (_, Esc) => {
@@ -1578,6 +1647,20 @@ pub(super) fn handle_key(app: &mut App, event: crossterm::event::KeyEvent) {
         }
         // Ctrl+Enter: interrupt current run and send immediately.
         (Km::CONTROL, Enter) => app.force_send(),
+        // Ctrl+Shift+C: enter copy mode for selecting chat lines.
+        (Km::CONTROL | Km::SHIFT, Char('c')) => {
+            app.selection_mode = !app.selection_mode;
+            if app.selection_mode {
+                app.selection.clear();
+                // Start at top of visible content
+                app.selection.start(app.scroll as usize, 0);
+                app.push_toast(
+                    "Copy mode: ↑↓←→ move · Space toggle · y copy · Esc exit".to_string(),
+                    Color::Yellow,
+                    std::time::Duration::from_secs(5),
+                );
+            }
+        }
         // Shift+Enter: insert a newline without sending (multiline input).
         (Km::SHIFT, Enter) => {
             let byte_pos = char_byte_pos(&app.text_input.text, app.text_input.cursor);

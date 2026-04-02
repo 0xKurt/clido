@@ -1360,6 +1360,91 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
 /// Width-aware version; call this from render paths where chat_area.width is known.
 /// Uses a per-width render cache keyed by message content hash to avoid re-rendering
 /// unchanged messages on every tick.
+/// Apply selection highlighting to lines within the visible area.
+fn apply_selection_highlight(
+    lines: &[Line<'static>],
+    selection: &Selection,
+    scroll_offset: usize,
+    visible_height: usize,
+) -> Vec<Line<'static>> {
+    let mut result = lines.to_vec();
+
+    // Calculate visible line range
+    let first_visible = scroll_offset;
+    let last_visible = (scroll_offset + visible_height).min(lines.len());
+
+    // Get selection bounds (ordered)
+    let (start_row, start_col, end_row, end_col) = selection.bounds();
+
+    // Apply highlighting to each visible line
+    for line_idx in first_visible..last_visible {
+        if line_idx >= result.len() {
+            break;
+        }
+
+        // Check if this line is in the selection
+        let in_selection = if start_row == end_row {
+            // Single line selection
+            line_idx == start_row
+        } else {
+            // Multi-line selection
+            line_idx >= start_row && line_idx <= end_row
+        };
+
+        if !in_selection {
+            continue;
+        }
+
+        // Calculate column range for this line
+        let line_start_col = if line_idx == start_row { start_col } else { 0 };
+        let line_end_col = if line_idx == end_row {
+            end_col
+        } else {
+            usize::MAX
+        };
+
+        // Apply highlighting to spans in this line
+        let line = &result[line_idx];
+        let mut new_spans: Vec<Span<'static>> = Vec::new();
+        let mut current_col = 0;
+
+        for span in line.spans.iter() {
+            let span_len = span.content.len();
+            let span_end = current_col + span_len;
+
+            // Check if span overlaps with selection
+            if span_end <= line_start_col || current_col >= line_end_col {
+                // Span is completely outside selection
+                new_spans.push(span.clone());
+            } else if current_col >= line_start_col && span_end <= line_end_col {
+                // Span is completely inside selection
+                let mut highlighted = span.clone();
+                highlighted.style = span.style.patch(
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                );
+                new_spans.push(highlighted);
+            } else {
+                // Span partially overlaps - split it
+                // This is complex, for now just highlight the whole span
+                let mut highlighted = span.clone();
+                highlighted.style = span
+                    .style
+                    .patch(Style::default().bg(Color::Blue).fg(Color::White));
+                new_spans.push(highlighted);
+            }
+
+            current_col += span_len;
+        }
+
+        result[line_idx] = Line::from(new_spans);
+    }
+
+    result
+}
+
 pub(super) fn build_lines_w(app: &mut App, width: usize) -> Vec<Line<'static>> {
     // Compute a cheap hash of the current messages state.
     // Key: (content_hash, width) where content_hash covers message count + last message text.
@@ -1399,7 +1484,18 @@ pub(super) fn build_lines_w(app: &mut App, width: usize) -> Vec<Line<'static>> {
 
     let result = build_lines_w_uncached(app, width);
     app.render_cache.insert(cache_key, result.clone());
-    result
+
+    // Apply selection highlighting to visible lines
+    if app.selection.active {
+        apply_selection_highlight(
+            &result,
+            &app.selection,
+            app.scroll as usize,
+            app.layout.chat_area_y.1 as usize,
+        )
+    } else {
+        result
+    }
 }
 
 pub(super) fn build_lines_w_uncached(app: &App, width: usize) -> Vec<Line<'static>> {

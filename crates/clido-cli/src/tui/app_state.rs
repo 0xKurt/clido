@@ -15,6 +15,58 @@ use super::commands::{execute_slash, is_known_slash_cmd, parse_per_turn_model};
 use super::render::build_plan_from_assistant_text;
 use super::state::*;
 
+/// Text selection for in-app copy (like Claude Code).
+/// Tracks anchor (start) and focus (end) positions in (row, col) format.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Selection {
+    pub anchor: (usize, usize), // (row, col) - start of selection
+    pub focus: (usize, usize),  // (row, col) - end of selection
+    pub active: bool,           // whether selection is currently active
+}
+
+#[allow(dead_code)]
+impl Selection {
+    /// Clear the selection.
+    pub fn clear(&mut self) {
+        self.active = false;
+        self.anchor = (0, 0);
+        self.focus = (0, 0);
+    }
+
+    /// Set anchor point and start selection.
+    pub fn start(&mut self, row: usize, col: usize) {
+        self.anchor = (row, col);
+        self.focus = (row, col);
+        self.active = true;
+    }
+
+    /// Update focus point (during drag).
+    pub fn update(&mut self, row: usize, col: usize) {
+        self.focus = (row, col);
+    }
+
+    /// Get ordered selection bounds (start_row, start_col, end_row, end_col).
+    pub fn bounds(&self) -> (usize, usize, usize, usize) {
+        let (ar, ac) = self.anchor;
+        let (fr, fc) = self.focus;
+
+        if ar < fr || (ar == fr && ac < fc) {
+            (ar, ac, fr, fc)
+        } else {
+            (fr, fc, ar, ac)
+        }
+    }
+
+    /// Check if a cell is within the selection.
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        if !self.active {
+            return false;
+        }
+        let (sr, sc, er, ec) = self.bounds();
+        row >= sr && row <= er && (row > sr || col >= sc) && (row < er || col <= ec)
+    }
+}
+
 pub(super) struct App {
     pub(super) messages: Vec<ChatLine>,
     /// Live activity log shown in the status strip (last 2 entries).
@@ -73,6 +125,8 @@ pub(super) struct App {
     pub(super) wants_profile_edit: Option<String>,
     /// When Some(id), restart TUI and resume this session immediately.
     pub(super) restart_resume_session: Option<String>,
+    /// Text selection state for in-app copy/paste.
+    pub(super) selection: Selection,
     pub(super) provider: String,
     pub(super) model: String,
     /// Active profile name, shown in the header.
@@ -83,6 +137,8 @@ pub(super) struct App {
     pub(super) session_title: Option<String>,
     /// Project root used for listing sessions.
     pub(super) workspace_root: std::path::PathBuf,
+    /// Whether we're in selection mode (vim-style copy mode).
+    pub(super) selection_mode: bool,
 
     /// Last completed agent invocation's token totals (for context % in header).
     pub(super) stats: SessionStats,
@@ -217,6 +273,7 @@ impl App {
             wants_profile_create: false,
             wants_profile_edit: None,
             restart_resume_session: None,
+            selection: Selection::default(),
             provider,
             model,
             current_profile,
@@ -253,6 +310,7 @@ impl App {
             render_cache_msg_count: 0,
             toasts: Vec::new(),
             last_stall_warning: None,
+            selection_mode: false,
         };
         app.messages.push(ChatLine::WelcomeSplash);
         app
@@ -643,5 +701,215 @@ impl App {
             ChatLine::Assistant(text) if !text.trim().is_empty() => Some(text.as_str()),
             _ => None,
         })
+    }
+
+    // ── Selection Methods ────────────────────────────────────────────────────
+    #[allow(dead_code)]
+    /// Start selection at the given screen coordinates.
+    pub(super) fn start_selection(&mut self, row: u16, col: u16) {
+        self.selection.start(row as usize, col as usize);
+    }
+
+    /// Update selection focus while dragging.
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    pub(super) fn update_selection(&mut self, row: u16, col: u16) {
+        self.selection.update(row as usize, col as usize);
+    }
+
+    /// End selection (mouse release).
+    #[allow(dead_code)]
+    pub(super) fn end_selection(&mut self) {
+        self.selection_mode = false;
+    }
+
+    /// Clear selection entirely.
+    #[allow(dead_code)]
+    pub(super) fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Get the normalized selection bounds (start_row, start_col, end_row, end_col).
+    #[allow(dead_code)]
+    pub(super) fn get_selection_bounds(&self) -> Option<(u16, u16, u16, u16)> {
+        if !self.selection.active {
+            return None;
+        }
+        let (sr, sc, er, ec) = self.selection.bounds();
+        Some((sr as u16, sc as u16, er as u16, ec as u16))
+    }
+
+    /// Copy selected text to clipboard.
+    /// Returns true if something was copied.
+    #[allow(dead_code)]
+    pub(super) fn copy_selection(&mut self) -> bool {
+        let text = self.get_selected_text();
+        if text.is_empty() {
+            return false;
+        }
+
+        // Try to copy to clipboard
+        if let Err(e) = self.copy_to_clipboard(&text) {
+            self.push(ChatLine::Info(format!("  ✗ Failed to copy: {}", e)));
+            return false;
+        }
+
+        self.push_toast(
+            format!("✓ Copied {} chars", text.len()),
+            Color::Green,
+            std::time::Duration::from_secs(2),
+        );
+        true
+    }
+
+    /// Get text content at a specific line index (approximate).
+    fn get_text_at_line(&self, line_idx: u16) -> Option<String> {
+        // This is a simplified version - in reality we'd need to track
+        // which message line corresponds to which screen row after wrapping
+        // For now, approximate by iterating messages
+        let mut current_line: u16 = 0;
+
+        for msg in &self.messages {
+            let text = match msg {
+                ChatLine::User(t) | ChatLine::Assistant(t) | ChatLine::Info(t) => t,
+                _ => continue,
+            };
+
+            // Count lines in this message (rough estimate)
+            let lines_in_msg = text.matches('\n').count() + 1;
+            let end_line = current_line + lines_in_msg as u16;
+
+            if line_idx >= current_line && line_idx < end_line {
+                let offset = (line_idx - current_line) as usize;
+                let lines: Vec<&str> = text.lines().collect();
+                return lines.get(offset).map(|s| s.to_string());
+            }
+
+            current_line = end_line;
+        }
+
+        None
+    }
+
+    /// Get selected text from the current selection.
+    pub(super) fn get_selected_text(&self) -> String {
+        if !self.selection.active {
+            return String::new();
+        }
+
+        let (sr, sc, er, ec) = self.selection.bounds();
+        let mut result = String::new();
+
+        for row in sr..=er {
+            if let Some(line) = self.get_text_at_line(row as u16) {
+                let line_len = line.len();
+                let start_col = if row == sr { sc } else { 0 };
+                let end_col = if row == er { ec } else { line_len };
+
+                if start_col < line_len {
+                    let end = end_col.min(line_len);
+                    result.push_str(&line[start_col..end]);
+                }
+
+                if row < er {
+                    result.push('\n');
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Copy text to clipboard using OSC 52 escape sequence (works over SSH)
+    /// or fallback to native clipboard (pbcopy on macOS).
+    pub(super) fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
+        // Try OSC 52 first (works over SSH, in tmux, etc.)
+        if self.copy_osc52(text).is_ok() {
+            return Ok(());
+        }
+
+        // Fallback to native clipboard
+        #[cfg(target_os = "macos")]
+        {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            let mut child = Command::new("pbcopy")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn pbcopy: {}", e))?;
+
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(text.as_bytes())
+                    .map_err(|e| format!("Failed to write to pbcopy: {}", e))?;
+            }
+
+            // Don't wait for completion - pbcopy exits immediately
+            let _ = child.wait();
+            Ok(())
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            // Try wl-copy (Wayland), then xclip (X11)
+            let cmd = if Command::new("wl-copy").arg("--version").output().is_ok() {
+                "wl-copy"
+            } else {
+                "xclip"
+            };
+
+            let mut child = Command::new(cmd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn {}: {}", cmd, e))?;
+
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(text.as_bytes())
+                    .map_err(|e| format!("Failed to write to clipboard: {}", e))?;
+            }
+
+            let _ = child.wait();
+            Ok(())
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err("Clipboard not supported on this platform".to_string())
+        }
+    }
+
+    /// Copy to clipboard using OSC 52 terminal escape sequence.
+    /// This works over SSH and in most modern terminals.
+    #[allow(deprecated)]
+    fn copy_osc52(&self, text: &str) -> Result<(), String> {
+        use std::io::Write;
+
+        // Base64 encode the text
+        let encoded = base64::encode(text);
+
+        // OSC 52 sequence: ESC ] 52 ; c ; <base64> BEL
+        // The 'c' parameter means system clipboard
+        let osc52 = format!("\x1b]52;c;{}\x07", encoded);
+
+        // Write to stdout (the terminal)
+        std::io::stdout()
+            .write_all(osc52.as_bytes())
+            .map_err(|e| format!("Failed to write OSC 52: {}", e))?;
+
+        // Flush to ensure it's sent
+        std::io::stdout()
+            .flush()
+            .map_err(|e| format!("Failed to flush: {}", e))?;
+
+        Ok(())
     }
 }
