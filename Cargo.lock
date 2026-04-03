@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "clido-agent"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "clido-checkpoint"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "chrono",
  "hex",
@@ -510,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "clido-cli"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "clido-context"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "clido-core",
  "directories",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "clido-core"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "directories",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "clido-index"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "glob",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "clido-memory"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "clido-planner"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "clido-providers"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "clido-storage"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "clido-tools"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "clido-workflows"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "async-trait",
  "chrono",

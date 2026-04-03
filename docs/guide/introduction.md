@@ -31,19 +31,14 @@ The agent loops autonomously — it calls tools, observes results, and continues
 - **Multiple providers** — Anthropic, OpenAI-compatible endpoints, OpenRouter, and local Ollama models
 - **Audit log** — every tool call is logged with inputs, outputs, and timing for review
 
-## How it compares
+## Why clido
 
-| Feature | clido | Claude Code | Aider | Continue |
-|---------|-------|-------------|-------|----------|
-| Language | Rust | TypeScript | Python | TypeScript |
-| TUI | Yes | Yes | Yes | Editor extension |
-| Persistent sessions | Yes | Yes | Partial | No |
-| Workflows | Yes | No | No | No |
-| MCP support | Yes | Yes | No | Yes |
-| Local models | Yes | No | Yes | Yes |
-| Single binary | Yes | No | No | No |
-
-clido is closest to Claude Code in its agentic scope, but is provider-agnostic and ships as a self-contained binary. It is designed to be embedded in CI pipelines and scripts as well as used interactively.
+- **Provider-agnostic** — use any LLM provider (16+ supported) or local models via Ollama
+- **Single binary** — no runtime, no package manager, one `curl` and you're running
+- **Persistent sessions** — pick up where you left off, with full history and context
+- **YAML workflows** — automate multi-step agent tasks declaratively
+- **MCP support** — extend the agent with external tools via the Model Context Protocol
+- **Built for CI/CD** — embed in pipelines and scripts with `--non-interactive` mode
 
 ## A first look
 

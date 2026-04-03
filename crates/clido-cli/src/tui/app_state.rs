@@ -15,7 +15,7 @@ use super::commands::{execute_slash, is_known_slash_cmd, parse_per_turn_model};
 use super::render::build_plan_from_assistant_text;
 use super::state::*;
 
-/// Text selection for in-app copy (like Claude Code).
+/// Text selection for in-app copy.
 /// Tracks anchor (start) and focus (end) positions in (row, col) format.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Selection {

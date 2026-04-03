@@ -1866,7 +1866,7 @@ pub(super) async fn event_loop(
                                     if app.selection.anchor == app.selection.focus {
                                         app.selection.clear();
                                     } else {
-                                        // Auto-copy on mouse-up (like Claude Code).
+                                        // Auto-copy on mouse-up.
                                         let text = app.get_selected_text();
                                         if !text.is_empty() {
                                             let toast_pos = (m.column, m.row);
