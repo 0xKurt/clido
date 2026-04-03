@@ -103,12 +103,14 @@ pub(crate) async fn fetch_latest_version() -> Option<String> {
         .build()
         .ok()?;
 
+    // Use /releases (not /releases/latest) — the "latest" endpoint ignores
+    // prereleases and has aggressive caching that lags behind new releases.
     let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
+        "https://api.github.com/repos/{}/releases?per_page=1",
         GITHUB_REPO
     );
-    let release: Release = client.get(&url).send().await.ok()?.json().await.ok()?;
-    Some(release.tag_name)
+    let releases: Vec<Release> = client.get(&url).send().await.ok()?.json().await.ok()?;
+    releases.into_iter().next().map(|r| r.tag_name)
 }
 
 async fn download_and_replace(url: &str) -> Result<(), String> {
