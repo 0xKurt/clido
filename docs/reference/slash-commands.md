@@ -68,6 +68,18 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/plan save` | Save the current plan to `.clido/plans/` | `/plan save` | Saved plans can be resumed with `clido plan run` |
 | `/plan list` | List all saved plans | `/plan list` | Shows id, task count, done count, and goal |
 
+### Workflow
+
+| Command | Description | Example | Notes |
+|---------|-------------|---------|-------|
+| `/workflow` | List all saved workflows | `/workflow` | Same as `/workflow list` |
+| `/workflow new` | Create a workflow with AI guidance | `/workflow new review PRs and test` | Agent walks you through the design step by step |
+| `/workflow list` | List all saved workflows | `/workflow list` | Scans `.clido/workflows/` and global dir |
+| `/workflow show` | Display a workflow's YAML | `/workflow show full-review` | Shows the full YAML in the chat |
+| `/workflow edit` | Open in text editor | `/workflow edit full-review` | Ctrl+S validates & saves, Esc discards |
+| `/workflow save` | Save last YAML from chat | `/workflow save my-review` | Extracts YAML block from last assistant message |
+| `/workflow run` | Run a saved workflow | `/workflow run full-review` | Sends steps to the agent for execution |
+
 ### Project
 
 | Command | Description | Example | Notes |

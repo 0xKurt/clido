@@ -189,6 +189,11 @@ pub(super) struct App {
     /// Max budget for the session (from config), shown in header.
     pub(super) max_budget_usd: Option<f64>,
 
+    /// Workflow text editor overlay — open when editing a workflow YAML.
+    pub(super) workflow_editor: Option<super::state::PlanTextEditor>,
+    /// File path of the workflow being edited (None = new/unsaved).
+    pub(super) workflow_editor_path: Option<std::path::PathBuf>,
+
     /// Rate-limit auto-resume: when the agent hits a rate limit with a known
     /// retry_after, we set a timer. When it expires the agent is automatically
     /// sent a "continue" message so it can pick up where it left off.
@@ -308,6 +313,8 @@ impl App {
             utility_provider,
             utility_model,
             max_budget_usd: budget,
+            workflow_editor: None,
+            workflow_editor_path: None,
             rate_limit_resume_at: None,
             rate_limit_cancelled: false,
             api_key,
@@ -372,6 +379,8 @@ impl App {
         use super::state::FocusTarget;
         if self.plan.text_editor.is_some() {
             FocusTarget::PlanTextEditor
+        } else if self.workflow_editor.is_some() {
+            FocusTarget::WorkflowEditor
         } else if self.plan.editor.is_some() {
             FocusTarget::PlanEditor
         } else if self.profile_overlay.is_some() {

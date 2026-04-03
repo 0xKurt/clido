@@ -99,6 +99,8 @@ Type `/` in input to see autocomplete suggestions:
 | `/notify [on\|off]` | Toggle desktop notifications |
 | `/search <query>` | Search conversation history |
 | `/export` | Save conversation to markdown file |
+| `/workflow` | List, create, edit, save, run workflows |
+| `/workflow new <desc>` | AI-guided workflow creation |
 
 ---
 

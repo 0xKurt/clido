@@ -537,3 +537,104 @@ pub(crate) fn extract_current_step_full(text: &str) -> Option<(usize, String)> {
     }
     None
 }
+
+/// Render the workflow YAML text editor (nano-style, full-screen overlay).
+/// Reuses the same visual structure as `render_plan_text_editor`.
+pub(crate) fn render_workflow_editor(frame: &mut Frame, app: &App, area: Rect) {
+    let ed = match &app.workflow_editor {
+        Some(e) => e,
+        None => return,
+    };
+
+    frame.render_widget(Clear, area);
+
+    let title = if let Some(ref p) = app.workflow_editor_path {
+        let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("workflow");
+        format!(" Workflow: {name} (Ctrl+S = save · Esc = discard) ")
+    } else {
+        " New workflow (Ctrl+S = validate & save · Esc = discard) ".to_string()
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [edit_area, hint_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+
+    let visible_rows = edit_area.height as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, line) in ed.lines.iter().enumerate().skip(ed.scroll) {
+        if lines.len() >= visible_rows {
+            break;
+        }
+        if i == ed.cursor_row {
+            let chars: Vec<char> = line.chars().collect();
+            let col = ed.cursor_col.min(chars.len());
+            let before: String = chars[..col].iter().collect();
+            let cursor_ch: String = if col < chars.len() {
+                chars[col].to_string()
+            } else {
+                " ".to_string()
+            };
+            let after: String = if col < chars.len() {
+                chars[col + 1..].iter().collect()
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(vec![
+                Span::raw(before),
+                Span::styled(
+                    cursor_ch,
+                    Style::default().bg(Color::White).fg(Color::Black),
+                ),
+                Span::raw(after),
+            ]));
+        } else {
+            lines.push(Line::raw(line.clone()));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), edit_area);
+
+    let hint = Paragraph::new(Line::from(vec![
+        Span::styled("  ↑↓←→", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " navigate  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " new line  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("Ctrl+S", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " validate & save  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " discard",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]));
+    frame.render_widget(hint, hint_area);
+}

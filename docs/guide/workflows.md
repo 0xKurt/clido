@@ -220,3 +220,61 @@ By default clido looks for workflows in `.clido/workflows` relative to the curre
 [workflows]
 directory = "automation/clido"
 ```
+
+## TUI Commands
+
+You can create, manage, and run workflows directly from the interactive TUI:
+
+### Create with AI guidance
+
+```
+/workflow new review PRs and run tests before merging
+```
+
+The agent walks you through the design — asking about steps, tools, inputs, error handling, and parallelism. When the design is ready, it outputs the complete YAML. You can iterate on it naturally in the conversation.
+
+### Save the result
+
+```
+/workflow save             # uses the workflow's name field as filename
+/workflow save my-review   # saves as my-review.yaml
+```
+
+Scans the last assistant messages for a YAML code block, validates it, and saves to `.clido/workflows/`.
+
+### List saved workflows
+
+```
+/workflow list
+```
+
+Shows all workflows from `.clido/workflows/` and `~/.config/clido/workflows/`.
+
+### View a workflow
+
+```
+/workflow show full-review
+```
+
+Displays the full YAML in the chat.
+
+### Edit manually
+
+```
+/workflow edit full-review  # edit a saved workflow
+/workflow edit              # edit the last YAML draft from chat
+```
+
+Opens a nano-style text editor overlay. **Ctrl+S** validates and saves, **Esc** discards.
+
+### Run a workflow
+
+```
+/workflow run full-review
+```
+
+Sends the workflow steps to the agent for execution. For advanced runs with inputs and parallel control, use the CLI:
+
+```bash
+clido workflow run full-review.yaml -i branch=main
+```

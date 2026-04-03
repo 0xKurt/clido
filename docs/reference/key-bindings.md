@@ -118,3 +118,16 @@ Opened with `/plan edit`.
 | `Backspace` / `Delete` | Delete character |
 | `Ctrl+S` | Save changes and close |
 | `Esc` / `Ctrl+C` | Discard changes and close |
+
+## Workflow editor (nano-style full-screen overlay)
+
+Opened with `/workflow edit [name]`.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` / `←` / `→` | Navigate cursor |
+| `Home` / `End` | Jump to start/end of line |
+| `Enter` | Insert new line |
+| `Backspace` / `Delete` | Delete character |
+| `Ctrl+S` | Validate YAML and save to `.clido/workflows/` |
+| `Esc` / `Ctrl+C` | Discard changes and close |

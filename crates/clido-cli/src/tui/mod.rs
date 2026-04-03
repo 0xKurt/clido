@@ -32,7 +32,8 @@ use event_loop::{
 use input::{
     char_byte_pos, char_byte_pos_tui, delete_char_at_cursor_pe, delete_char_before_cursor_pe,
     handle_app_action, handle_key, handle_plan_editor_key, handle_plan_text_editor_key,
-    handle_profile_overlay_key, move_cursor_line_down, move_cursor_line_up, scroll_down, scroll_up,
+    handle_profile_overlay_key, handle_workflow_editor_key, move_cursor_line_down,
+    move_cursor_line_up, scroll_down, scroll_up,
 };
 #[allow(unused_imports)]
 use render::{
@@ -42,8 +43,8 @@ use render::{
     popup_above_input, relative_time, render, render_markdown, render_plan_editor,
     render_plan_text_editor, render_profile_create, render_profile_model_picker,
     render_profile_overlay, render_profile_overview, render_profile_provider_picker,
-    render_table_to_lines, render_welcome, scroll_indicator_line, strip_plan_line_prefix,
-    tool_color, tool_display_name, truncate_chars, word_wrap,
+    render_table_to_lines, render_welcome, render_workflow_editor, scroll_indicator_line,
+    strip_plan_line_prefix, tool_color, tool_display_name, truncate_chars, word_wrap,
 };
 
 use std::env;

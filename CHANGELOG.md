@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.4] - 2026-04-03
+
+### Added
+
+- **Workflow TUI commands** (`/workflow`): Full workflow management from the interactive TUI — create, list, show, edit, save, and run YAML workflows without leaving the chat.
+- **AI-guided workflow creation** (`/workflow new <desc>`): Describe what you want, and the agent walks you through designing the workflow step by step — asking about inputs, steps, tools, error handling, and parallelism. The generated YAML appears in the chat for review.
+- **Workflow text editor** (`/workflow edit`): Nano-style full-screen YAML editor with validation on save (Ctrl+S). Opens saved workflows by name or the last YAML draft from chat.
+- **Workflow save from chat** (`/workflow save`): Extracts the last YAML code block from assistant messages, validates it as a valid workflow, and saves to `.clido/workflows/`.
+- **Workflow run from TUI** (`/workflow run <name>`): Sends workflow steps to the agent for execution directly from the chat.
+
+### Documentation
+
+- Updated `docs/guide/workflows.md` with TUI commands section
+- Updated `docs/reference/slash-commands.md` with Workflow command table
+- Updated `docs/reference/key-bindings.md` with Workflow editor keybindings
+- Updated `FEATURES.md` with `/workflow` commands
+
 ## [0.1.0-beta.3] - 2026-04-03
 
 ### Added

@@ -22,6 +22,8 @@ pub(crate) enum FocusTarget {
     PlanEditor,
     /// Profile overlay (overview / create / edit wizard).
     ProfileOverlay,
+    /// Workflow text editor (nano-style, full-screen).
+    WorkflowEditor,
     /// Unified overlay stack (error, read-only, choice).
     Overlay,
     /// Model picker popup.
@@ -970,6 +972,7 @@ mod tests {
         assert!(FocusTarget::PlanTextEditor.is_modal());
         assert!(FocusTarget::PlanEditor.is_modal());
         assert!(FocusTarget::ProfileOverlay.is_modal());
+        assert!(FocusTarget::WorkflowEditor.is_modal());
         assert!(FocusTarget::Overlay.is_modal());
         assert!(FocusTarget::ModelPicker.is_modal());
         assert!(FocusTarget::SessionPicker.is_modal());

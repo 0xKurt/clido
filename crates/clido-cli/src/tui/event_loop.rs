@@ -1716,6 +1716,36 @@ pub(super) async fn event_loop(
                             let paste_line = text.lines().next().unwrap_or(&text);
                             line.insert_str(byte_pos, paste_line);
                             ed.cursor_col += paste_line.chars().count();
+                        } else if let Some(ref mut ed) = app.workflow_editor {
+                            // Route paste into workflow editor — supports multiline paste.
+                            let paste_lines: Vec<&str> = text.lines().collect();
+                            if let Some(first) = paste_lines.first() {
+                                let line = &mut ed.lines[ed.cursor_row];
+                                let byte_pos = line
+                                    .char_indices()
+                                    .nth(ed.cursor_col)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(line.len());
+                                if paste_lines.len() == 1 {
+                                    line.insert_str(byte_pos, first);
+                                    ed.cursor_col += first.chars().count();
+                                } else {
+                                    // Split current line and insert pasted lines
+                                    let after: String = line[byte_pos..].to_string();
+                                    line.truncate(byte_pos);
+                                    line.push_str(first);
+                                    for (i, pl) in paste_lines.iter().enumerate().skip(1) {
+                                        let new_line = if i == paste_lines.len() - 1 {
+                                            format!("{pl}{after}")
+                                        } else {
+                                            pl.to_string()
+                                        };
+                                        ed.lines.insert(ed.cursor_row + i, new_line);
+                                    }
+                                    ed.cursor_row += paste_lines.len() - 1;
+                                    ed.cursor_col = paste_lines.last().unwrap_or(&"").chars().count();
+                                }
+                            }
                         } else if app.overlay_stack.handle_paste(&text) {
                             // Overlay stack consumed the paste
                         } else if let Some(ref mut ov) = app.profile_overlay {

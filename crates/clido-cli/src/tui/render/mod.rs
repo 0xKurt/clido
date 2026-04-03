@@ -34,6 +34,12 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    // ── Workflow editor (nano-style) full-screen overlay ─────────────────────
+    if app.workflow_editor.is_some() {
+        render_workflow_editor(frame, app, area);
+        return;
+    }
+
     // ── Plan editor full-screen overlay ─────────────────────────────────────
     if app.plan.editor.is_some() {
         render_plan_editor(frame, app, area);

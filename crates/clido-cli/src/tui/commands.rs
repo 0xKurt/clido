@@ -1576,6 +1576,430 @@ pub(super) fn cmd_enhance(app: &mut App, cmd: &str) {
     app.pending_enhance = Some(raw.to_string());
 }
 
+// ── Workflow commands ─────────────────────────────────────────────────────────
+
+/// Resolve workflow directories: project-local `.clido/workflows/` and global `~/.config/clido/workflows/`.
+fn workflow_dirs(workspace_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![workspace_root.join(".clido").join("workflows")];
+    if let Some(global) = clido_core::global_config_dir() {
+        dirs.push(global.join("workflows"));
+    }
+    dirs
+}
+
+/// Scan workflow directories and return `(name, path, description, step_count)` tuples.
+fn list_workflows(
+    workspace_root: &std::path::Path,
+) -> Vec<(String, std::path::PathBuf, String, usize)> {
+    let mut results = Vec::new();
+    for dir in workflow_dirs(workspace_root) {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                if ext != "yaml" && ext != "yml" {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(def) = serde_yaml::from_str::<clido_workflows::WorkflowDef>(&content)
+                    {
+                        let name = def.name.clone();
+                        let desc = if def.description.is_empty() {
+                            "(no description)".to_string()
+                        } else {
+                            def.description.clone()
+                        };
+                        let steps = def.steps.len();
+                        results.push((name, path, desc, steps));
+                    }
+                }
+            }
+        }
+    }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Find a workflow by name from the workflow directories.
+fn find_workflow(workspace_root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for dir in workflow_dirs(workspace_root) {
+        if !dir.is_dir() {
+            continue;
+        }
+        // Try exact filename first
+        for ext in ["yaml", "yml"] {
+            let path = dir.join(format!("{name}.{ext}"));
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        // Try matching by workflow name field
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                if ext != "yaml" && ext != "yml" {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(def) = serde_yaml::from_str::<clido_workflows::WorkflowDef>(&content)
+                    {
+                        if def.name == name {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the last YAML code block from assistant messages in the chat.
+fn extract_last_yaml_from_chat(messages: &[ChatLine]) -> Option<String> {
+    for msg in messages.iter().rev() {
+        let text = match msg {
+            ChatLine::Assistant(t) => t,
+            _ => continue,
+        };
+        // Find ```yaml ... ``` blocks (search from the end)
+        let mut last_yaml = None;
+        let mut in_yaml = false;
+        let mut yaml_lines: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !in_yaml && (trimmed.starts_with("```yaml") || trimmed.starts_with("```yml")) {
+                in_yaml = true;
+                yaml_lines.clear();
+                continue;
+            }
+            if in_yaml && trimmed == "```" {
+                in_yaml = false;
+                last_yaml = Some(yaml_lines.join("\n"));
+                continue;
+            }
+            if in_yaml {
+                yaml_lines.push(line);
+            }
+        }
+        if let Some(yaml) = last_yaml {
+            return Some(yaml);
+        }
+    }
+    None
+}
+
+/// Build the system prompt addition for guided workflow creation.
+fn workflow_creation_system_prompt() -> String {
+    r#"You are helping the user create a clido YAML workflow. Guide them through the process step by step.
+
+## Workflow YAML Schema
+
+```yaml
+name: workflow-name          # Required: kebab-case identifier
+version: "1"                 # Required: always "1"
+description: "What it does"  # Optional but recommended
+
+inputs:                      # Optional: parameters the user provides at runtime
+  - name: param-name
+    required: true           # or false
+    default: "value"         # optional default
+
+steps:                       # Required: at least one step
+  - id: step-id              # Required: unique kebab-case ID
+    name: "Human name"       # Optional: displayed during execution
+    prompt: "What to do"     # Required: can use ${{ inputs.name }} and {{ steps.prev.output }}
+    tools: [Read, Write, Bash, Glob, Grep, Edit, Git, TestLoop, WebSearch, WebFetch]  # Optional: tool allowlist
+    profile: "fast"          # Optional: use a different profile for this step
+    system_prompt: "..."     # Optional: custom system prompt
+    max_turns: 10            # Optional: limit agent iterations
+    parallel: true           # Optional: run with adjacent parallel:true steps concurrently
+    on_error: fail           # Optional: fail (default), continue, or retry
+    retry:                   # Optional: only with on_error: retry
+      max_attempts: 3
+      backoff: exponential   # none or exponential
+```
+
+## Guidelines
+1. Ask what the workflow should accomplish
+2. Ask about inputs (what varies between runs?)
+3. Design steps — each step is a full agent invocation with its own prompt
+4. For each step, suggest appropriate tools and error handling
+5. Consider which steps can run in parallel
+6. When ready, output the complete YAML in a ```yaml code block
+7. After showing the YAML, tell the user they can:
+   - `/workflow save` to save it
+   - `/workflow edit` to edit it manually
+   - Ask for changes and you'll regenerate it
+
+Keep the conversation natural. Ask one thing at a time. Don't dump all questions at once."#
+        .to_string()
+}
+
+pub(super) fn cmd_workflow(app: &mut App, cmd: &str) {
+    let sub = cmd.trim_start_matches("/workflow").trim().to_string();
+
+    match sub.as_str() {
+        "" | "list" => {
+            // List workflows
+            let workflows = list_workflows(&app.workspace_root);
+            app.push(ChatLine::Info("".into()));
+            app.push(ChatLine::Section("Workflows".into()));
+            if workflows.is_empty() {
+                app.push(ChatLine::Info(
+                    "  No workflows found. Use /workflow new <description> to create one.".into(),
+                ));
+                app.push(ChatLine::Info("".into()));
+                app.push(ChatLine::Info(
+                    "  Workflows are saved to .clido/workflows/".into(),
+                ));
+            } else {
+                for (name, path, desc, steps) in &workflows {
+                    let loc = if path.starts_with(&app.workspace_root) {
+                        "local"
+                    } else {
+                        "global"
+                    };
+                    app.push(ChatLine::Info(format!("  {name}  ({steps} steps, {loc})")));
+                    app.push(ChatLine::Info(format!("    {desc}")));
+                }
+                app.push(ChatLine::Info("".into()));
+                app.push(ChatLine::Info(
+                    "  Use /workflow show <name> to view, /workflow run <name> to execute".into(),
+                ));
+            }
+            app.push(ChatLine::Info("".into()));
+        }
+        "help" => {
+            app.push(ChatLine::Info("".into()));
+            app.push(ChatLine::Section("Workflow Commands".into()));
+            app.push(ChatLine::Info(
+                "  /workflow              list all saved workflows".into(),
+            ));
+            app.push(ChatLine::Info(
+                "  /workflow new <desc>   create a workflow with AI guidance".into(),
+            ));
+            app.push(ChatLine::Info(
+                "  /workflow list         list all saved workflows".into(),
+            ));
+            app.push(ChatLine::Info(
+                "  /workflow show <name>  display a workflow's YAML".into(),
+            ));
+            app.push(ChatLine::Info(
+                "  /workflow edit [name]  open in text editor".into(),
+            ));
+            app.push(ChatLine::Info(
+                "  /workflow save [name]  save last YAML from chat".into(),
+            ));
+            app.push(ChatLine::Info(
+                "  /workflow run <name>   run a workflow (via CLI)".into(),
+            ));
+            app.push(ChatLine::Info("".into()));
+        }
+        _ if sub.starts_with("new") => {
+            let desc = sub.trim_start_matches("new").trim();
+            if desc.is_empty() {
+                app.push(ChatLine::Info(
+                    "  Usage: /workflow new <description of what the workflow should do>".into(),
+                ));
+                return;
+            }
+            // Send to the main agent with a workflow creation system prompt
+            let system_addition = workflow_creation_system_prompt();
+            let msg = format!(
+                "[System context: {system_addition}]\n\n\
+                 I want to create a workflow: {desc}"
+            );
+            app.push(ChatLine::Info(
+                "  ✦ Starting guided workflow creation…".into(),
+            ));
+            app.send_now(msg);
+        }
+        _ if sub.starts_with("show ") => {
+            let name = sub.trim_start_matches("show").trim();
+            if name.is_empty() {
+                app.push(ChatLine::Info("  Usage: /workflow show <name>".into()));
+                return;
+            }
+            match find_workflow(&app.workspace_root, name) {
+                Some(path) => match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        app.push(ChatLine::Info(format!("  ── {} ──", path.display())));
+                        for line in content.lines() {
+                            app.push(ChatLine::Info(format!("  {line}")));
+                        }
+                    }
+                    Err(e) => {
+                        app.push(ChatLine::Info(format!("  ✗ Failed to read: {e}")));
+                    }
+                },
+                None => {
+                    app.push(ChatLine::Info(format!(
+                        "  ✗ Workflow '{name}' not found. Use /workflow list to see available workflows."
+                    )));
+                }
+            }
+        }
+        _ if sub.starts_with("edit") => {
+            let name = sub.trim_start_matches("edit").trim();
+            if name.is_empty() {
+                // Edit last YAML from chat
+                match extract_last_yaml_from_chat(&app.messages) {
+                    Some(yaml) => {
+                        app.workflow_editor = Some(PlanTextEditor::from_raw(&yaml));
+                        app.workflow_editor_path = None;
+                    }
+                    None => {
+                        app.push(ChatLine::Info(
+                            "  ✗ No workflow YAML found in chat. Use /workflow edit <name> to edit a saved workflow.".into(),
+                        ));
+                    }
+                }
+            } else {
+                match find_workflow(&app.workspace_root, name) {
+                    Some(path) => match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            app.workflow_editor = Some(PlanTextEditor::from_raw(&content));
+                            app.workflow_editor_path = Some(path);
+                        }
+                        Err(e) => {
+                            app.push(ChatLine::Info(format!("  ✗ Failed to read: {e}")));
+                        }
+                    },
+                    None => {
+                        app.push(ChatLine::Info(format!("  ✗ Workflow '{name}' not found.")));
+                    }
+                }
+            }
+        }
+        _ if sub.starts_with("save") => {
+            let name_arg = sub.trim_start_matches("save").trim();
+            match extract_last_yaml_from_chat(&app.messages) {
+                Some(yaml) => match serde_yaml::from_str::<clido_workflows::WorkflowDef>(&yaml) {
+                    Ok(def) => {
+                        let save_dir = app.workspace_root.join(".clido").join("workflows");
+                        let _ = std::fs::create_dir_all(&save_dir);
+                        let file_name = if !name_arg.is_empty() {
+                            name_arg.to_string()
+                        } else {
+                            def.name
+                                .chars()
+                                .map(|c| {
+                                    if c.is_alphanumeric() || c == '-' || c == '_' {
+                                        c
+                                    } else {
+                                        '-'
+                                    }
+                                })
+                                .collect::<String>()
+                        };
+                        let path = save_dir.join(format!("{file_name}.yaml"));
+                        match std::fs::write(&path, &yaml) {
+                            Ok(()) => {
+                                app.push(ChatLine::Info(format!(
+                                    "  ✓ Workflow saved: {}",
+                                    path.display()
+                                )));
+                                app.push(ChatLine::Info(format!(
+                                    "  Run with: clido workflow run {file_name}"
+                                )));
+                            }
+                            Err(e) => {
+                                app.push(ChatLine::Info(format!("  ✗ Failed to save: {e}")));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        app.push(ChatLine::Info(format!("  ✗ Invalid workflow YAML: {e}")));
+                        app.push(ChatLine::Info(
+                            "  Use /workflow edit to fix it manually.".into(),
+                        ));
+                    }
+                },
+                None => {
+                    app.push(ChatLine::Info(
+                        "  ✗ No workflow YAML found in chat. Use /workflow new <desc> to create one first.".into(),
+                    ));
+                }
+            }
+        }
+        _ if sub.starts_with("run ") => {
+            let name = sub.trim_start_matches("run").trim();
+            if name.is_empty() {
+                app.push(ChatLine::Info("  Usage: /workflow run <name>".into()));
+                return;
+            }
+            match find_workflow(&app.workspace_root, name) {
+                Some(path) => {
+                    // Run via the agent — ask it to execute the workflow steps
+                    let yaml = std::fs::read_to_string(&path).unwrap_or_default();
+                    match serde_yaml::from_str::<clido_workflows::WorkflowDef>(&yaml) {
+                        Ok(def) => {
+                            app.push(ChatLine::Info(format!(
+                                "  ▶ Running workflow '{}' ({} steps)…",
+                                def.name,
+                                def.steps.len()
+                            )));
+                            // Build a prompt that tells the agent to execute each step
+                            let mut step_desc = String::new();
+                            for (i, step) in def.steps.iter().enumerate() {
+                                let name = step.name.as_deref().unwrap_or(&step.id);
+                                step_desc.push_str(&format!(
+                                    "\nStep {} ({}): {}",
+                                    i + 1,
+                                    name,
+                                    step.prompt
+                                ));
+                                if let Some(ref tools) = step.tools {
+                                    step_desc.push_str(&format!(" [tools: {}]", tools.join(", ")));
+                                }
+                            }
+                            let msg = format!(
+                                "Execute this workflow step by step. Complete each step before moving to the next.\n\
+                                 Workflow: {}\n\
+                                 Description: {}\n\
+                                 {step_desc}",
+                                def.name, def.description
+                            );
+                            app.send_now(msg);
+                        }
+                        Err(e) => {
+                            app.push(ChatLine::Info(format!("  ✗ Invalid workflow: {e}")));
+                        }
+                    }
+                }
+                None => {
+                    app.push(ChatLine::Info(format!(
+                        "  ✗ Workflow '{name}' not found. Use /workflow list to see available."
+                    )));
+                }
+            }
+        }
+        _ => {
+            // Unknown subcommand — treat as /workflow new <desc>
+            let desc = sub.trim();
+            if !desc.is_empty() {
+                let system_addition = workflow_creation_system_prompt();
+                let msg = format!(
+                    "[System context: {system_addition}]\n\n\
+                     I want to create a workflow: {desc}"
+                );
+                app.push(ChatLine::Info(
+                    "  ✦ Starting guided workflow creation…".into(),
+                ));
+                app.send_now(msg);
+            } else {
+                app.push(ChatLine::Info(
+                    "  Usage: /workflow [new|list|show|edit|save|run|help]".into(),
+                ));
+            }
+        }
+    }
+}
+
 pub(super) fn execute_slash(app: &mut App, cmd: &str) {
     match cmd {
         "/clear" => {
@@ -1684,6 +2108,9 @@ pub(super) fn execute_slash(app: &mut App, cmd: &str) {
 
         // ── Prompt Enhancement ──────────────────────────────────────────────
         _ if cmd == "/enhance" || cmd.starts_with("/enhance ") => cmd_enhance(app, cmd),
+
+        // ── Workflows ───────────────────────────────────────────────────────
+        _ if cmd == "/workflow" || cmd.starts_with("/workflow ") => cmd_workflow(app, cmd),
 
         // ── Update ──────────────────────────────────────────────────────────
         "/update" => {
