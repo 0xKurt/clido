@@ -10,7 +10,7 @@ Flags can also be set via environment variables — see the `Env` column.
 | `--provider` | — | string | profile provider | `CLIDO_PROVIDER` | Override the provider for this invocation |
 | `--profile` | — | string | `default` | `CLIDO_PROFILE` | Select a named profile from config.toml |
 | `--workdir` | `-C` | path | `.` (current dir) | `CLIDO_WORKDIR` | Set the working directory |
-| `--max-turns` | — | integer | `50` | `CLIDO_MAX_TURNS` | Maximum number of agent turns |
+| `--max-turns` | — | integer | `200` | `CLIDO_MAX_TURNS` | Maximum number of agent turns |
 | `--max-budget-usd` | — | float | `5.0` | `CLIDO_MAX_BUDGET_USD` | Maximum spend per session in USD |
 | `--permission-mode` | — | enum | `default` | `CLIDO_PERMISSION_MODE` | `default`, `accept-all`, or `plan` |
 | `--output-format` | — | enum | `text` | `CLIDO_OUTPUT_FORMAT` | `text`, `json`, or `stream-json` |
@@ -73,7 +73,7 @@ clido -C /path/to/project "add tests"
 
 Maximum number of agent turns (one turn = one provider API call). When the limit is reached, the agent stops and clido exits with code 3.
 
-Default: `50` (from config; CLI `--max-turns` default is `10` when explicitly set via flag to provide a sensible non-interactive cap).
+Default: `200` (from config).
 
 ### `--max-budget-usd`
 

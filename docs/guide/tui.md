@@ -108,6 +108,8 @@ Type a slash command in the input field and press Enter:
 | `/workdir` | Show or set workdir used by tools | `/workdir ~/src/project` |
 | `/stop` | Interrupt current run without sending | `/stop` |
 | `/copy` | Copy last assistant message (OSC 52) | `/copy` |
+| `/enhance <prompt>` | Enhance prompt, review before sending | `/enhance fix the auth bug` |
+| `/notify [on\|off]` | Toggle desktop notifications | `/notify on` |
 | `/quit` | Quit clido | `/quit` |
 
 ## Permission prompts
@@ -182,3 +184,9 @@ You can type a message while the agent is running. The message is queued and sen
 - Works in most modern local terminals.
 - Over SSH, clipboard support may require explicit terminal settings.
 - If OSC 52 is blocked, clido shows a copy error and your clipboard is unchanged.
+
+## Text selection
+
+Shift+drag in the chat area to select text character-by-character. The selection is highlighted in real time. On mouse release, the selected text is automatically copied to your clipboard and a brief toast confirmation appears near the cursor.
+
+This works even though clido enables mouse capture for scrolling — Shift bypasses terminal mouse capture so the app can handle selection itself.

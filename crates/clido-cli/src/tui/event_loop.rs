@@ -1424,7 +1424,8 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                 // Start fresh agent runtime with updated config.
                 let mut switch_cli = cli.clone();
                 switch_cli.profile = Some(profile_name.clone());
-                if let Some(sid) = app.current_session_id.as_deref() {
+                let resume_id = app.current_session_id.as_deref().or(cli.resume.as_deref());
+                if let Some(sid) = resume_id {
                     switch_cli.resume = Some(sid.to_string());
                 }
 
@@ -1486,7 +1487,11 @@ pub(super) async fn run_tui_inner(cli: Cli) -> Result<(), anyhow::Error> {
                 // Re-use the current session so the recovered agent picks up the full
                 // conversation history from disk, preventing context amnesia.
                 let mut recovery_cli = cli.clone();
-                if let Some(sid) = app.current_session_id.as_deref() {
+                // Prefer the session ID we received from the agent; fall back to
+                // the original CLI `--resume` value so we never accidentally
+                // create a brand-new session during recovery.
+                let resume_id = app.current_session_id.as_deref().or(cli.resume.as_deref());
+                if let Some(sid) = resume_id {
                     recovery_cli.resume = Some(sid.to_string());
                     app.recovering = true;
                 }
@@ -1801,36 +1806,64 @@ pub(super) async fn event_loop(
                                 }
                             }
                             MouseEventKind::Down(_) => {
-                                // Start selection on mouse down in chat area
-                                if focus == FocusTarget::ChatInput {
-                                    let row = m.row as usize;
-                                    let col = m.column as usize;
-                                    // Convert screen coordinates to content coordinates
-                                    let content_row = row + (app.scroll as usize);
-                                    app.selection.start(content_row, col);
+                                // Start text selection on mouse-down inside the chat area.
+                                let (cy0, cy1) = app.layout.chat_area_y;
+                                if !focus.is_modal()
+                                    && m.row >= cy0
+                                    && m.row < cy1
+                                {
+                                    let chat_row = (m.row - cy0) as usize;
+                                    let content_row = chat_row + (app.scroll as usize);
+                                    app.selection.start(content_row, m.column as usize);
                                     app.selection_mode = true;
                                 }
                             }
                             MouseEventKind::Drag(_) => {
-                                // Update selection on drag
-                                if app.selection_mode && focus == FocusTarget::ChatInput {
-                                    let row = m.row as usize;
-                                    let col = m.column as usize;
-                                    let content_row = row + (app.scroll as usize);
-                                    app.selection.update(content_row, col);
+                                // Extend selection while dragging.
+                                if app.selection_mode {
+                                    let cy0 = app.layout.chat_area_y.0;
+                                    let chat_row = m.row.saturating_sub(cy0) as usize;
+                                    let content_row = chat_row + (app.scroll as usize);
+                                    app.selection.update(content_row, m.column as usize);
                                 }
                             }
                             MouseEventKind::Up(_) => {
-                                // Selection complete on mouse up
                                 if app.selection_mode {
-                                    // Keep selection active for copy
                                     app.selection_mode = false;
+                                    // If anchor == focus the user just clicked without
+                                    // dragging — clear the selection so it doesn't
+                                    // linger as a zero-width highlight.
+                                    if app.selection.anchor == app.selection.focus {
+                                        app.selection.clear();
+                                    } else {
+                                        // Auto-copy on mouse-up (like Claude Code).
+                                        let text = app.get_selected_text();
+                                        if !text.is_empty() {
+                                            let toast_pos = (m.column, m.row);
+                                            match copy_to_clipboard(&text) {
+                                                Ok(()) => {
+                                                    let char_count = text.chars().count();
+                                                    app.push_toast_at(
+                                                        format!("Copied {char_count} chars"),
+                                                        Color::White,
+                                                        std::time::Duration::from_secs(2),
+                                                        toast_pos,
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    app.push_toast_at(
+                                                        format!("Copy failed: {e}"),
+                                                        Color::Red,
+                                                        std::time::Duration::from_secs(3),
+                                                        toast_pos,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        app.selection.clear();
+                                    }
                                 }
                             }
-                            // Mouse capture is off in ChatInput mode — the terminal
-                            // handles native text selection.  Click/drag/release
-                            // events only arrive when a modal is open, which already
-                            // owns all input.
                             _ => {}
                         }
                     }
@@ -1988,6 +2021,7 @@ pub(super) async fn event_loop(
 
                     Some(AgentEvent::Err(msg)) => {
                         last_agent_activity = std::time::Instant::now();
+                        app.enhancing = false;
                         // Revert per-turn model override on error too.
                         if let Some(prev) = app.per_turn_prev_model.take() {
                             app.model = prev.clone();
@@ -2190,13 +2224,19 @@ pub(super) async fn event_loop(
                         app.session_title = Some(title);
                     }
                     Some(AgentEvent::EnhancedPrompt(enhanced)) => {
+                        app.enhancing = false;
                         app.push(ChatLine::Section("Enhanced Prompt".into()));
                         for line in enhanced.lines() {
                             app.push(ChatLine::Info(format!("  {line}")));
                         }
                         app.push(ChatLine::Info("".into()));
-                        // Submit the enhanced prompt to the agent.
-                        app.send_now(enhanced);
+                        // Place the enhanced prompt in the input for user review/editing.
+                        app.text_input.set_text(enhanced);
+                        app.push_toast(
+                            "Enter to send, edit first if you like",
+                            Color::Cyan,
+                            std::time::Duration::from_secs(3),
+                        );
                     }
                     Some(AgentEvent::UpdateAvailable { version }) => {
                         app.push(ChatLine::Info(format!(

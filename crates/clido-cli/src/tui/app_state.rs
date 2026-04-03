@@ -180,6 +180,8 @@ pub(super) struct App {
     pub(super) empty_input_hint_shown: bool,
     /// Pending `/enhance` request — set by cmd_enhance, consumed by event_loop.
     pub(super) pending_enhance: Option<String>,
+    /// True while an `/enhance` LLM call is in flight.
+    pub(super) enhancing: bool,
     /// Utility (fast) provider for background tasks like `/enhance`.
     pub(super) utility_provider: Arc<dyn clido_providers::ModelProvider>,
     /// Model name for the utility provider.
@@ -209,6 +211,10 @@ pub(super) struct App {
     /// Hash of the messages Vec at the time the cache was last populated.
     /// Used to detect when messages change and stale entries should be evicted.
     pub(super) render_cache_msg_count: usize,
+    /// Plain-text snapshot of the last rendered lines, used by `get_selected_text()`
+    /// so selection coordinates (which are in rendered-line space) can be resolved
+    /// without re-running the markdown→Line conversion.
+    pub(super) rendered_line_texts: Vec<String>,
     /// Non-blocking toast notifications (auto-dismiss).
     pub(super) toasts: Vec<Toast>,
     /// Last time we showed a "agent seems stuck" warning to avoid spamming.
@@ -298,6 +304,7 @@ impl App {
             todo_store,
             empty_input_hint_shown: false,
             pending_enhance: None,
+            enhancing: false,
             utility_provider,
             utility_model,
             max_budget_usd: budget,
@@ -308,6 +315,7 @@ impl App {
             models_loading: false,
             render_cache: std::collections::HashMap::new(),
             render_cache_msg_count: 0,
+            rendered_line_texts: Vec::new(),
             toasts: Vec::new(),
             last_stall_warning: None,
             selection_mode: false,
@@ -332,6 +340,23 @@ impl App {
             message: message.into(),
             style,
             expires: std::time::Instant::now() + duration,
+            position: None,
+        });
+    }
+
+    /// Show a toast anchored near screen coordinates (x, y).
+    pub(super) fn push_toast_at(
+        &mut self,
+        message: impl Into<String>,
+        style: Color,
+        duration: std::time::Duration,
+        pos: (u16, u16),
+    ) {
+        self.toasts.push(Toast {
+            message: message.into(),
+            style,
+            expires: std::time::Instant::now() + duration,
+            position: Some(pos),
         });
     }
 
@@ -691,7 +716,7 @@ impl App {
     }
 
     pub(super) fn tick_spinner(&mut self) {
-        if self.busy || self.pending_perm.is_some() {
+        if self.busy || self.pending_perm.is_some() || self.enhancing {
             self.spinner_tick = (self.spinner_tick + 1) % super::SPINNER.len();
         }
     }
@@ -762,58 +787,38 @@ impl App {
         true
     }
 
-    /// Get text content at a specific line index (approximate).
-    fn get_text_at_line(&self, line_idx: u16) -> Option<String> {
-        // This is a simplified version - in reality we'd need to track
-        // which message line corresponds to which screen row after wrapping
-        // For now, approximate by iterating messages
-        let mut current_line: u16 = 0;
-
-        for msg in &self.messages {
-            let text = match msg {
-                ChatLine::User(t) | ChatLine::Assistant(t) | ChatLine::Info(t) => t,
-                _ => continue,
-            };
-
-            // Count lines in this message (rough estimate)
-            let lines_in_msg = text.matches('\n').count() + 1;
-            let end_line = current_line + lines_in_msg as u16;
-
-            if line_idx >= current_line && line_idx < end_line {
-                let offset = (line_idx - current_line) as usize;
-                let lines: Vec<&str> = text.lines().collect();
-                return lines.get(offset).map(|s| s.to_string());
-            }
-
-            current_line = end_line;
-        }
-
-        None
-    }
-
-    /// Get selected text from the current selection.
+    /// Get selected text from the rendered line snapshot.
+    ///
+    /// Selection coordinates live in rendered-line space (the same indices
+    /// used by `apply_selection_highlight`), so we read directly from
+    /// `rendered_line_texts` which is populated each render tick.
     pub(super) fn get_selected_text(&self) -> String {
         if !self.selection.active {
             return String::new();
         }
 
         let (sr, sc, er, ec) = self.selection.bounds();
+        let lines = &self.rendered_line_texts;
         let mut result = String::new();
 
         for row in sr..=er {
-            if let Some(line) = self.get_text_at_line(row as u16) {
-                let line_len = line.len();
-                let start_col = if row == sr { sc } else { 0 };
-                let end_col = if row == er { ec } else { line_len };
+            let line = match lines.get(row) {
+                Some(l) => l.as_str(),
+                None => continue,
+            };
+            // Work in chars so multi-byte text is handled correctly.
+            let chars: Vec<char> = line.chars().collect();
+            let start_col = if row == sr { sc } else { 0 };
+            let end_col = if row == er { ec + 1 } else { chars.len() };
+            let start = start_col.min(chars.len());
+            let end = end_col.min(chars.len());
 
-                if start_col < line_len {
-                    let end = end_col.min(line_len);
-                    result.push_str(&line[start_col..end]);
-                }
+            if start < end {
+                result.extend(&chars[start..end]);
+            }
 
-                if row < er {
-                    result.push('\n');
-                }
+            if row < er {
+                result.push('\n');
             }
         }
 

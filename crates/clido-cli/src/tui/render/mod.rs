@@ -441,7 +441,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
     // Always clear the input area first — prevents any bleed-through from overlapping widgets.
     frame.render_widget(Clear, input_area);
 
-    if app.busy || app.pending_perm.is_some() {
+    if app.busy || app.pending_perm.is_some() || app.enhancing {
         let spinner = SPINNER[app.spinner_tick];
         let title_line = if app.pending_perm.is_some() {
             Line::from(vec![
@@ -450,6 +450,11 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
                     " waiting for permission… ",
                     Style::default().fg(Color::LightMagenta),
                 ),
+            ])
+        } else if app.enhancing {
+            Line::from(vec![
+                Span::styled(format!("{} ", spinner), Style::default().fg(Color::Cyan)),
+                Span::styled("✦ enhancing prompt…", Style::default().fg(Color::Cyan)),
             ])
         } else if !app.queued.is_empty() {
             Line::from(vec![
@@ -494,10 +499,15 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
                 ),
             ])
         };
+        let border_color = if app.enhancing {
+            Color::Cyan
+        } else {
+            Color::LightMagenta
+        };
         let block = Block::default()
             .title(title_line)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::LightMagenta));
+            .border_style(Style::default().fg(border_color));
         let para = Paragraph::new(input_para_lines).block(block);
         frame.render_widget(para, input_area);
         if app.pending_perm.is_none() {
@@ -1328,29 +1338,56 @@ pub(super) fn render(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    // ── Toast notifications (top-right, auto-dismiss) ────────────────────────
+    // ── Toast notifications (auto-dismiss) ──────────────────────────────────
     app.expire_toasts();
     if !app.toasts.is_empty() {
         let max_w = area.width.saturating_sub(4).min(50) as usize;
-        for (i, toast) in app.toasts.iter().enumerate().take(3) {
+        let mut fallback_slot = 0u16;
+        let toast_bg = Color::Indexed(238); // medium-dark gray
+        for toast in app.toasts.iter().take(3) {
             let msg: String = toast.message.chars().take(max_w).collect();
-            let w = (msg.len() as u16 + 4).min(area.width);
-            let y = area.y + 1 + (i as u16) * 2;
-            if y + 1 >= area.height {
-                break;
-            }
-            let toast_rect = Rect {
-                x: area.width.saturating_sub(w + 1),
-                y,
-                width: w,
-                height: 1,
+            let msg_display_w: u16 = msg
+                .chars()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)
+                .sum();
+            let w = (msg_display_w + 2).min(area.width); // +2 for 1-char padding each side
+
+            let toast_rect = if let Some((px, py)) = toast.position {
+                // Position near cursor: try above the cursor, shift left if needed.
+                let ty = if py >= area.y + 2 { py - 1 } else { py + 1 };
+                let tx = if px + w <= area.x + area.width {
+                    px
+                } else {
+                    (area.x + area.width).saturating_sub(w)
+                };
+                Rect {
+                    x: tx,
+                    y: ty.clamp(area.y, area.y + area.height - 1),
+                    width: w,
+                    height: 1,
+                }
+            } else {
+                // Fallback: stack in top-right corner.
+                let y = area.y + 1 + fallback_slot * 2;
+                fallback_slot += 1;
+                if y + 1 >= area.y + area.height {
+                    break;
+                }
+                Rect {
+                    x: (area.x + area.width).saturating_sub(w + 1),
+                    y,
+                    width: w,
+                    height: 1,
+                }
             };
+
             frame.render_widget(Clear, toast_rect);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    format!(" {} ", msg),
-                    Style::default().fg(toast.style).bg(Color::DarkGray),
-                )])),
+                    format!(" {msg} "),
+                    Style::default().fg(toast.style),
+                )]))
+                .style(Style::default().bg(toast_bg)),
                 toast_rect,
             );
         }
@@ -1369,80 +1406,167 @@ fn apply_selection_highlight(
 ) -> Vec<Line<'static>> {
     let mut result = lines.to_vec();
 
-    // Calculate visible line range
     let first_visible = scroll_offset;
     let last_visible = (scroll_offset + visible_height).min(lines.len());
 
-    // Get selection bounds (ordered)
     let (start_row, start_col, end_row, end_col) = selection.bounds();
 
-    // Apply highlighting to each visible line
+    let sel_style = Style::default()
+        .bg(Color::Indexed(24)) // deep blue background
+        .fg(Color::White);
+
     for line_idx in first_visible..last_visible {
         if line_idx >= result.len() {
             break;
         }
 
-        // Check if this line is in the selection
-        let in_selection = if start_row == end_row {
-            // Single line selection
-            line_idx == start_row
-        } else {
-            // Multi-line selection
-            line_idx >= start_row && line_idx <= end_row
-        };
-
+        let in_selection = line_idx >= start_row && line_idx <= end_row;
         if !in_selection {
             continue;
         }
 
-        // Calculate column range for this line
         let line_start_col = if line_idx == start_row { start_col } else { 0 };
         let line_end_col = if line_idx == end_row {
-            end_col
+            end_col + 1 // inclusive end
         } else {
             usize::MAX
         };
 
-        // Apply highlighting to spans in this line
         let line = &result[line_idx];
         let mut new_spans: Vec<Span<'static>> = Vec::new();
-        let mut current_col = 0;
+        let mut display_col = 0usize;
 
         for span in line.spans.iter() {
-            let span_len = span.content.len();
-            let span_end = current_col + span_len;
+            let span_display_w: usize = span
+                .content
+                .chars()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
+            let span_end_col = display_col + span_display_w;
 
-            // Check if span overlaps with selection
-            if span_end <= line_start_col || current_col >= line_end_col {
-                // Span is completely outside selection
+            if span_end_col <= line_start_col || display_col >= line_end_col {
+                // Entirely outside selection.
                 new_spans.push(span.clone());
-            } else if current_col >= line_start_col && span_end <= line_end_col {
-                // Span is completely inside selection
-                let mut highlighted = span.clone();
-                highlighted.style = span.style.patch(
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                );
-                new_spans.push(highlighted);
+            } else if display_col >= line_start_col && span_end_col <= line_end_col {
+                // Entirely inside selection.
+                let mut h = span.clone();
+                h.style = span.style.patch(sel_style);
+                new_spans.push(h);
             } else {
-                // Span partially overlaps - split it
-                // This is complex, for now just highlight the whole span
-                let mut highlighted = span.clone();
-                highlighted.style = span
-                    .style
-                    .patch(Style::default().bg(Color::Blue).fg(Color::White));
-                new_spans.push(highlighted);
+                // Partially overlaps — split the span at column boundaries.
+                let mut before = String::new();
+                let mut inside = String::new();
+                let mut after = String::new();
+                let mut col = display_col;
+                for ch in span.content.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if col < line_start_col {
+                        before.push(ch);
+                    } else if col < line_end_col {
+                        inside.push(ch);
+                    } else {
+                        after.push(ch);
+                    }
+                    col += cw;
+                }
+                if !before.is_empty() {
+                    new_spans.push(Span::styled(before, span.style));
+                }
+                if !inside.is_empty() {
+                    new_spans.push(Span::styled(inside, span.style.patch(sel_style)));
+                }
+                if !after.is_empty() {
+                    new_spans.push(Span::styled(after, span.style));
+                }
             }
 
-            current_col += span_len;
+            display_col = span_end_col;
         }
 
         result[line_idx] = Line::from(new_spans);
     }
 
     result
+}
+
+/// Pre-wrap styled lines so each `Line` fits within `width` columns.
+///
+/// After this, `Vec<Line>` index == visual row, which means mouse
+/// coordinates (post-wrap) map 1:1 to vector indices. This is critical
+/// for selection highlighting and text extraction.
+fn wrap_styled_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return lines;
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        // Fast path: measure total display width of this line.
+        let total_w: usize = line
+            .spans
+            .iter()
+            .map(|s| unicode_display_width(s.content.as_ref()))
+            .sum();
+        if total_w <= width {
+            out.push(line);
+            continue;
+        }
+        // Slow path: split spans across multiple output lines.
+        let mut cur_spans: Vec<Span<'static>> = Vec::new();
+        let mut col = 0usize;
+        for span in line.spans {
+            let style = span.style;
+            let mut remaining: &str = span.content.as_ref();
+            while !remaining.is_empty() {
+                let avail = width.saturating_sub(col);
+                if avail == 0 {
+                    out.push(Line::from(std::mem::take(&mut cur_spans)));
+                    col = 0;
+                    continue;
+                }
+                // Take as many chars as fit within `avail` columns.
+                let (chunk, chunk_w) = take_cols(remaining, avail);
+                if chunk.is_empty() {
+                    // Single character wider than available space — force wrap.
+                    out.push(Line::from(std::mem::take(&mut cur_spans)));
+                    col = 0;
+                    continue;
+                }
+                cur_spans.push(Span::styled(chunk.to_string(), style));
+                col += chunk_w;
+                remaining = &remaining[chunk.len()..];
+                if col >= width && !remaining.is_empty() {
+                    out.push(Line::from(std::mem::take(&mut cur_spans)));
+                    col = 0;
+                }
+            }
+        }
+        if !cur_spans.is_empty() {
+            out.push(Line::from(cur_spans));
+        }
+    }
+    out
+}
+
+/// Display width of a string (number of terminal columns).
+fn unicode_display_width(s: &str) -> usize {
+    // Use the same logic ratatui uses internally.
+    s.chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// Take the longest prefix of `s` that fits in `max_cols` terminal columns.
+/// Returns (prefix_str, display_width_of_prefix).
+fn take_cols(s: &str, max_cols: usize) -> (&str, usize) {
+    let mut col = 0usize;
+    for (i, c) in s.char_indices() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if col + w > max_cols {
+            return (&s[..i], col);
+        }
+        col += w;
+    }
+    (s, col)
 }
 
 pub(super) fn build_lines_w(app: &mut App, width: usize) -> Vec<Line<'static>> {
@@ -1473,26 +1597,39 @@ pub(super) fn build_lines_w(app: &mut App, width: usize) -> Vec<Line<'static>> {
     }
     app.render_cache_msg_count = msg_count;
 
-    if let Some(cached) = app.render_cache.get(&cache_key) {
-        return cached.clone();
-    }
+    let result = if let Some(cached) = app.render_cache.get(&cache_key) {
+        cached.clone()
+    } else {
+        // Hard cap: evict all if too many entries (safety net against memory leaks).
+        if app.render_cache.len() >= 512 {
+            app.render_cache.clear();
+        }
 
-    // Hard cap: evict all if too many entries (safety net against memory leaks).
-    if app.render_cache.len() >= 512 {
-        app.render_cache.clear();
-    }
+        let built = build_lines_w_uncached(app, width);
+        // Pre-wrap so each Line fits within `width` columns.
+        // After this, Vec<Line> index == visual row, which makes mouse
+        // selection coordinates map 1:1 to vector indices.
+        let wrapped = wrap_styled_lines(built, width);
+        app.render_cache.insert(cache_key, wrapped.clone());
+        wrapped
+    };
 
-    let result = build_lines_w_uncached(app, width);
-    app.render_cache.insert(cache_key, result.clone());
+    // Keep a plain-text snapshot of rendered lines so `get_selected_text()`
+    // can resolve selection coordinates (which live in rendered-line space).
+    app.rendered_line_texts = result
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
 
     // Apply selection highlighting to visible lines
     if app.selection.active {
-        apply_selection_highlight(
-            &result,
-            &app.selection,
-            app.scroll as usize,
-            app.layout.chat_area_y.1 as usize,
-        )
+        let visible_height = (app.layout.chat_area_y.1 - app.layout.chat_area_y.0) as usize;
+        apply_selection_highlight(&result, &app.selection, app.scroll as usize, visible_height)
     } else {
         result
     }

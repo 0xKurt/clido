@@ -127,7 +127,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/enhance",
         section: "Settings",
-        description: "enhance your prompt with structured planning before sending",
+        description: "enhance your prompt — review and edit before sending",
         usage: Some("/enhance <prompt>"),
         takes_args: true,
         requires_idle: false,

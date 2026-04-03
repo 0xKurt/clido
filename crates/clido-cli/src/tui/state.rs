@@ -887,6 +887,8 @@ pub(crate) struct Toast {
     pub(crate) message: String,
     pub(crate) style: Color,
     pub(crate) expires: std::time::Instant,
+    /// Optional screen position (x, y) to anchor the toast near.
+    pub(crate) position: Option<(u16, u16)>,
 }
 
 #[cfg(test)]

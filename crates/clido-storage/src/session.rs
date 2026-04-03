@@ -348,8 +348,14 @@ pub fn find_recent_session(project_path: &Path, max_age: std::time::Duration) ->
     if !dir.exists() {
         return None;
     }
-    let cutoff = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now();
+    let cutoff = now
         .checked_sub(max_age)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    // Very recent sessions (< 2s) are likely still being initialised by another
+    // runtime instance — count them even without a UserMessage line yet.
+    let startup_cutoff = now
+        .checked_sub(std::time::Duration::from_secs(2))
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
     let mut most_recent: Option<(std::time::SystemTime, String)> = None;
@@ -364,11 +370,15 @@ pub fn find_recent_session(project_path: &Path, max_age: std::time::Duration) ->
                         // Check if this session has content (not just empty)
                         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                             if let Ok(lines) = SessionReader::load(project_path, stem) {
-                                // Only consider sessions that have user messages (not just meta)
+                                // Accept sessions that either have user messages OR
+                                // were created very recently (likely still starting up).
                                 let has_content = lines
                                     .iter()
                                     .any(|l| matches!(l, SessionLine::UserMessage { .. }));
-                                if has_content
+                                let is_fresh_startup = !has_content
+                                    && modified >= startup_cutoff
+                                    && lines.iter().any(|l| matches!(l, SessionLine::Meta { .. }));
+                                if (has_content || is_fresh_startup)
                                     && most_recent
                                         .as_ref()
                                         .map(|(t, _)| modified > *t)

@@ -274,9 +274,7 @@ Type `/` in the input bar to see completions. Commands are grouped by category:
 | `/config` | Show all settings — provider, model, roles, agent, context |
 | `/configure <intent>` | Change settings with natural language |
 | `/settings` | Open settings editor (roles, default model) |
-| `/prompt-mode [auto\|off\|status]` | Show or set prompt enhancement mode |
-| `/prompt-preview` | Preview the enhanced version of your next message |
-| `/prompt-rules [list\|add\|remove\|reset]` | Manage prompt enhancement rules |
+| `/enhance <prompt>` | Enhance your prompt with structured planning, review before sending |
 
 **Git**
 

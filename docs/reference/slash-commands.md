@@ -14,6 +14,17 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/help` | Display all key bindings and slash commands | `/help` | Output appears in the chat pane |
 | `/quit` | Exit clido | `/quit` | Equivalent to pressing `Ctrl+C` when idle |
 | `/init` | Re-run setup wizard | `/init` | Reconfigure provider, model, API key, and roles |
+| `/search <query>` | Search conversation history | `/search auth bug` | Highlights matching messages |
+| `/export` | Save conversation to a markdown file | `/export` | Saves to current directory |
+
+### Settings
+
+| Command | Description | Example | Notes |
+|---------|-------------|---------|-------|
+| `/config` | Show all settings | `/config` | Displays provider, model, roles, agent, context |
+| `/configure <intent>` | Change settings with natural language | `/configure use gpt-4.1` | |
+| `/settings` | Open settings editor | `/settings` | Edit roles and default model |
+| `/enhance <prompt>` | Enhance a prompt before sending | `/enhance fix the login bug` | Sends to utility model; result appears in input field for review. Press Enter to send or edit first |
 
 ### Model
 
@@ -34,6 +45,7 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/tokens` | Print input and output token usage | `/tokens` | |
 | `/compact` | Compact the context window immediately | `/compact` | Summarises history via LLM; shows before/after message count |
 | `/memory <query>` | Search long-term memory | `/memory error handling` | The agent also uses memory automatically |
+| `/todo` | Show the agent's current task list | `/todo` | Displays pending tasks from the current session |
 
 ### Git
 
@@ -73,6 +85,8 @@ Slash commands are typed in the TUI input field and executed immediately when yo
 | `/image <path>` | Attach an image to the next message | `/image screenshot.png` | Supports PNG, JPEG, GIF, WebP |
 | `/stop` | Interrupt current run | `/stop` | Cancels the in-progress agent turn without exiting |
 | `/copy` | Copy last assistant message to clipboard | `/copy` | Uses OSC 52 escape sequence; requires terminal support |
+| `/notify [on\|off]` | Toggle desktop notifications | `/notify on` | Shows system notifications when agent completes a turn |
+| `/index` | Show codebase index stats | `/index` | Build the index with `clido index build` |
 
 ## Using slash commands
 

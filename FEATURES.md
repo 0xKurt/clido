@@ -59,9 +59,10 @@ Note: Queue nav happens BEFORE history nav when items are queued.
 | `Ctrl+End` | Jump to bottom (enable follow mode) |
 | **Mouse wheel** | Scroll up/down |
 
-### Text Selection
-- **Shift + drag** - Select text (even with mouse capture enabled)
-- **Copy** - Selection goes to terminal's clipboard (Cmd/Ctrl+C in terminal)
+### Text Selection & Copy
+- **Shift + drag** — Select text character-by-character (works with mouse capture)
+- **Auto-copy** — Selection is copied to clipboard automatically on mouse release
+- **Toast** — A brief "Copied N chars" message appears near the cursor for 2 seconds
 
 ---
 
@@ -92,6 +93,12 @@ Type `/` in input to see autocomplete suggestions:
 | `/model <name>` | Switch model for this turn |
 | `/plan` | Toggle plan mode |
 | `/keys` | Show keybindings |
+| `/enhance <prompt>` | Enhance a prompt (review before sending) |
+| `/reviewer [on\|off]` | Toggle reviewer sub-agent |
+| `/copy [all\|n]` | Copy assistant message to clipboard |
+| `/notify [on\|off]` | Toggle desktop notifications |
+| `/search <query>` | Search conversation history |
+| `/export` | Save conversation to markdown file |
 
 ---
 
@@ -100,7 +107,7 @@ Type `/` in input to see autocomplete suggestions:
 | Action | Result |
 |--------|--------|
 | **Scroll wheel** | Scroll chat up/down |
-| **Shift + drag** | Select text (native terminal selection) |
+| **Shift + drag** | Select text (character-level, auto-copies to clipboard) |
 | **Click** | (Currently no click handling) |
 
 ---
@@ -153,6 +160,6 @@ Type `/` in input to see autocomplete suggestions:
 
 ## Known Limitations
 
-1. **Text selection**: Requires Shift+drag (terminal limitation with mouse capture)
+1. **Text selection**: Requires Shift+drag (terminal limitation with mouse capture). Auto-copies on release.
 2. **Click handling**: No click-to-focus or click-to-position yet
-3. **Copy mode**: Removed (Shift+drag works instead)
+3. **Clipboard**: OSC 52 clipboard integration may not work in all terminals or over SSH

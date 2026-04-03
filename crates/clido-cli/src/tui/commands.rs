@@ -1561,13 +1561,17 @@ pub(super) fn cmd_enhance(app: &mut App, cmd: &str) {
             "  Sends your prompt to the utility provider for intelligent".into(),
         ));
         app.push(ChatLine::Info(
-            "  structuring, then submits the enhanced version to the main agent.".into(),
+            "  structuring. The enhanced prompt appears in the input field".into(),
+        ));
+        app.push(ChatLine::Info(
+            "  so you can review and edit it before pressing Enter to send.".into(),
         ));
         app.push(ChatLine::Info("".into()));
         return;
     }
     // Queue: show "enhancing…" then send via channel so event_loop can await the async call.
     app.push(ChatLine::Info("  ✦ Enhancing prompt…".into()));
+    app.enhancing = true;
     // Store the raw prompt — event_loop will pick it up and call the LLM.
     app.pending_enhance = Some(raw.to_string());
 }

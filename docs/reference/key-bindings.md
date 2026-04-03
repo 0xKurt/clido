@@ -97,3 +97,24 @@ Appears when a non-recoverable error occurs.
 - Key bindings are not currently user-configurable. Custom bindings are planned for a future release.
 - `Ctrl+Y` and `/copy` rely on OSC 52 clipboard integration and may be blocked by some terminals or SSH hops.
 - macOS Terminal.app has limited key support. iTerm2 or Warp are recommended for the best TUI experience.
+
+## Mouse
+
+| Action | Result |
+|--------|--------|
+| Scroll wheel | Scroll chat up/down |
+| Shift + drag | Select text (character-level) |
+| Mouse release (after drag) | Auto-copy selection to clipboard |
+
+## Plan text editor (nano-style full-screen overlay)
+
+Opened with `/plan edit`.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` / `←` / `→` | Navigate cursor |
+| `Home` / `End` | Jump to start/end of line |
+| `Enter` | Insert new line |
+| `Backspace` / `Delete` | Delete character |
+| `Ctrl+S` | Save changes and close |
+| `Esc` / `Ctrl+C` | Discard changes and close |
